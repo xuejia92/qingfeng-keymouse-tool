@@ -246,7 +246,7 @@ class PublishApp:
         frm.pack(fill="x", **pad)
 
         tk.Label(frm, text="版本号：").grid(row=0, column=0, sticky="e")
-        self.version_var = tk.StringVar(value="3.1.0")
+        self.version_var = tk.StringVar(value="3.3.0")
         tk.Entry(frm, textvariable=self.version_var, width=16).grid(
             row=0, column=1, sticky="w", padx=(0, 18))
         tk.Label(frm, text="（如 3.1.0，自动加 v 前缀作为 tag）").grid(
