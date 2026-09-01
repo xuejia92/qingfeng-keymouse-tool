@@ -194,21 +194,32 @@ class TestUpgradeBat(unittest.TestCase):
     这类问题只在用户点「重启升级」时暴露，必须钉测试。
     """
 
-    def test_bat_generated_with_gbk_and_commands(self):
+    def test_bat_is_pure_ascii_and_derives_paths_at_runtime(self):
         exe = os.path.join(tempfile.gettempdir(), "清风自动化键鼠工具.exe")
         new = exe + ".new"
         bat = _write_upgrade_bat(exe, new)
         try:
             self.assertTrue(os.path.isfile(bat), "应生成 bat 文件")
-            with open(bat, encoding="gbk") as f:   # 中文路径必须 GBK 可读回
-                content = f.read()
-            self.assertIn("清风自动化键鼠工具.exe", content)
-            self.assertIn(":wait", content)                # 等待循环
-            self.assertIn("tasklist", content)
-            self.assertIn(f'del /f /q "{exe}"', content)  # 删旧 exe
-            self.assertIn(f'move /y "{new}" "{exe}"', content)  # 顶替
-            self.assertIn(f'start "" "{exe}"', content)   # 启动新程序
-            self.assertIn('del /f /q "%~f0"', content)    # 自删
+            with open(bat, "rb") as f:
+                raw = f.read()
+            # 纯 ASCII 是硬约束：cmd 按 ANSI 代码页解析 bat，GBK/UTF-8 不一致
+            # 时中文路径全乱码（曾经的事故）；含任何非 ASCII 字节则解码直接失败
+            content = raw.decode("ascii")
+            self.assertNotIn("清风", content)      # 中文路径不写进文本
+            self.assertNotIn(exe, content)
+            # 运行时用 %~f0（bat 名 = <exe>.upgrade.bat）反推 exe 路径
+            self.assertIn('set "EXE=%SELF:.upgrade.bat=%"', content)
+            # 等待循环：del 探测（删得动=进程退出且锁释放）+ ping 延时
+            # （timeout 在无控制台的分离进程里会报 Input redirection 错误失效）
+            self.assertIn(":wait", content)
+            self.assertIn("goto wait", content)
+            self.assertIn("del /f /q", content)
+            self.assertIn("ping -n 2 127.0.0.1", content)
+            self.assertIn("geq 120", content)      # 超时兜底，不死等
+            # 顶替、启动、自删
+            self.assertIn("move /y", content)
+            self.assertIn('start "" "%EXE%"', content)
+            self.assertIn('del /f /q "%~f0"', content)
         finally:
             if os.path.isfile(bat):
                 os.remove(bat)

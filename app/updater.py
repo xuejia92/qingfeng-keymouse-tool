@@ -236,32 +236,55 @@ def download_update(url: str, dest: str, progress_cb=None, stop_event=None,
 
 
 def _write_upgrade_bat(exe: str, new: str) -> str:
-    """写升级收尾 bat（GBK 编码，兼容中文路径），返回 bat 路径；失败返回 ""。
+    """写升级收尾 bat（内容纯 ASCII，任何系统代码页下 cmd 都不会解析乱码）。
 
-    逻辑：轮询等待当前 exe 进程完全退出 -> 删除旧 exe -> 新 exe(.new) 顶替 ->
-    启动新程序 -> 删除自身。由独立 cmd 进程执行：不碰运行中的 exe、不依赖主程序。
+    中文 exe 路径绝不写进 bat 文本：cmd 用系统 ANSI 代码页解析 bat，与写入
+    编码一旦不符（如系统开了 UTF-8 全局支持）整份脚本就乱码失效。这里 bat
+    固定命名为 <exe>.upgrade.bat，运行时用 %~f0 反推出 exe 路径，文本里
+    只有 ASCII。
+
+    逻辑：轮询尝试删除旧 exe（删得动 = 进程已退出且文件锁已释放，比
+    tasklist 匹配中文名可靠；timeout 在无控制台的分离进程里会报
+    "Input redirection is not supported" 失效，故用 ping 延时）->
+    新 exe(.new) 顶替 -> 启动新程序 -> 自删。等待约 120 秒仍删不动、或
+    顶替失败重试 10 次仍不行就放弃并启动现有 exe，绝不让用户程序凭空
+    消失。失败返回 ""。
     """
-    exe_name = os.path.basename(exe)
     bat = exe + ".upgrade.bat"
     lines = [
         "@echo off",
-        "rem 清风自动化键鼠工具升级收尾脚本（由 updater 生成，可安全删除）",
+        "rem QingFeng auto-upgrade finalizer (auto-generated, safe to delete)",
+        "setlocal",
+        "rem %~f0 is <exe>.upgrade.bat; strip the suffix to get the exe path",
+        'set "SELF=%~f0"',
+        'set "EXE=%SELF:.upgrade.bat=%"',
+        'set "NEW=%EXE%.new"',
+        "set /a tries=0",
         ":wait",
-        f'tasklist /FI "IMAGENAME eq {exe_name}" 2>nul | find /i "{exe_name}" >nul',
-        "if not errorlevel 1 (",
-        "    timeout /t 1 /nobreak >nul",
-        "    goto wait",
-        ")",
-        f'del /f /q "{exe}" 2>nul',
-        f'move /y "{new}" "{exe}" >nul 2>&1',
-        f'start "" "{exe}"',
-        'del /f /q "%~f0" 2>nul',
+        'if not exist "%EXE%" goto replace',
+        'del /f /q "%EXE%" >nul 2>&1 && goto replace',
+        "set /a tries+=1",
+        "if %tries% geq 120 goto finish",
+        "ping -n 2 127.0.0.1 >nul",
+        "goto wait",
+        ":replace",
+        'move /y "%NEW%" "%EXE%" >nul 2>&1 && goto finish',
+        "set /a tries+=1",
+        "if %tries% geq 130 goto finish",
+        "ping -n 2 127.0.0.1 >nul",
+        "goto replace",
+        ":finish",
+        'if exist "%EXE%" start "" "%EXE%"',
+        'del /f /q "%~f0" >nul 2>&1',
+        "endlocal",
     ]
     try:
-        with open(bat, "w", encoding="gbk", errors="replace") as f:
-            f.write("\r\n".join(lines) + "\r\n")
+        text = "\r\n".join(lines) + "\r\n"
+        text.encode("ascii")                 # 纯 ASCII 是硬约束，意外混入即报错
+        with open(bat, "w", encoding="ascii", newline="") as f:
+            f.write(text)
         return bat
-    except OSError:
+    except (OSError, UnicodeEncodeError):
         return ""
 
 
@@ -311,7 +334,11 @@ def install_update(downloaded: str) -> tuple[bool, str]:
 
 
 def cleanup_old_exe() -> None:
-    """启动时清理上次更新残留的 *.old（旧进程退出后才能删掉，删不掉静默跳过）。"""
+    """启动时清理上次更新残留的 *.old 与升级脚本（脚本通常已自删，此处兜底）。
+
+    *.new 不清：那是升级失败时留下的新版本 exe，删了用户就要重新下载 145MB。
+    """
     exe = current_exe_path()
     if exe:
         _remove(exe + ".old")
+        _remove(exe + ".upgrade.bat")
