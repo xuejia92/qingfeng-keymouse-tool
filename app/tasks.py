@@ -401,9 +401,12 @@ def _coord_from_var(expr: str, variables: dict | None, default: int) -> int:
 
 def _coord_from_pos_var(expr: str, variables: dict | None,
                         default_x: int, default_y: int) -> tuple[int, int]:
-    """解析坐标变量：变量值为 "x,y" 字符串（如 "64,63"）。
+    """解析坐标变量：取变量的中心坐标。
 
-    也容忍列表/元组 [x, y]。未定义、格式不对时回退固定坐标。
+    支持两种格式：
+      - 坐标 "x,y"（如 "64,63"）→ 直接用该点；
+      - 矩形区域 "x1,y1,x2,y2"（左上角+右下角，找图模块结果）→ 取区域中心点。
+    也容忍列表/元组 [x, y] 或 [x1, y1, x2, y2]。未定义、格式不对时回退固定坐标。
     """
     name = (expr or "").strip()
     if not name:
@@ -413,16 +416,18 @@ def _coord_from_pos_var(expr: str, variables: dict | None,
         log(f"坐标变量「{name}」未定义，使用固定坐标 ({int(default_x)},{int(default_y)})")
         return int(default_x), int(default_y)
     try:
-        if isinstance(value, (list, tuple)) and len(value) >= 2:
-            x, y = int(float(value[0])), int(float(value[1]))
+        if isinstance(value, (list, tuple)):
+            parts = [int(float(v)) for v in value]
         else:
-            parts = str(value).strip().split(",")
-            if len(parts) < 2:
-                raise ValueError
-            x, y = int(float(parts[0].strip())), int(float(parts[1].strip()))
-        return x, y
+            parts = [int(float(v.strip())) for v in str(value).strip().split(",")]
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        if len(parts) == 4:
+            x1, y1, x2, y2 = parts
+            return (x1 + x2) // 2, (y1 + y2) // 2
+        raise ValueError
     except (TypeError, ValueError):
-        log(f"坐标变量「{name}」的值不是 \"x,y\" 格式（{value!r}），"
+        log(f"坐标变量「{name}」的值不是 \"x,y\" 或 \"x1,y1,x2,y2\" 格式（{value!r}），"
             f"使用固定坐标 ({int(default_x)},{int(default_y)})")
         return int(default_x), int(default_y)
 
@@ -431,7 +436,8 @@ def run_click_step(p: dict, stop: threading.Event, progress, variables: dict | N
     """公共鼠标点击循环。返回结束原因。
 
     variables: 流程运行期变量（可选）。固定坐标模式下 pos_var 非空时，
-    坐标优先取变量值（"x,y" 字符串，如 "64,63"），未定义或格式不对回退 pos_x / pos_y。
+    坐标优先取变量值（"x,y" 坐标，或 "x1,y1,x2,y2" 区域取中心），
+    未定义或格式不对回退 pos_x / pos_y。
     """
     button = p.get("mouse_button", "left")
     times = 2 if p.get("click_type") == "double" else 1

@@ -772,7 +772,8 @@ class StepParamsDialog(QDialog):
             self.follow_radio = QRadioButton("跟随当前鼠标")
             self.fixed_radio = QRadioButton("固定坐标")
             self.var_radio = QRadioButton("变量坐标")
-            self.var_radio.setToolTip("选变量后以变量值作为坐标，格式 \"64,63\"（x,y）")
+            self.var_radio.setToolTip("选变量后以变量值作为坐标：\"64,63\"（x,y），"
+                                      "或 \"100,200,400,500\" 区域（自动取中心）")
             pos_row.addWidget(self.follow_radio)
             pos_row.addWidget(self.fixed_radio)
             pos_row.addWidget(self.var_radio)
@@ -798,7 +799,8 @@ class StepParamsDialog(QDialog):
 
             # 变量坐标控件行：变量下拉（仅变量坐标模式显示）
             self.pos_var = self._var_combo("（请选择变量）")
-            self.pos_var.setToolTip("必须选择一个流程变量，其值为坐标字符串 \"64,63\"（x,y）")
+            self.pos_var.setToolTip("必须选择一个流程变量，其值为坐标字符串 \"64,63\"（x,y）"
+                                    "或区域 \"100,200,400,500\"（自动取中心点）")
             self._var_pos_widget = QWidget()
             var_row = QHBoxLayout(self._var_pos_widget)
             var_row.setContentsMargins(0, 0, 0, 0)

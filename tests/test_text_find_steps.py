@@ -227,6 +227,30 @@ class TestClickStepVariableCoords(unittest.TestCase):
         click, _ = self._run(self._params(), None)
         click.assert_called_once_with("left", 1, 1, 2)
 
+    def test_uses_region_value_takes_center(self):
+        """区域 \"x1,y1,x2,y2\"（找图模块结果）→ 取中心点。"""
+        click, reason = self._run(
+            self._params(pos_var="pos"), {"pos": "100,200,400,500"})
+        self.assertIn("已完成", reason)
+        click.assert_called_once_with("left", 1, 250, 350)
+
+    def test_uses_region_value_odd_center(self):
+        """奇数宽高的区域中心向下取整。"""
+        click, _ = self._run(
+            self._params(pos_var="pos"), {"pos": "10,20,31,41"})
+        click.assert_called_once_with("left", 1, 20, 30)
+
+    def test_uses_region_value_from_list(self):
+        """列表 [x1,y1,x2,y2] 同样取中心。"""
+        click, _ = self._run(
+            self._params(pos_var="pos"), {"pos": [100, 200, 400, 500]})
+        click.assert_called_once_with("left", 1, 250, 350)
+
+    def test_three_parts_falls_back_to_numeric(self):
+        """3 个数字（非法格式）回退固定坐标。"""
+        click, _ = self._run(self._params(pos_var="pos"), {"pos": "1,2,3"})
+        click.assert_called_once_with("left", 1, 1, 2)
+
 
 # ---------- config ----------
 

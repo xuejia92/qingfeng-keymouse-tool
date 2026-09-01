@@ -211,7 +211,7 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "mouse_button": c.mouse_button, "click_type": c.click_type,
             "interval_ms": c.interval_ms, "fixed_position": c.fixed_position,
             "pos_x": c.pos_x, "pos_y": c.pos_y,
-            "pos_var": "",                      # 坐标变量：值形如 "64,63" 的字符串，非空时优先于固定坐标
+            "pos_var": "",                      # 坐标变量：值形如 "64,63"（x,y）或 "100,200,400,500"（区域取中心），非空时优先于固定坐标
             "count": c.count if c.count > 0 else 1, "duration_sec": c.duration_sec,
             # 后台操作：按窗口标题动态查找目标窗口（句柄每次重启都变，不能存死）
             "background": False, "window_title": "",
