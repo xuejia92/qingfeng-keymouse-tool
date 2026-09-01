@@ -1,0 +1,7 @@
+dialog_hidden: True
+overlay_created: 1
+adjusting: adjusting
+overlay_closed: True
+dialog_visible_again: True
+dialog_image: tpl_20260829_210454.png
+step_params: {'image': '', 'confidence': 0.85, 'interval_ms': 500, 'click_type': 'single', 'offset_x': 0, 'offset_y': 0, 'search_timeout_sec': 10.0, 'region': ''}

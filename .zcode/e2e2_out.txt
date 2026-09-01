@@ -1,0 +1,4 @@
+exec 结果: 0 (1=Accepted 即用户点了 OK)
+对话框内 image: None
+apply 后 step image: ''
+apply 后 step image_path: None

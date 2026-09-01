@@ -1,0 +1,43 @@
+{
+  "id": "fefb0271b654",
+  "name": "测试运行",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "myvar",
+        "type": "list",
+        "default_value": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": ""
+    },
+    {
+      "type": "ocr",
+      "name": "文字识别",
+      "params": {
+        "region": "60,1304,125,66",
+        "variable": "myvar",
+        "lang": "ch",
+        "multi_ocr": true
+      },
+      "continue_on_fail": false,
+      "pair_id": ""
+    },
+    {
+      "type": "log",
+      "name": "日志输出",
+      "params": {
+        "variables": "myvar",
+        "text": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": ""
+    }
+  ],
+  "variables": [],
+  "hotkey": "alt+shift+p",
+  "loops": 1,
+  "order": 0
+}

@@ -1,0 +1,16 @@
+﻿# 运行时依赖：安装这些即可直接运行源码（python main.py）
+PySide6>=6.6
+keyboard>=0.13.5
+pynput>=1.7.6
+mss>=9.0
+opencv-python>=4.8
+numpy>=1.24
+Pillow>=10.0
+DrissionPage>=4.1
+
+# 文字识别（可选，仅「文字识别」步骤需要）：
+# 用 RapidOCR（onnxruntime 推理版），依赖只有 onnxruntime + PP-OCR 模型，
+# 合计约 60MB，远小于 PaddleOCR（paddlepaddle+torch 约 1GB），且可打包进 exe。
+# 需要时手动安装（必须装到与运行程序一致的 Python 解释器里）：
+#   pip install rapidocr_onnxruntime
+# 模型随包内置（PP-OCRv4，中英混合），首次识别无需再下载。

@@ -1,0 +1,6 @@
+# 开发与构建依赖：只在打包 / 跑测试时才需要
+#   pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+# 打包工具（Nuitka 方案：体积小、抗反编译；需要 C 编译器，首次自动下载 MinGW）
+nuitka>=2.0

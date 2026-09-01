@@ -1,0 +1,22 @@
+[ WARN:0@0.253] global loadsave.cpp:268 cv::findDecoder imread_(''): can't open/read file: check file path/integrity
+=== 审计结果 ===
+  OK  找图/添加模板(遮罩拦截)
+  OK  找图/编辑(有选中行)
+  OK  找图/删除(拦截No)
+  OK  找图/启动全部(空模板秒失败)
+  OK  找图/停止全部
+  OK  连点/取当前坐标
+  OK  设置/打开按钮 x3
+  OK  流程/新建(元信息框)
+  OK  流程/编辑元信息
+  OK  流程/步骤参数
+  OK  流程/删除步骤
+  OK  流程/运行(等待0.5s步)
+  OK  流程/全部停止
+  OK  流程/删除流程(拦截No)
+=== 配色抽查 ===
+  连点启动(空闲): neutral (expect btnSuccess)
+  连点启动(运行中): btnDanger (expect btnDanger)
+  找图: 添加 btnSuccess | 编辑 btnPrimary | 删除 btnDanger | 启停选中 btnSuccess | 启动全部 btnSuccess | 停止全部 btnDanger
+  流程: 新建 btnSuccess | 编辑 btnPrimary | 删除 btnDanger | 运行(空闲) btnSuccess | 全停 btnDanger
+DONE

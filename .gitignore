@@ -1,0 +1,33 @@
+*.iml
+.gradle
+/local.properties
+/.idea/workspace.xml
+/.idea/libraries
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+/.idea
+/manager/signing.properties
+/out
+/signing.properties
+/dist
+/build_nuitka
+/build_pyinstaller
+/cap-img-toupai
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 打包残留
+*.old
+*.download

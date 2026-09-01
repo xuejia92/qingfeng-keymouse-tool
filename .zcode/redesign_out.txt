@@ -1,0 +1,14 @@
+[1] 左栏流程数: 1 (expect 1)
+[2] 右栏标题: 「签到流程」要执行的模块（0 步 · 1 轮）
+[3] 空流程占位: 1 行 (expect 1 行占位)
+[4] 拖入3步: ['click', 'wait', 'press'] (expect click/wait/press)
+[5] 右栏行数: 3 (expect 3)
+[6] 排序后: ['wait', 'press', 'click'] (expect wait/press/click)
+[7] wait 参数改 2.5s: 2.5 (expect 2.5)
+[8] 运行中列表锁定: True (expect True)
+[9] 运行中模块按钮锁定: True (expect True)
+[10] 锁定标题: 模块面板（流程运行中，已锁定编辑）
+[11] 停止后列表解锁: True (expect True)
+[12] 停止后标题: 模块面板（拖到下方步骤列表）
+[13] 元信息对话框: 发帖流程 3 f11 (expect 发帖流程 3 f11)
+rendered, ALL DONE

@@ -1,0 +1,9 @@
+[1] 对话框打开: True
+libpng error: Read Error
+[2] 点击后对话框隐藏: False | 请求发出: True
+[3] 新模板回写对话框: 'tpl_repick.png' | 预览路径: 'C:\\Users\\Administrator\\AppData\\Local\\Temp\\tpl_repick.png'
+[4] 对话框恢复: True
+libpng error: Read Error
+[5] 任务 image: 'tpl_repick.png' (expect tpl_repick.png)
+[6] 任务 image_path: 'C:\\Users\\Administrator\\AppData\\Local\\Temp\\tpl_repick.png' (expect fake 绝对路径)
+DONE

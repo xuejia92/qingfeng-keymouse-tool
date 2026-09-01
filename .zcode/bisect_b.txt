@@ -1,0 +1,21 @@
+two windows up
+exec
+quitting
+Timeout (0:00:08)!
+Thread 0x00006520 (most recent call first):
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 355 in wait
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\queue.py", line 171 in get
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\site-packages\keyboard\_generic.py", line 57 in process
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1012 in run
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075 in _bootstrap_inner
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1032 in _bootstrap
+
+Thread 0x00004910 (most recent call first):
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\site-packages\keyboard\_winkeyboard.py", line 563 in listen
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\site-packages\keyboard\__init__.py", line 294 in listen
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1012 in run
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075 in _bootstrap_inner
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1032 in _bootstrap
+
+Thread 0x00002668 (most recent call first):
+  File "<stdin>", line 22 in <module>

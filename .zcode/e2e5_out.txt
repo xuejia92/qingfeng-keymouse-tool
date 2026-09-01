@@ -1,0 +1,7 @@
+[1] 参数对话框打开: True
+[2] 遮罩创建: 1
+[3] 对话框内 image: tpl_20260829_211331.png
+[4] OK 后 step image: 'tpl_20260829_211331.png'
+[5] OK 后 image_path: 'C:\\Users\\Administrator\\Desktop\\program\\清风自动化键鼠工具\\templates\\tpl_20260829_211331.png'
+[6] config.json image: 'tpl_20260829_211331.png'
+[7] config.json image_path: 'C:\\Users\\Administrator\\Desktop\\program\\清风自动化键鼠工具\\templates\\tpl_20260829_211331.png'

@@ -1,0 +1,6 @@
+[1] 参数对话框打开: True
+[2] 遮罩创建: 1 (expect 1)
+[3] 对话框内 image: tpl_20260829_211215.png
+[4] OK 后 step image: ''
+[5] OK 后 image_path: None
+[6] config.json image: ''

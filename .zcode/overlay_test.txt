@@ -1,0 +1,9 @@
+[1] 初始隐藏: True (expect True)
+[2] 运行中悬浮窗可见: True (expect True)
+[3] 头部摘要: ● 运行中：流程:悬浮窗测试
+[4] 日志行数: 4 (expect >2)
+[5] 穿透标志: True | WA_TransparentForMouseEvents: True
+[6] 结束后悬浮窗隐藏: True (expect True)
+[7] 日志保留行数: 8
+rendered
+DONE

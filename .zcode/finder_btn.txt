@@ -1,0 +1,11 @@
+== 场景1：未选中任何行，点启动/停止选中 ==
+  无提示且无 runner: {} (当前实现是静默返回)
+== 场景2：选中第0行（有模板），点启动 ==
+  runner 运行中: True
+  状态单元格: 运行中
+  超时后运行中: False (expect False)
+  状态单元格: 停止（等待目标超时）
+== 场景3：选中第1行（无模板），点启动 ==
+[ WARN:0@1.701] global loadsave.cpp:268 cv::findDecoder imread_(''): can't open/read file: check file path/integrity
+  状态单元格: 停止（模板图加载失败）
+DONE

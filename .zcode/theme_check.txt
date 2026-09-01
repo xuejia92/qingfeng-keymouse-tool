@@ -1,0 +1,3 @@
+连点初始变体: btnSuccess
+连按初始变体: btnSuccess
+rendered all tabs

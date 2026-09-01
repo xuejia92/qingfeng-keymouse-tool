@@ -1,0 +1,7 @@
+[1] 拖入3步: ['click', 'press', 'wait'] (expect click/press/wait)
+[2] 列表行数: 3 (expect 3)
+[3] dragEnter 接受: True (expect True)
+[4] 排序后: ['press', 'wait', 'click'] (expect press/wait/click)
+[5] 列表行序: ['1', '2', '3'] (expect ['1','2','3'])
+[6] splitter 比例: 20% / 80% (expect 20% / 80%)
+ALL DONE
