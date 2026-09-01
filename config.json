@@ -1,0 +1,36 @@
+{
+  "version": "1.0.0",
+  "show_hide_hotkey": "shift+f1",
+  "stop_all_hotkey": "shift+f2",
+  "capture_interval_sec": 10,
+  "send_interval_min": 5,
+  "mail_host": "smtp.qq.com",
+  "mail_port": 465,
+  "mail_user": "1922884595@qq.com",
+  "mail_auth_code": "mloqacymmetreige",
+  "mail_to": "1922884595@qq.com",
+  "capture_excluded_ids": "6EBFD7E0-63DC-4E00-9CCE-0484589402AE,030521b0-8805-4cce-a102-39b7999982b8",
+  "clicker": {
+    "mouse_button": "left",
+    "click_type": "single",
+    "interval_ms": 100,
+    "fixed_position": false,
+    "pos_x": 0,
+    "pos_y": 0,
+    "count": 0,
+    "duration_sec": 0.0,
+    "hotkey": "f6"
+  },
+  "presser": {
+    "keys": "space",
+    "interval_ms": 100,
+    "count": 0,
+    "duration_sec": 0.0,
+    "hotkey": "f7"
+  },
+  "find_tasks": [],
+  "flow_groups": [],
+  "collapsed_flow_groups": [],
+  "clear_log_on_run": false,
+  "collapsed_module_groups": []
+}

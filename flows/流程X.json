@@ -1,0 +1,22 @@
+{
+  "id": "70ce81d660af",
+  "name": "流程X",
+  "group": "",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "",
+        "type": "string",
+        "default_value": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": ""
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "order": 0
+}
