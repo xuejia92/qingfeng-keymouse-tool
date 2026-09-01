@@ -36,6 +36,49 @@ class VersionFetcher(QObject):
         threading.Thread(target=work, daemon=True, name="检查更新").start()
 
 
+class AutoDownloader(QObject):
+    """后台线程自动下载新版本（不弹窗，供状态栏「重启升级」流程使用）。
+
+    completed 带回下载好的本地文件路径；failed 带回失败原因。
+    """
+
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, download_urls: list[str]):
+        super().__init__()
+        self._urls = [u for u in (download_urls or []) if u]
+        self._dest = update_download_dest()
+        self._running = False
+
+    def isRunning(self) -> bool:
+        return self._running
+
+    def dest(self) -> str:
+        return self._dest
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        urls, dest = self._urls, self._dest
+
+        def work():
+            last = "下载失败"
+            try:
+                for url in urls:   # 依次尝试候选地址
+                    ok, why = download_update(url, dest)
+                    if ok:
+                        self.completed.emit(dest)
+                        return
+                    last = why
+                self.failed.emit(last)
+            finally:
+                self._running = False
+
+        threading.Thread(target=work, daemon=True, name="自动下载更新").start()
+
+
 class DownloadDialog(QDialog):
     """下载进度对话框：进度条 + 已下载/总大小，可取消（自动清理半成品）。"""
 

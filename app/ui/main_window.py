@@ -24,7 +24,7 @@ from .finder_tab import FinderTab
 from .flow_tab import FlowTab
 from .presser_tab import PresserTab
 from .settings_tab import SettingsTab
-from .update_dialog import DownloadDialog, VersionFetcher
+from .update_dialog import AutoDownloader, VersionFetcher
 
 # 基准设计分辨率与对应窗口尺寸：2560x1440 屏 → 1300x900
 _BASE_SCREEN = (2560, 1440)
@@ -115,7 +115,8 @@ class MainWindow(QMainWindow):
         blay.addWidget(stop_btn)
         self.statusBar().addPermanentWidget(bottom)
         self.statusBar().setStyleSheet("QStatusBar{border-top: 1px solid #ddd;}")
-        # 状态栏左下角：红点 + 可点击「发现新版本」提示（默认隐藏，检测到新版才显示）
+        # 状态栏左下角：红点 + 提示文字 + 「重启升级」按钮
+        # 检测到新版本自动后台下载：红点 +「已检测到新版本」→ 下载完成按钮可用
         self.update_dot = QLabel()
         self.update_dot.setFixedSize(10, 10)
         self.update_dot.setStyleSheet("background: #e53935; border-radius: 5px;")
@@ -123,11 +124,21 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.update_dot)
         self.update_hint = QLabel()
         self.update_hint.setStyleSheet("color: #1668a8; font-weight: 600; padding: 2px 6px;")
-        self.update_hint.linkActivated.connect(lambda _: self._prompt_update())
         self.update_hint.hide()
         self.statusBar().addWidget(self.update_hint)
+        self.update_btn = QPushButton("重启升级")
+        self.update_btn.setStyleSheet(
+            "QPushButton{background:#1668a8; color:white; border:none;"
+            " border-radius:4px; padding:3px 14px; font-weight:600;}"
+            "QPushButton:disabled{background:#9bb8d4;}")
+        self.update_btn.clicked.connect(self._restart_upgrade)
+        self.update_btn.hide()
+        self.statusBar().addWidget(self.update_btn)
         self._refresh_status_hint()
         self._pending_update: tuple[str, list[str]] | None = None
+        self._downloaded_file: str | None = None
+        self._update_state = "idle"        # idle / downloading / ready / failed
+        self._update_fail_reason = ""
 
         # ---- 信号接线 ----
         self.clicker_tab.changed.connect(self._on_clicker_changed)
@@ -482,54 +493,79 @@ class MainWindow(QMainWindow):
             logging.getLogger(__name__).info("检查更新：当前 %s 已是最新（远端 %s）",
                                              local, remote)
             return
-        logging.getLogger(__name__).info("发现新版本：%s -> %s，下载地址：%s",
+        # 已有更新流程（下载中 / 已就绪 / 失败待重试）时不重复触发
+        if self._update_state != "idle":
+            return
+        logging.getLogger(__name__).info("发现新版本：%s -> %s，开始自动下载：%s",
                                          local, remote, download_urls[0])
-        # 不弹窗：状态栏左下角显示红点 + 可点击提示，用户点击后再弹下载确认
+        # 不弹窗：红点 + 提示文字，后台线程自动下载，完成后「重启升级」按钮可用
         self._pending_update = (remote, download_urls)
+        self._set_update_state("downloading")
+        self._start_auto_download(download_urls)
+
+    def _start_auto_download(self, download_urls: list[str]) -> None:
+        """后台线程自动下载新版本到本地（不打断用户操作）。"""
+        self._downloader = AutoDownloader(download_urls)
+        self._downloader.completed.connect(self._on_download_completed)
+        self._downloader.failed.connect(self._on_download_failed)
+        self._downloader.start()
+
+    def _on_download_completed(self, file: str) -> None:
+        self._downloaded_file = file
+        self._update_state = "ready"
+        self._set_update_state("ready")
+        logging.getLogger(__name__).info("新版本已下载到本地：%s", file)
+
+    def _on_download_failed(self, err: str) -> None:
+        self._update_fail_reason = err
+        self._update_state = "failed"
+        self._set_update_state("failed")
+        logging.getLogger(__name__).warning("自动下载新版本失败：%s", err)
+
+    def _set_update_state(self, state: str) -> None:
+        """按状态刷新状态栏左下角的红点 / 提示文字 / 按钮。"""
+        self._update_state = state
+        if state == "idle":
+            self.update_dot.hide()
+            self.update_hint.hide()
+            self.update_btn.hide()
+            return
+        remote = (self._pending_update or ("", []))[0]
         self.update_dot.show()
-        self.update_hint.setText(
-            f'<a href="update" style="color:#1668a8; text-decoration:none;">'
-            f'发现新版本 {remote}，点击更新</a>')
-        self.update_hint.setToolTip(f"当前 {local}，点击下载新版本")
         self.update_hint.show()
+        self.update_btn.show()
+        if state == "downloading":
+            self.update_hint.setText(f"已检测到新版本 {remote}，正在自动下载…")
+            self.update_btn.setText("下载中…")
+            self.update_btn.setEnabled(False)
+        elif state == "ready":
+            self.update_hint.setText(f"新版本 {remote} 已下载")
+            self.update_btn.setText("重启升级")
+            self.update_btn.setEnabled(True)
+        elif state == "failed":
+            self.update_hint.setText(f"新版本 {remote} 下载失败")
+            self.update_btn.setText("重新下载")
+            self.update_btn.setEnabled(True)
 
-    def _prompt_update(self) -> None:
-        """用户点击状态栏「发现新版本」提示后，弹窗询问是否下载。"""
-        if not self._pending_update:
-            return
-        remote, download_urls = self._pending_update
-        local = self.cfg.version or "1.0.0"
-        ans = QMessageBox.question(
-            self, "发现更新",
-            f"发现新版本 {remote}（当前 {local}）。\n\n"
-            "是否立即下载更新？\n"
-            "下载完成后会自动替换本程序 exe 并关闭程序，重新打开即是新版本。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if ans != QMessageBox.StandardButton.Yes:
-            return
-        self._do_download(remote, download_urls)
-
-    def _do_download(self, remote: str, download_urls: list[str]) -> None:
-        """执行下载与替换（供 _prompt_update 调用）。"""
-        file, err = DownloadDialog.run(remote, download_urls, self)
-        if file is None:
-            if err:
-                QMessageBox.warning(self, "更新失败",
-                                    f"下载失败：{err}\n\n下载地址：{download_urls[0]}\n\n"
-                                    "请确认该地址可访问（Gitee 需已发布对应版本的"
-                                    "「发行版/Release」并上传 exe 附件），"
-                                    "或在远端 dist/config.json 里配置 download_url 直链。")
-            return
-        ok, why = install_update(file)
-        if not ok:
-            QMessageBox.warning(self, "更新失败", why)
-            return
-        # 本地 version 写成发布 tag 原文（如 v3.0.1），避免下次重复提示
-        self.cfg.version = remote
-        self.cfg.save()
-        logging.getLogger(__name__).info("更新完成：已替换为 %s，程序退出", remote)
-        self.shutdown()
-        QApplication.quit()
+    def _restart_upgrade(self) -> None:
+        """左下角「重启升级 / 重新下载」按钮：已就绪则替换 exe 并重启，
+        失败则重新自动下载。"""
+        if self._update_state == "ready" and self._downloaded_file:
+            ok, why = install_update(self._downloaded_file)
+            if not ok:
+                QMessageBox.warning(self, "更新失败", why)
+                return
+            remote = (self._pending_update or ("", []))[0]
+            if remote:
+                self.cfg.version = remote
+                self.cfg.save()
+            logging.getLogger(__name__).info("重启升级：已替换为 %s，程序退出", remote)
+            self.shutdown()
+            QApplication.quit()
+        elif self._update_state == "failed":
+            urls = (self._pending_update or ("", []))[1]
+            self._set_update_state("downloading")
+            self._start_auto_download(urls)
 
     # ---------- 窗口显隐 ----------
     def _hide_for_capture(self) -> None:
