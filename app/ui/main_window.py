@@ -563,8 +563,9 @@ class MainWindow(QMainWindow):
         if state == "downloading":
             self.update_hint.setText(f"已检测到新版本 {remote}，正在自动下载…")
             self.update_btn.setText("下载中…")
-            self.update_btn.setEnabled(True)   # 可点击：展开/收起实时进度条
-            self.update_progress.setVisible(self._progress_visible)
+            self.update_btn.setEnabled(True)   # 可点击：收起/展开实时进度条
+            self._progress_visible = True       # 默认展开进度条，点击可收起
+            self.update_progress.setVisible(True)
         elif state == "ready":
             self.update_hint.setText(f"新版本 {remote} 已下载")
             self.update_btn.setText("重启升级")
@@ -599,9 +600,7 @@ class MainWindow(QMainWindow):
             QApplication.quit()
         elif self._update_state == "failed":
             urls = (self._pending_update or ("", []))[1]
-            self._progress_visible = False
-            self.update_progress.hide()
-            self._set_update_state("downloading")
+            self._set_update_state("downloading")   # 内部默认展开进度条
             self._start_auto_download(urls)
 
     # ---------- 窗口显隐 ----------
