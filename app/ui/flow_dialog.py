@@ -420,12 +420,16 @@ class StepParamsDialog(QDialog):
             QMessageBox.warning(self, "请设置变量坐标",
                                 "已选择「变量坐标」，请选择流程中声明的坐标变量。")
             return
-        # 截图步骤：变量保存必须选择结果变量，否则截图路径无处可存
-        if self._step.type == "screenshot" and getattr(self, "save_var_radio", None) is not None \
-                and self.save_var_radio.isChecked() and not self._combo_value(self.shot_variable):
-            QMessageBox.warning(self, "请设置结果变量",
-                                "已选择「变量保存」，请选择接收截图路径的结果变量。")
-            return
+        # 截图步骤：必须框选区域，且必须选择结果变量（变量保存/自选保存都会写入路径）
+        if self._step.type == "screenshot" and getattr(self, "save_var_radio", None) is not None:
+            if not getattr(self, "_region", ""):
+                QMessageBox.warning(self, "请设置截图区域",
+                                    "请先点击「框选区域…」选择截图区域。")
+                return
+            if not self._combo_value(self.shot_variable):
+                QMessageBox.warning(self, "请设置结果变量",
+                                    "请选择接收截图路径的结果变量（变量保存和自选保存都会写入）。")
+                return
         super().accept()
 
     def _flow_var_names(self) -> list[str]:
@@ -478,16 +482,9 @@ class StepParamsDialog(QDialog):
         self._var_pos_widget.setVisible(self.var_radio.isChecked())
         self.adjustSize()
 
-    def _sync_shot_rows(self) -> None:
-        """截图方式联动：只有「指定区域」才显示区域行。"""
-        mode = self.shot_mode.currentData()
-        self._shot_region_widget.setVisible(mode == "region")
-        self.adjustSize()
-
     def _sync_shot_save_rows(self) -> None:
-        """保存位置二选一：变量保存 -> 结果变量行；自选保存 -> 说明行。"""
+        """保存位置二选一：自选保存时显示说明行（结果变量行两种方式都常显）。"""
         var_mode = self.save_var_radio.isChecked()
-        self._shot_var_widget.setVisible(var_mode)
         self._shot_choose_hint_widget.setVisible(not var_mode)
         self.adjustSize()
 
@@ -624,15 +621,7 @@ class StepParamsDialog(QDialog):
             form.addRow("", hint)
 
         elif t == "screenshot":
-            self.shot_mode = QComboBox()
-            self.shot_mode.addItem("全屏截图", "fullscreen")
-            self.shot_mode.addItem("指定区域截图", "region")
-            self.shot_mode.addItem("自己框选截图", "select")
-            self.shot_mode.setToolTip(
-                "全屏=整个虚拟桌面；指定区域=用下方保存的区域；自己框选=运行时弹出框选遮罩")
-            form.addRow("截图方式", self.shot_mode)
-
-            # 指定区域行：只有「指定区域截图」时显示
+            # 截图区域：固定「指定区域截图」（无方式选择），必须框选
             self._shot_region_widget = QWidget()
             region_row = QHBoxLayout(self._shot_region_widget)
             region_row.setContentsMargins(0, 0, 0, 0)
@@ -641,7 +630,7 @@ class StepParamsDialog(QDialog):
             pick_region = QPushButton("框选区域…")
             pick_region.clicked.connect(self._request_region)
             pick_region.setToolTip("隐藏本窗口后框选截图区域（与找图/文字识别区域一致）")
-            clear_region = QPushButton("恢复全屏")
+            clear_region = QPushButton("清除")
             clear_region.clicked.connect(lambda: self._set_region_text(None))
             region_row.addWidget(self.region_edit, 1)
             region_row.addWidget(pick_region)
@@ -660,7 +649,7 @@ class StepParamsDialog(QDialog):
             save_row.addStretch(1)
             form.addRow("保存位置", save_row)
 
-            # 变量保存：结果变量下拉行
+            # 结果变量下拉行（变量保存与自选保存都会把路径写入该变量）
             self._shot_var_widget = QWidget()
             var_row = QHBoxLayout(self._shot_var_widget)
             var_row.setContentsMargins(0, 0, 0, 0)
@@ -682,7 +671,6 @@ class StepParamsDialog(QDialog):
             hint_lay.addWidget(self._shot_choose_hint)
             form.addRow("", self._shot_choose_hint_widget)
 
-            self.shot_mode.currentIndexChanged.connect(self._sync_shot_rows)
             self.save_var_radio.toggled.connect(self._sync_shot_save_rows)
             self._sync_shot_save_rows()
 
@@ -1131,15 +1119,12 @@ class StepParamsDialog(QDialog):
             self.tf_button.setEnabled(self.tf_click.isChecked())
             self._set_combo_value(self.tf_variable, p.get("variable", "") or "")
         elif t == "screenshot":
-            self.shot_mode.setCurrentIndex(
-                max(0, self.shot_mode.findData(p.get("mode", "fullscreen"))))
             self._set_region_text(p.get("region", "") or "")
             if p.get("save_mode") == "choose":
                 self.save_choose_radio.setChecked(True)
             else:
                 self.save_var_radio.setChecked(True)
             self._set_combo_value(self.shot_variable, p.get("variable", "") or "")
-            self._sync_shot_rows()
             self._sync_shot_save_rows()
         elif t == "click":
             pv = (p.get("pos_var") or "").strip()
@@ -1242,12 +1227,10 @@ class StepParamsDialog(QDialog):
                 "variable": self._combo_value(self.tf_variable),
             })
         elif t == "screenshot":
-            var_mode = self.save_var_radio.isChecked()
             step.params.update({
-                "mode": self.shot_mode.currentData(),
                 "region": getattr(self, "_region", step.params.get("region", "")) or "",
-                "save_mode": "variable" if var_mode else "choose",
-                "variable": self._combo_value(self.shot_variable) if var_mode else "",
+                "save_mode": "variable" if self.save_var_radio.isChecked() else "choose",
+                "variable": self._combo_value(self.shot_variable),
             })
         elif t == "click":
             pv = self._combo_value(self.pos_var) if self.var_radio.isChecked() else ""

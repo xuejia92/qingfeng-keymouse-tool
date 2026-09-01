@@ -292,10 +292,9 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
         }
     if step_type == "screenshot":
         return {
-            "mode": "fullscreen",         # fullscreen=全屏 / region=指定区域 / select=自己框选
-            "region": "",                 # 指定区域 "x,y,w,h"（物理像素，空=全屏）
+            "region": "",                 # 指定区域 "x,y,w,h"（物理像素，必填）
             "save_mode": "variable",      # variable=变量保存 / choose=自选保存（弹窗）
-            "variable": "",               # 变量保存时：截图绝对路径写入的结果变量
+            "variable": "",               # 截图绝对路径写入的结果变量（两种保存方式都写入）
         }
     raise ValueError(f"未知步骤类型: {step_type}")
 
@@ -413,12 +412,10 @@ class FlowStep:
             if self.type == "clip_get":
                 return f"剪贴板 → {p.get('variable') or '未指定变量'}"
             if self.type == "screenshot":
-                mode = {"fullscreen": "全屏", "region": "指定区域",
-                        "select": "自己框选"}.get(p.get("mode"), "全屏")
-                if p.get("save_mode") == "choose":
-                    return f"{mode}截图 · 自选保存"
                 var = p.get("variable") or ""
-                return f"{mode}截图 → {var}" if var else f"{mode}截图 · 变量保存"
+                if p.get("save_mode") == "choose":
+                    return f"截图 → 自选保存 → {var}" if var else "截图 → 自选保存"
+                return f"截图 → {var}" if var else "截图 → 变量保存"
             if self.type == "web":
                 act = p.get("action")
                 if act == "open":

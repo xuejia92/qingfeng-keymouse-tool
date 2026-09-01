@@ -19,7 +19,7 @@ from app import screenshot_actor
 from app.config import FlowStep, default_step_params
 from app.tasks import run_screenshot_step
 
-PARAMS = {"mode": "fullscreen", "region": "", "save_mode": "variable", "variable": ""}
+PARAMS = {"region": "10,20,100,50", "save_mode": "variable", "variable": ""}
 
 
 def _img(w=8, h=6):
@@ -35,103 +35,85 @@ class TestScreenshotConfig(unittest.TestCase):
 
     def test_default_params(self):
         p = default_step_params("screenshot")
-        self.assertEqual(set(p), {"mode", "region", "save_mode", "variable"})
-        self.assertEqual(p["mode"], "fullscreen")
+        self.assertEqual(set(p), {"region", "save_mode", "variable"})
+        self.assertEqual(p["region"], "")
         self.assertEqual(p["save_mode"], "variable")
         self.assertEqual(p["variable"], "")
 
     def test_summary_variable_mode(self):
         s = FlowStep(type="screenshot")
-        self.assertIn("全屏截图", s.summary())
+        self.assertIn("截图", s.summary())
         self.assertIn("变量保存", s.summary())
-        s2 = FlowStep(type="screenshot", params={"mode": "region", "variable": "path"})
-        self.assertIn("指定区域截图", s2.summary())
+        s2 = FlowStep(type="screenshot", params={"variable": "path"})
+        self.assertIn("截图", s2.summary())
         self.assertIn("path", s2.summary())
 
     def test_summary_choose_mode(self):
         s = FlowStep(type="screenshot", params={"save_mode": "choose"})
         self.assertIn("自选保存", s.summary())
         self.assertNotIn("变量保存", s.summary())
-        s2 = FlowStep(type="screenshot", params={"mode": "select"})
-        self.assertIn("自己框选", s2.summary())
+        s2 = FlowStep(type="screenshot", params={"save_mode": "choose", "variable": "shot"})
+        self.assertIn("自选保存", s2.summary())
+        self.assertIn("shot", s2.summary())
 
 
 # ---------- tasks.run_screenshot_step ----------
 
 class TestRunScreenshotStep(unittest.TestCase):
-    def test_fullscreen_variable_mode(self):
-        """全屏 + 变量保存：保存到 jietu 目录并把绝对路径写入结果变量。"""
+    def test_region_variable_mode(self):
+        """指定区域 + 变量保存：按区域抓图，保存到 jietu 目录并写入结果变量。"""
         variables = {}
         path = r"C:\prog\templates\jietu\截图_1.png"
         with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()) as grab, \
              mock.patch.object(screenshot_actor, "save_jietu", return_value=path) as save:
             ok, why = run_screenshot_step(dict(PARAMS, variable="shot"), variables)
         self.assertTrue(ok)
-        grab.assert_called_once_with("fullscreen", "")
+        grab.assert_called_once_with("region", "10,20,100,50")
         save.assert_called_once()
         self.assertEqual(variables["shot"], path)
         self.assertIn(path, why)
 
-    def test_region_mode(self):
-        """指定区域：按 region 抓图。"""
+    def test_region_empty_falls_back_fullscreen(self):
+        """region 为空（旧版全屏配置）：仍按区域调用抓图，内部回退全屏保底。"""
         variables = {}
         with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()) as grab, \
              mock.patch.object(screenshot_actor, "save_jietu", return_value="/x.png"):
-            ok, _ = run_screenshot_step(dict(PARAMS, mode="region", region="10,20,100,50",
-                                             variable="shot"), variables)
+            ok, _ = run_screenshot_step(dict(PARAMS, region="", variable="shot"), variables)
         self.assertTrue(ok)
-        grab.assert_called_once_with("region", "10,20,100,50")
-
-    def test_select_mode(self):
-        """自己框选：ui_call 拿到区域后按区域抓图。"""
-        variables = {}
-        with mock.patch.object(screenshot_actor, "ui_call",
-                               return_value=(10, 20, 30, 40)) as ui, \
-             mock.patch.object(screenshot_actor, "grab_image", return_value=_img()) as grab, \
-             mock.patch.object(screenshot_actor, "save_jietu", return_value="/x.png"):
-            ok, why = run_screenshot_step(dict(PARAMS, mode="select", variable="shot"),
-                                          variables)
-        self.assertTrue(ok)
-        ui.assert_called_once()                     # select_region 交主线程
-        grab.assert_called_once_with("region", "10,20,30,40")
-
-    def test_select_cancelled(self):
-        """框选被取消：步骤失败，不抓图不保存。"""
-        with mock.patch.object(screenshot_actor, "ui_call", return_value=None), \
-             mock.patch.object(screenshot_actor, "grab_image") as grab:
-            ok, why = run_screenshot_step(dict(PARAMS, mode="select", variable="shot"), {})
-        self.assertFalse(ok)
-        self.assertIn("取消", why)
-        grab.assert_not_called()
+        grab.assert_called_once_with("region", "")
 
     def test_choose_mode(self):
-        """自选保存：ui_call 弹窗得到路径，cv2 写该路径；不写结果变量。"""
+        """自选保存：ui_call 弹窗得到路径，cv2 写该路径，并把路径写入结果变量。"""
         user_path = r"D:\pics\my.png"
         img = _img()
+        variables = {}
         with mock.patch.object(screenshot_actor, "grab_image", return_value=img), \
              mock.patch.object(screenshot_actor, "ui_call", return_value=user_path) as ui, \
              mock.patch("cv2.imwrite") as imw:
-            ok, why = run_screenshot_step(dict(PARAMS, save_mode="choose"), {})
+            ok, why = run_screenshot_step(dict(PARAMS, save_mode="choose", variable="shot"),
+                                          variables)
         self.assertTrue(ok)
         ui.assert_called_once()
         imw.assert_called_once_with(user_path, img)
+        self.assertEqual(variables["shot"], user_path)
         self.assertIn(user_path, why)
 
     def test_choose_cancelled(self):
         """自选保存被取消：步骤失败。"""
         with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()), \
              mock.patch.object(screenshot_actor, "ui_call", return_value=None):
-            ok, why = run_screenshot_step(dict(PARAMS, save_mode="choose"), {})
+            ok, why = run_screenshot_step(dict(PARAMS, save_mode="choose", variable="shot"), {})
         self.assertFalse(ok)
         self.assertIn("取消", why)
 
-    def test_variable_mode_requires_variable(self):
-        """变量保存但没选结果变量：失败。"""
-        with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()) as grab:
-            ok, why = run_screenshot_step(dict(PARAMS, variable=""), {})
-        self.assertFalse(ok)
-        self.assertIn("结果变量", why)
-        grab.assert_not_called()    # 参数校验先于抓图
+    def test_variable_required_for_both_save_modes(self):
+        """变量保存/自选保存都没选结果变量：失败（校验先于抓图）。"""
+        for sm in ("variable", "choose"):
+            with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()) as grab:
+                ok, why = run_screenshot_step(dict(PARAMS, save_mode=sm, variable=""), {})
+            self.assertFalse(ok)
+            self.assertIn("结果变量", why)
+            grab.assert_not_called()    # 参数校验先于抓图
 
     def test_stopped(self):
         stop = threading.Event()
@@ -213,56 +195,54 @@ class TestScreenshotDialog(unittest.TestCase):
         return StepParamsDialog(FlowStep(type="screenshot", params=params))
 
     def test_form_roundtrip(self):
-        dlg = self._open({"mode": "region", "region": "10,20,100,50",
-                          "save_mode": "variable", "variable": ""})
-        self.assertEqual(dlg.shot_mode.currentData(), "region")
+        dlg = self._open({"region": "10,20,100,50",
+                          "save_mode": "variable", "variable": "shot"})
+        self.assertEqual(dlg.region_edit.text(), "10, 20, 100 x 50")
         self.assertTrue(dlg.save_var_radio.isChecked())
         step = FlowStep(type="screenshot")
         dlg.apply_to(step)
-        self.assertEqual(step.params["mode"], "region")
         self.assertEqual(step.params["region"], "10,20,100,50")
         self.assertEqual(step.params["save_mode"], "variable")
+        self.assertEqual(step.params["variable"], "shot")
 
     def test_choose_roundtrip(self):
-        dlg = self._open({"mode": "fullscreen", "save_mode": "choose",
+        dlg = self._open({"region": "10,20,100,50", "save_mode": "choose",
                           "variable": "x"})
         self.assertTrue(dlg.save_choose_radio.isChecked())
         step = FlowStep(type="screenshot")
         dlg.apply_to(step)
         self.assertEqual(step.params["save_mode"], "choose")
-        self.assertEqual(step.params["variable"], "")   # 自选保存不保留结果变量
+        self.assertEqual(step.params["variable"], "x")   # 自选保存也保留结果变量
 
     def test_rows_visibility(self):
-        """方式联动：只有「指定区域」显示区域行；保存位置联动变量行显隐。"""
-        dlg = self._open({"mode": "fullscreen", "save_mode": "variable",
+        """区域行与结果变量行常显；只有自选保存说明行随模式切换。"""
+        dlg = self._open({"region": "10,20,100,50", "save_mode": "variable",
                           "variable": ""})
-        self.assertTrue(dlg._shot_region_widget.isHidden())
-        self.assertFalse(dlg._shot_var_widget.isHidden())
+        self.assertFalse(dlg._shot_region_widget.isHidden())   # 固定指定区域，常显
+        self.assertFalse(dlg._shot_var_widget.isHidden())      # 结果变量常显
         self.assertTrue(dlg._shot_choose_hint_widget.isHidden())
 
-        dlg.shot_mode.setCurrentIndex(dlg.shot_mode.findData("region"))
-        self.assertFalse(dlg._shot_region_widget.isHidden())
-
         dlg.save_choose_radio.setChecked(True)
-        self.assertTrue(dlg._shot_var_widget.isHidden())
+        self.assertFalse(dlg._shot_var_widget.isHidden())      # 自选保存也显示变量行
         self.assertFalse(dlg._shot_choose_hint_widget.isHidden())
 
-    def test_variable_save_requires_variable(self):
-        """变量保存但没选结果变量：确定被拦截并提示。"""
-        dlg = self._open({"mode": "fullscreen", "save_mode": "variable",
-                          "variable": ""})
+        dlg.save_var_radio.setChecked(True)
+        self.assertTrue(dlg._shot_choose_hint_widget.isHidden())
+
+    def test_region_required(self):
+        """未框选区域：确定被拦截并提示。"""
+        dlg = self._open({"region": "", "save_mode": "variable", "variable": "shot"})
         with mock.patch("app.ui.flow_dialog.QMessageBox.warning") as warn:
             dlg.accept()
         warn.assert_called_once()
-        self.assertTrue(dlg.save_var_radio.isChecked())   # 对话框未关闭
 
-    def test_choose_mode_no_validation(self):
-        """自选保存不要求结果变量：确定直接通过。"""
-        dlg = self._open({"mode": "fullscreen", "save_mode": "choose",
-                          "variable": ""})
-        with mock.patch("app.ui.flow_dialog.QMessageBox.warning") as warn:
-            dlg.accept()
-        warn.assert_not_called()
+    def test_variable_required_for_both_save_modes(self):
+        """变量保存/自选保存都没选结果变量：确定都被拦截并提示。"""
+        for sm in ("variable", "choose"):
+            dlg = self._open({"region": "10,20,100,50", "save_mode": sm, "variable": ""})
+            with mock.patch("app.ui.flow_dialog.QMessageBox.warning") as warn:
+                dlg.accept()
+            warn.assert_called_once()
 
 
 if __name__ == "__main__":

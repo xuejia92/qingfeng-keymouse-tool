@@ -299,39 +299,31 @@ def run_text_find_step(p: dict, variables: dict,
 
 def run_screenshot_step(p: dict, variables: dict,
                         stop: threading.Event | None = None) -> tuple[bool, str]:
-    """执行「截图」步骤：全屏 / 指定区域 / 自己框选截图，保存到文件。
+    """执行「截图」步骤：按指定区域截图，保存到文件。
 
     返回 (成功?, 原因)。保存方式：
-      - variable（变量保存）：保存到 <程序目录>/templates/jietu/（不存在自动创建），
-        把图片的绝对路径写入结果变量；
+      - variable（变量保存）：保存到 <程序目录>/templates/jietu/（不存在自动创建）；
       - choose（自选保存）：弹「另存为」对话框由用户选择保存位置，取消视为失败。
+    两种方式都会把图片的绝对路径写入结果变量（variable 参数）。
 
-    「自己框选」与「另存为对话框」需要主线程 UI，通过 screenshot_actor.ui_call
-    调度到主线程执行（后台线程阻塞等待结果，主线程用嵌套事件循环处理交互）。
+    「另存为对话框」需要主线程 UI，通过 screenshot_actor.ui_call 调度到主线程执行
+    （后台线程阻塞等待结果，主线程用嵌套事件循环处理交互）。
     """
     from . import screenshot_actor
     if stop is not None and stop.is_set():
         return False, "已手动停止"
-    mode = (p.get("mode") or "fullscreen").strip()
     save_mode = (p.get("save_mode") or "variable").strip()
     var = (p.get("variable") or "").strip()
     region = str(p.get("region") or "")
 
+    # 结果变量必填（两种保存方式都要把路径写入变量），在抓图前校验避免无谓抓屏
+    if not var:
+        return False, "未指定结果变量"
+
     import cv2  # 与 finder/capture_overlay 同一依赖，仅本步骤用到
     try:
-        # 自己框选：先把屏幕遮罩交给主线程，拿到区域后按区域抓图
-        if mode == "select":
-            rect = screenshot_actor.ui_call(screenshot_actor.select_region)
-            if rect is None:
-                return False, "已取消截图"
-            region = ",".join(str(int(v)) for v in rect)
-            mode = "region"
-
-        # 变量保存必须指定结果变量（在抓图前校验，避免无谓抓屏）
-        if save_mode != "choose" and not var:
-            return False, "未指定结果变量"
-
-        img = screenshot_actor.grab_image(mode, region)
+        # 固定「指定区域」截图；region 为空时回退全屏（兼容旧版全屏配置）
+        img = screenshot_actor.grab_image("region", region)
 
         if save_mode == "choose":
             default_name = f"截图_{time.strftime('%Y%m%d_%H%M%S')}.png"
@@ -345,8 +337,7 @@ def run_screenshot_step(p: dict, variables: dict,
     except Exception as e:
         return False, f"截图失败：{type(e).__name__}: {e}"
 
-    if var:
-        variables[var] = path
+    variables[var] = path
     return True, f"截图已保存：{path}"
 
 
