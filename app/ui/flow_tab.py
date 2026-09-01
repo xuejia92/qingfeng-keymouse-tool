@@ -144,11 +144,6 @@ class FlowTab(QWidget):
             QWidget#flowTab QGroupBox#modulePanel QPushButton[groupHeader="true"]:disabled {
                 color: #aab2bb; background: #f2f4f6;
             }
-            /* 面板标题（原 QGroupBox 标题移入工具行） */
-            QWidget#flowTab QGroupBox#modulePanel QLabel#modulePanelTitle {
-                font-size: 10pt; font-weight: 600; color: #1668a8;
-                background: transparent; border: none;
-            }
             /* 「全部收起」图标按钮：无文字、小方框、浅蓝描边 */
             QWidget#flowTab QGroupBox#modulePanel QPushButton#collapseAllBtn {
                 text-align: center; padding: 0;
@@ -251,12 +246,9 @@ class FlowTab(QWidget):
         panel.setContentsMargins(8, 6, 8, 8)
         panel.setSpacing(2)
 
-        # 顶部工具行：左侧「模块面板」标题，右侧仅图标的收起按钮
+        # 顶部工具行：右侧仅图标的收起按钮（面板标题已移除）
         panel_top = QHBoxLayout()
         panel_top.setSpacing(4)
-        panel_title = QLabel("模块面板")
-        panel_title.setObjectName("modulePanelTitle")
-        panel_top.addWidget(panel_title)
         panel_top.addStretch(1)
         self.collapse_all_btn = QPushButton("⏫")
         self.collapse_all_btn.setObjectName("collapseAllBtn")
