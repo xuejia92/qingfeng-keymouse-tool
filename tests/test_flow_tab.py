@@ -254,7 +254,8 @@ class TestModulePanelCollapseAll(unittest.TestCase):
 
     def test_collapse_all_button_exists(self):
         self.assertIsNotNone(self.tab.collapse_all_btn)
-        self.assertIn("收起", self.tab.collapse_all_btn.text())
+        self.assertEqual(self.tab.collapse_all_btn.text(), "⏫")  # 纯图标、无文字
+        self.assertIn("收起", self.tab.collapse_all_btn.toolTip())
 
     def test_collapse_all_collapses_every_group_and_persists(self):
         """点击全部收起：所有分组标题变 ▸、内容隐藏、状态全部持久化。"""

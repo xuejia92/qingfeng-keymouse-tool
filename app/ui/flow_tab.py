@@ -144,11 +144,16 @@ class FlowTab(QWidget):
             QWidget#flowTab QGroupBox#modulePanel QPushButton[groupHeader="true"]:disabled {
                 color: #aab2bb; background: #f2f4f6;
             }
-            /* 「全部收起」小按钮：胶囊形、浅蓝描边，与分组标题区分 */
+            /* 面板标题（原 QGroupBox 标题移入工具行） */
+            QWidget#flowTab QGroupBox#modulePanel QLabel#modulePanelTitle {
+                font-size: 10pt; font-weight: 600; color: #1668a8;
+                background: transparent; border: none;
+            }
+            /* 「全部收起」图标按钮：无文字、小方框、浅蓝描边 */
             QWidget#flowTab QGroupBox#modulePanel QPushButton#collapseAllBtn {
-                text-align: center; padding: 2px 10px;
-                font-size: 9pt; color: #1668a8;
-                border: 1px solid #b9d3e8; border-radius: 10px;
+                text-align: center; padding: 0;
+                font-size: 11pt; color: #1668a8;
+                border: 1px solid #b9d3e8; border-radius: 5px;
                 background: #f3f8fd;
             }
             QWidget#flowTab QGroupBox#modulePanel QPushButton#collapseAllBtn:hover {
@@ -240,21 +245,25 @@ class FlowTab(QWidget):
         rlay.setContentsMargins(0, 0, 0, 0)
         rlay.setSpacing(6)
 
-        self.panel_box = QGroupBox("模块面板")
+        self.panel_box = QGroupBox()
         self.panel_box.setObjectName("modulePanel")
         panel = QVBoxLayout(self.panel_box)
-        panel.setContentsMargins(8, 10, 8, 8)
+        panel.setContentsMargins(8, 6, 8, 8)
         panel.setSpacing(2)
 
-        # 顶部工具行：右侧一个小按钮，一键收起所有分组
+        # 顶部工具行：左侧「模块面板」标题，右侧仅图标的收起按钮
         panel_top = QHBoxLayout()
         panel_top.setSpacing(4)
-        self.collapse_all_btn = QPushButton("⏫ 全部收起")
+        panel_title = QLabel("模块面板")
+        panel_title.setObjectName("modulePanelTitle")
+        panel_top.addWidget(panel_title)
+        panel_top.addStretch(1)
+        self.collapse_all_btn = QPushButton("⏫")
         self.collapse_all_btn.setObjectName("collapseAllBtn")
         self.collapse_all_btn.setToolTip("一键收起所有模块分组（再次点击各分组标题可展开）")
         self.collapse_all_btn.setCursor(Qt.PointingHandCursor)
+        self.collapse_all_btn.setFixedSize(26, 24)
         self.collapse_all_btn.clicked.connect(self._collapse_all_groups)
-        panel_top.addStretch(1)
         panel_top.addWidget(self.collapse_all_btn)
         panel.addLayout(panel_top)
 
