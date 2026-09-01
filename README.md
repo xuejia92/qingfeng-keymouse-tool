@@ -81,6 +81,7 @@ release 显示名即版本号，附件直链优先下载），GitHub 不可用�
 自动完成 PyInstaller 打包 + 创建 GitHub Release + 上传 exe 资产，并给出下载链接。
 前置：已 `gh auth login` 登录 GitHub；网络走本机代理（默认 `http://127.0.0.1:7897`，
 可清空改直连）。
+注意：**工具必须放在项目根目录运行**（即与 build.py / main.py 同目录，源码运行则无此限制）。
 
 ### 方式二：手动发布
 

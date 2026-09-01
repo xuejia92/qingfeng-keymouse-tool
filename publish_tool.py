@@ -184,10 +184,16 @@ def upload_asset(opener, token: str, release_id: int, exe_path: str, log) -> Non
 
 def run_build(log) -> None:
     """调用 build.py（PyInstaller 打包主程序），逐行回传日志。"""
+    build_script = os.path.join(BASE_DIR, "build.py")
+    if not os.path.isfile(build_script):
+        raise RuntimeError(
+            f"未找到 {build_script}。\n"
+            f"请把「打包并发布到github.exe」放在项目根目录"
+            f"（含 build.py / main.py / dist 的目录）下运行。")
     py = find_python()
     log("> 开始打包主程序（PyInstaller，约 1 分钟）…")
     proc = subprocess.Popen(
-        [py, os.path.join(BASE_DIR, "build.py")],
+        [py, build_script],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
         cwd=BASE_DIR,
