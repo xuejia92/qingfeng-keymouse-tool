@@ -116,7 +116,7 @@ class FlowTab(QWidget):
             QWidget#flowTab QListWidget#stepView::item { height: 38px; }
             QWidget#flowTab QGroupBox {
                 border: 1px solid #d8dee4; border-radius: 6px;
-                background: white; margin-top: 10px; font-weight: 600;
+                background: white; margin-top: 0px; font-weight: 600;
             }
             QWidget#flowTab QGroupBox::title { subcontrol-origin: margin; left: 10px; }
             QWidget#flowTab QGroupBox#modulePanel QPushButton {
@@ -238,26 +238,27 @@ class FlowTab(QWidget):
         right = QWidget()
         rlay = QVBoxLayout(right)
         rlay.setContentsMargins(0, 0, 0, 0)
-        rlay.setSpacing(6)
+        rlay.setSpacing(2)
 
-        self.panel_box = QGroupBox()
-        self.panel_box.setObjectName("modulePanel")
-        panel = QVBoxLayout(self.panel_box)
-        panel.setContentsMargins(8, 6, 8, 8)
-        panel.setSpacing(2)
-
-        # 顶部工具行：右侧仅图标的收起按钮（面板标题已移除）
-        panel_top = QHBoxLayout()
-        panel_top.setSpacing(4)
-        panel_top.addStretch(1)
+        # 收起按钮放在面板外框上方右侧（原 QGroupBox 标题位置）
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(0)
+        btn_row.addStretch(1)
         self.collapse_all_btn = QPushButton("⏫")
         self.collapse_all_btn.setObjectName("collapseAllBtn")
         self.collapse_all_btn.setToolTip("一键收起所有模块分组（再次点击各分组标题可展开）")
         self.collapse_all_btn.setCursor(Qt.PointingHandCursor)
         self.collapse_all_btn.setFixedSize(26, 24)
         self.collapse_all_btn.clicked.connect(self._collapse_all_groups)
-        panel_top.addWidget(self.collapse_all_btn)
-        panel.addLayout(panel_top)
+        btn_row.addWidget(self.collapse_all_btn)
+        rlay.addLayout(btn_row)
+
+        self.panel_box = QGroupBox()
+        self.panel_box.setObjectName("modulePanel")
+        panel = QVBoxLayout(self.panel_box)
+        panel.setContentsMargins(8, 8, 8, 8)
+        panel.setSpacing(2)
 
         # 分组内容放进滚动区：全部展开时高度不够可滚动，折叠后自动收缩
         scroll = QScrollArea()
