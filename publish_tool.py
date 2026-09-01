@@ -11,7 +11,9 @@
   3. 创建 GitHub Release（tag 与显示名 = v{版本号}，仓库 qingfeng-keymouse-tool）
   4. 上传 exe 资产（资产名 QingFeng_KeyMouse_Tool.exe —— 用 ASCII 名绕开
      gh CLI 在 Windows 下把中文资产名改写成 default.exe 的问题）
-  5. 显示 Release 下载页链接
+  5. 同步 dist\\config.json 的 version 为本次发布版本（只改 version 字段，
+     其余配置原样保留）
+  6. 显示 Release 下载页链接
 
 前置条件：
   - 已安装项目依赖与 PyInstaller（pip install -r requirements-dev.txt）
@@ -208,26 +210,58 @@ def run_build(log) -> None:
         raise RuntimeError(f"打包完成但未找到产物：{LOCAL_EXE}")
 
 
+def sync_manifest_version(version: str, log) -> None:
+    """发布成功后把 dist/config.json 的 version 同步为本次发布的版本。
+
+    dist/config.json 是程序运行目录下的完整配置（首次运行自动生成，含邮箱、
+    找图任务等），同时被在线更新用作最后兜底清单（Gitee raw 直读），所以
+    发版后 version 必须跟上。只改 version 字段，其余配置原样保留；写带 v
+    前缀的形式，与 Release 显示名及运行时 cfg.version 的写法一致。
+    同步失败不影响发布结果（Release 已创建），只告警。
+    """
+    path = os.path.join(BASE_DIR, "dist", "config.json")
+    ver = version if version[:1] in ("v", "V") else "v" + version
+    if not os.path.isfile(path):
+        log(f"    ⚠️ 未找到 {path}，跳过版本同步")
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("根节点不是 JSON 对象")
+        data["version"] = ver
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except (OSError, ValueError) as e:
+        log(f"    ⚠️ 同步 dist/config.json 失败（发布已成功，可手动改）：{e}")
+        return
+    log(f"    dist/config.json version -> {ver}")
+
+
 # ---------- 发布流程 ----------
 
 def publish_flow(version: str, proxy: str, log) -> dict:
     """完整发布流程；返回结果信息 dict。"""
-    log("===== 1/4 打包主程序 =====")
+    log("===== 1/5 打包主程序 =====")
     run_build(log)
 
-    log("===== 2/4 获取 GitHub 凭证 =====")
+    log("===== 2/5 获取 GitHub 凭证 =====")
     token = gh_token()
     log("    gh token 获取成功")
 
-    log("===== 3/4 创建 Release =====")
+    log("===== 3/5 创建 Release =====")
     opener = _http_opener(proxy)
     release_id, html_url, tag = create_release(opener, token, version)
     log(f"    Release 已创建：{tag}")
     log(f"    {html_url}")
 
-    log("===== 4/4 上传 exe 资产 =====")
+    log("===== 4/5 上传 exe 资产 =====")
     upload_asset(opener, token, release_id, LOCAL_EXE, log)
     log("    上传完成")
+
+    log("===== 5/5 同步版本清单 =====")
+    sync_manifest_version(version, log)
 
     download = (f"https://github.com/{REPO}/releases/download/"
                 f"{urllib.parse.quote(tag)}/{ASSET_NAME}")
@@ -252,7 +286,7 @@ class PublishApp:
         frm.pack(fill="x", **pad)
 
         tk.Label(frm, text="版本号：").grid(row=0, column=0, sticky="e")
-        self.version_var = tk.StringVar(value="3.3.0")
+        self.version_var = tk.StringVar(value="3.4.0")
         tk.Entry(frm, textvariable=self.version_var, width=16).grid(
             row=0, column=1, sticky="w", padx=(0, 18))
         tk.Label(frm, text="（如 3.1.0，自动加 v 前缀作为 tag）").grid(
