@@ -346,7 +346,8 @@ def run_find_image_step(p: dict, variables: dict,
                         stop: threading.Event | None = None) -> tuple[bool, str]:
     """执行「找图」步骤：模板匹配在屏幕 / 指定区域找图。
 
-    找到：把目标中心坐标 "x,y" 写入结果变量；未找到：把 false 写入结果变量。
+    找到：把目标矩形区域 "左上x,左上y,右下x,右下y" 写入结果变量；
+    未找到：把 false 写入结果变量。
     步骤本身不因未找到而失败（供后续步骤按变量值分支），
     模板图加载失败 / 未指定结果变量才算失败。
     """
@@ -373,8 +374,13 @@ def run_find_image_step(p: dict, variables: dict,
         variables[var] = False
         return True, "未找到目标"
     cx, cy, score = hit
-    variables[var] = f"{int(cx)},{int(cy)}"
-    return True, f"找到目标（{int(cx)}, {int(cy)}，置信度 {score:.2f}）"
+    th, tw = template.shape[:2]
+    left = int(cx) - tw // 2
+    top = int(cy) - th // 2
+    right = left + tw
+    bottom = top + th
+    variables[var] = f"{left},{top},{right},{bottom}"
+    return True, f"找到目标（区域 {left},{top},{right},{bottom}，置信度 {score:.2f}）"
 
 
 def _coord_from_var(expr: str, variables: dict | None, default: int) -> int:

@@ -297,7 +297,7 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "image_path": "",            # 模板图绝对路径（跨目录运行时兜底）
             "confidence": 0.85,          # 匹配置信度阈值 0.5~0.99
             "region": "",                # 查找区域 "x,y,w,h"（物理像素），空=全屏
-            "variable": "",              # 结果变量：找到写中心坐标 "x,y"，未找到写 false
+            "variable": "",              # 结果变量：找到写矩形区域 "左上x,左上y,右下x,右下y"，未找到写 false
         }
     if step_type == "screenshot":
         return {

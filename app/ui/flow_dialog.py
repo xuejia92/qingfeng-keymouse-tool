@@ -747,10 +747,10 @@ class StepParamsDialog(QDialog):
             form.addRow("坐标输入", manual_row)
 
             self.find_var = self._var_combo("（选择变量）")
-            self.find_var.setToolTip("找到后把目标中心坐标 \"x,y\" 写入该变量；未找到写入 false")
+            self.find_var.setToolTip("找到后把目标矩形区域 \"左上x,左上y,右下x,右下y\" 写入该变量；未找到写入 false")
             form.addRow("结果变量", self.find_var)
             self._var_combo_hint(form)
-            hint = QLabel("在屏幕 / 指定区域用模板匹配找图：找到则把中心坐标 \"x,y\" 写入结果变量，\n"
+            hint = QLabel("在屏幕 / 指定区域用模板匹配找图：找到则把矩形区域坐标 \"左上x,左上y,右下x,右下y\" 写入结果变量，\n"
                           "未找到写入 false（步骤不会因未找到而失败，可据此分支）。\n"
                           "区域为空=全屏；也可点击「框选区域…」或输入左上/右下角坐标。")
             hint.setStyleSheet("color: #8a939c;")

@@ -57,8 +57,8 @@ class TestFindImageConfig(unittest.TestCase):
 
 class TestRunFindImageStep(unittest.TestCase):
     def test_found_fullscreen(self):
-        """全屏找图：locate 命中，把中心坐标写入结果变量。"""
-        template, screen = _img(2, 2), _img(20, 20)
+        """全屏找图：locate 命中，把矩形区域坐标写入结果变量。"""
+        template, screen = _img(4, 3), _img(20, 20)
         variables = {}
         with mock.patch.object(finder, "load_template", return_value=template), \
              mock.patch.object(finder, "grab_full_screen", return_value=screen), \
@@ -66,18 +66,22 @@ class TestRunFindImageStep(unittest.TestCase):
             ok, why = run_find_image_step(dict(PARAMS, region=""), variables)
         self.assertTrue(ok)
         loc.assert_called_once_with(template, screen, 0.85)
-        self.assertEqual(variables["pos"], "11,9")
-        self.assertIn("11, 9", why)
+        # 模板 4x3，中心 (11,9) -> 左上 (9,8)、右下 (13,11)
+        self.assertEqual(variables["pos"], "9,8,13,11")
+        self.assertIn("9,8,13,11", why)
 
     def test_found_region(self):
-        """指定区域：调用 locate_in_region。"""
-        template, screen = _img(2, 2), _img(20, 20)
+        """指定区域：调用 locate_in_region，命中同样写矩形区域坐标。"""
+        template, screen = _img(4, 3), _img(20, 20)
+        variables = {}
         with mock.patch.object(finder, "load_template", return_value=template), \
              mock.patch.object(finder, "grab_full_screen", return_value=screen), \
              mock.patch.object(finder, "locate_in_region", return_value=(5, 5, 0.9)) as loc:
-            ok, _ = run_find_image_step(dict(PARAMS, region="10,20,100,50"), {})
+            ok, _ = run_find_image_step(dict(PARAMS, region="10,20,100,50"), variables)
         self.assertTrue(ok)
         loc.assert_called_once_with(template, screen, 0.85, (10, 20, 100, 50))
+        # 模板 4x3，中心 (5,5) -> 左上 (3,4)、右下 (7,7)
+        self.assertEqual(variables["pos"], "3,4,7,7")
 
     def test_not_found(self):
         """未找到：结果变量写 false，步骤不失败。"""
