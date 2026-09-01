@@ -1,7 +1,7 @@
 """后台任务线程与公共执行函数。
 
 run_click_step / run_press_step / run_find_step / run_var_step / run_log_step /
-run_ocr_step 是与 UI 无关的公共执行函数，
+run_ocr_step / run_clip_set_step / run_clip_get_step 是与 UI 无关的公共执行函数，
 单任务（BaseTask 子类）与自动化流程（FlowRunner）共用同一套实现。
 参数统一使用 dict（各字段与配置 dataclass 字段同名）。
 """
@@ -10,6 +10,8 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import asdict
+
+import pyperclip
 
 from PySide6.QtCore import QObject, Signal
 
@@ -192,6 +194,49 @@ def run_log_step(p: dict, variables: dict) -> tuple[bool, str]:
     return True, f"已输出 {len(names)} 个变量"
 
 
+def run_clip_set_step(p: dict, variables: dict) -> tuple[bool, str]:
+    """执行「赋值剪贴板」步骤：把变量值或自定义文本写入系统剪贴板。
+
+    两种来源二选一（变量优先）：
+      - name 指定变量：取 format_value(变量值)；
+      - 否则用 text 自定义文本，支持 $变量名 引用。
+    """
+    from .values import format_value, resolve_references
+    name = (p.get("name") or "").strip()
+    text = (p.get("text") or "").strip()
+    if name:
+        if name not in variables:
+            return False, f"变量「{name}」未定义"
+        value = format_value(variables[name])
+        source = f"变量 {name}"
+    elif text:
+        value = resolve_references(text, variables)
+        source = "自定义文本"
+    else:
+        return False, "请选择变量或填写文本"
+    try:
+        pyperclip.copy(value)
+    except Exception as e:
+        return False, f"写入剪贴板失败: {e}"
+    return True, f"已把{source}写入剪贴板"
+
+
+def run_clip_get_step(p: dict, variables: dict,
+                      variable_types: dict | None = None) -> tuple[bool, str]:
+    """执行「获取剪贴板内容」步骤：读取系统剪贴板文本，赋值给指定变量。"""
+    name = (p.get("variable") or "").strip()
+    if not name:
+        return False, "未指定变量名"
+    try:
+        text = pyperclip.paste()
+    except Exception as e:
+        return False, f"读取剪贴板失败: {e}"
+    variables[name] = text
+    if variable_types is not None:
+        variable_types[name] = "string"
+    return True, f"已把剪贴板内容赋值给变量 {name}"
+
+
 def run_ocr_step(p: dict, variables: dict, stop: threading.Event | None = None) -> tuple[bool, str]:
     """执行「文字识别」步骤：RapidOCR 识别屏幕区域，结果写入指定变量。
 
@@ -214,8 +259,147 @@ def run_ocr_step(p: dict, variables: dict, stop: threading.Event | None = None) 
     return True, f"已识别文字到变量 {var}（{why}）"
 
 
-def run_click_step(p: dict, stop: threading.Event, progress) -> str:
-    """公共鼠标点击循环。返回结束原因。"""
+def run_text_find_step(p: dict, variables: dict,
+                       stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「文字查找」步骤：OCR 在屏幕/区域查找指定文字。
+
+    找到：
+      - 勾选点击 -> 鼠标左/右键点击该文字中心
+      - 未勾选   -> 把坐标 "x,y" 写入结果变量
+    未找到：把 false 写入结果变量。步骤本身不因未找到而失败，
+    以便后续步骤根据变量值分支。OCR 本身不可用/异常才算失败。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    from .values import resolve_references
+    from . import ocr as ocr_actor
+    keyword = resolve_references(str(p.get("text") or ""), variables).strip()
+    if not keyword:
+        return False, "查找文字为空"
+    var = (p.get("variable") or "").strip()
+    ok, value, why = ocr_actor.find_text(
+        region=str(p.get("region") or ""),
+        text=keyword,
+    )
+    if not ok:
+        return False, why
+    if value is None:
+        if var:
+            variables[var] = False
+        return True, f"未找到文字「{keyword}」"
+    x, y = int(value["x"]), int(value["y"])
+    if p.get("click"):
+        button = "right" if p.get("click_button") == "right" else "left"
+        input_actors.click(button, 1, x, y)
+        return True, f"已点击文字「{keyword}」（{x}, {y}）"
+    if var:
+        variables[var] = f"{x},{y}"
+    return True, f"找到文字「{keyword}」（{x}, {y}）"
+
+
+def run_screenshot_step(p: dict, variables: dict,
+                        stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「截图」步骤：全屏 / 指定区域 / 自己框选截图，保存到文件。
+
+    返回 (成功?, 原因)。保存方式：
+      - variable（变量保存）：保存到 <程序目录>/templates/jietu/（不存在自动创建），
+        把图片的绝对路径写入结果变量；
+      - choose（自选保存）：弹「另存为」对话框由用户选择保存位置，取消视为失败。
+
+    「自己框选」与「另存为对话框」需要主线程 UI，通过 screenshot_actor.ui_call
+    调度到主线程执行（后台线程阻塞等待结果，主线程用嵌套事件循环处理交互）。
+    """
+    from . import screenshot_actor
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    mode = (p.get("mode") or "fullscreen").strip()
+    save_mode = (p.get("save_mode") or "variable").strip()
+    var = (p.get("variable") or "").strip()
+    region = str(p.get("region") or "")
+
+    import cv2  # 与 finder/capture_overlay 同一依赖，仅本步骤用到
+    try:
+        # 自己框选：先把屏幕遮罩交给主线程，拿到区域后按区域抓图
+        if mode == "select":
+            rect = screenshot_actor.ui_call(screenshot_actor.select_region)
+            if rect is None:
+                return False, "已取消截图"
+            region = ",".join(str(int(v)) for v in rect)
+            mode = "region"
+
+        # 变量保存必须指定结果变量（在抓图前校验，避免无谓抓屏）
+        if save_mode != "choose" and not var:
+            return False, "未指定结果变量"
+
+        img = screenshot_actor.grab_image(mode, region)
+
+        if save_mode == "choose":
+            default_name = f"截图_{time.strftime('%Y%m%d_%H%M%S')}.png"
+            path = screenshot_actor.ui_call(
+                lambda: screenshot_actor.ask_save_path(default_name))
+            if not path:
+                return False, "已取消保存"
+            cv2.imwrite(path, img)
+        else:
+            path = screenshot_actor.save_jietu(img)
+    except Exception as e:
+        return False, f"截图失败：{type(e).__name__}: {e}"
+
+    if var:
+        variables[var] = path
+    return True, f"截图已保存：{path}"
+
+
+def _coord_from_var(expr: str, variables: dict | None, default: int) -> int:
+    """解析坐标轴的变量引用：expr 为变量名时取其整数值，未定义/非数字回退默认值。"""
+    name = (expr or "").strip()
+    if not name:
+        return int(default)
+    value = (variables or {}).get(name)
+    if value is None:
+        log(f"坐标变量「{name}」未定义，使用固定坐标 {int(default)}")
+        return int(default)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        log(f"坐标变量「{name}」的值不是数字（{value!r}），使用固定坐标 {int(default)}")
+        return int(default)
+
+
+def _coord_from_pos_var(expr: str, variables: dict | None,
+                        default_x: int, default_y: int) -> tuple[int, int]:
+    """解析坐标变量：变量值为 "x,y" 字符串（如 "64,63"）。
+
+    也容忍列表/元组 [x, y]。未定义、格式不对时回退固定坐标。
+    """
+    name = (expr or "").strip()
+    if not name:
+        return int(default_x), int(default_y)
+    value = (variables or {}).get(name)
+    if value is None:
+        log(f"坐标变量「{name}」未定义，使用固定坐标 ({int(default_x)},{int(default_y)})")
+        return int(default_x), int(default_y)
+    try:
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            x, y = int(float(value[0])), int(float(value[1]))
+        else:
+            parts = str(value).strip().split(",")
+            if len(parts) < 2:
+                raise ValueError
+            x, y = int(float(parts[0].strip())), int(float(parts[1].strip()))
+        return x, y
+    except (TypeError, ValueError):
+        log(f"坐标变量「{name}」的值不是 \"x,y\" 格式（{value!r}），"
+            f"使用固定坐标 ({int(default_x)},{int(default_y)})")
+        return int(default_x), int(default_y)
+
+
+def run_click_step(p: dict, stop: threading.Event, progress, variables: dict | None = None) -> str:
+    """公共鼠标点击循环。返回结束原因。
+
+    variables: 流程运行期变量（可选）。固定坐标模式下 pos_var 非空时，
+    坐标优先取变量值（"x,y" 字符串，如 "64,63"），未定义或格式不对回退 pos_x / pos_y。
+    """
     button = p.get("mouse_button", "left")
     times = 2 if p.get("click_type") == "double" else 1
     interval = max(int(p.get("interval_ms", 100) or 100), 20) / 1000.0
@@ -240,7 +424,14 @@ def run_click_step(p: dict, stop: threading.Event, progress) -> str:
     try:
         while True:
             if p.get("fixed_position"):
-                input_actors.click(button, times, p.get("pos_x"), p.get("pos_y"))
+                if p.get("pos_var"):
+                    x, y = _coord_from_pos_var(p.get("pos_var"), variables,
+                                               p.get("pos_x", 0), p.get("pos_y", 0))
+                else:
+                    # 兼容旧配置：pos_x_var / pos_y_var 各自独立
+                    x = _coord_from_var(p.get("pos_x_var"), variables, p.get("pos_x", 0))
+                    y = _coord_from_var(p.get("pos_y_var"), variables, p.get("pos_y", 0))
+                input_actors.click(button, times, x, y)
             else:
                 input_actors.click(button, times)
             done += 1

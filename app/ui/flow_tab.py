@@ -14,9 +14,10 @@ import uuid
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QFileDialog, QGroupBox, QHBoxLayout, QLabel,
-                               QListWidget, QListWidgetItem, QMenu, QMessageBox,
-                               QPushButton, QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QFileDialog, QFrame, QGroupBox, QHBoxLayout, QInputDialog,
+                               QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+                               QPushButton, QScrollArea, QSizePolicy, QSplitter,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..config import (AppConfig, BASE_DIR, FLOW_STEP_TYPES, FLOWS_DIR, Flow,
                       FlowStep, default_step_params, flow_from_file, flow_to_dict,
@@ -27,6 +28,16 @@ from ..logbus import log
 from .flow_dialog import (FlowMetaDialog, ModuleButton, StepList, StepRunDelegate,
                           StepParamsDialog, _TYPE_ICONS)
 from .widgets import set_variant
+
+
+# 模块面板分组：组 id -> (分组标题, 模块类型列表)。顺序即面板显示顺序，
+# 组 id 同时用于持久化收起状态（config.json 的 collapsed_module_groups）。
+MODULE_GROUPS = [
+    ("input",    "键鼠操作",   ["click", "press", "find"]),
+    ("perceive", "目标识别",   ["ocr", "text_find", "screenshot"]),
+    ("app_web",  "应用与网页", ["app", "close_app", "web"]),
+    ("logic",    "变量与日志", ["var", "wait", "log", "clip_set", "clip_get"]),
+]
 
 
 def _clone_flow(flow: Flow) -> Flow:
@@ -73,11 +84,35 @@ class FlowTab(QWidget):
             QWidget#flowTab QListWidget::item:selected {
                 background-color: #1668a8; color: white;
             }
-            QWidget#flowTab QListWidget#flowList { font-size: 10pt; }
-            QWidget#flowTab QListWidget#flowList::item {
-                height: 34px; padding: 2px 8px;
+            QWidget#flowTab QTreeWidget#flowList {
+                font-size: 10pt; outline: none;
+                border: 1px solid #d8dee4; border-radius: 6px;
+                background: white;
+            }
+            QWidget#flowTab QTreeWidget#flowList::item {
+                height: 30px; padding: 2px 6px;
                 border-bottom: 1px solid #f0f3f6;
             }
+            QWidget#flowTab QTreeWidget#flowList::item:hover { background-color: #e8f1fa; }
+            QWidget#flowTab QTreeWidget#flowList::item:selected {
+                background-color: #1668a8; color: white;
+            }
+            QWidget#flowTab QTreeWidget#flowList::branch { background: transparent; }
+            /* 分组头：浅灰蓝底、左对齐蓝色加粗，与流程条目区分 */
+            QWidget#flowTab QTreeWidget#flowList QPushButton[groupHeader="true"] {
+                text-align: left; padding: 3px 8px;
+                font-size: 10pt; font-weight: 600; color: #1668a8;
+                border: none; border-radius: 4px; background: #e9f0f8;
+            }
+            QWidget#flowTab QTreeWidget#flowList QPushButton[groupHeader="true"]:hover {
+                background: #dce8f4;
+            }
+            QWidget#flowTab QTreeWidget#flowList QPushButton {
+                text-align: center; padding: 3px 8px;
+                font-size: 10pt; color: #1668a8;
+                border: none; border-radius: 4px; background: transparent;
+            }
+            QWidget#flowTab QTreeWidget#flowList QPushButton:hover { background: #e9f0f8; }
             QWidget#flowTab QListWidget#stepView::item { height: 38px; }
             QWidget#flowTab QGroupBox {
                 border: 1px solid #d8dee4; border-radius: 6px;
@@ -85,8 +120,8 @@ class FlowTab(QWidget):
             }
             QWidget#flowTab QGroupBox::title { subcontrol-origin: margin; left: 10px; }
             QWidget#flowTab QGroupBox#modulePanel QPushButton {
-                text-align: left; padding: 10px 14px;
-                font-size: 10.5pt; border: 1px solid #d8dee4;
+                text-align: left; padding: 5px 12px;
+                font-size: 10pt; border: 1px solid #d8dee4;
                 border-radius: 6px; background: white; color: #24292f;
             }
             QWidget#flowTab QGroupBox#modulePanel QPushButton:hover {
@@ -94,6 +129,36 @@ class FlowTab(QWidget):
             }
             QWidget#flowTab QGroupBox#modulePanel QPushButton:disabled {
                 color: #aab2bb; background: #f2f4f6; border-color: #e1e4e8;
+            }
+            /* 模块分组标题：浅灰蓝底与按钮区区分，左对齐蓝色加粗，点击即收起/展开。
+               选择器必须比上方 QGroupBox#modulePanel QPushButton 更具体（含 id+属性），
+               否则 modulePanel 的 padding/背景会压过本规则导致样式失效。 */
+            QWidget#flowTab QGroupBox#modulePanel QPushButton[groupHeader="true"] {
+                text-align: left; padding: 3px 10px;
+                font-size: 10pt; font-weight: 600; color: #1668a8;
+                border: none; border-radius: 6px; background: #e9f0f8;
+            }
+            QWidget#flowTab QGroupBox#modulePanel QPushButton[groupHeader="true"]:hover {
+                background: #dce8f4;
+            }
+            QWidget#flowTab QGroupBox#modulePanel QPushButton[groupHeader="true"]:disabled {
+                color: #aab2bb; background: #f2f4f6;
+            }
+            /* 「全部收起」小按钮：胶囊形、浅蓝描边，与分组标题区分 */
+            QWidget#flowTab QGroupBox#modulePanel QPushButton#collapseAllBtn {
+                text-align: center; padding: 2px 10px;
+                font-size: 9pt; color: #1668a8;
+                border: 1px solid #b9d3e8; border-radius: 10px;
+                background: #f3f8fd;
+            }
+            QWidget#flowTab QGroupBox#modulePanel QPushButton#collapseAllBtn:hover {
+                background: #dce8f4;
+            }
+            QWidget#flowTab QGroupBox#modulePanel QPushButton#collapseAllBtn:disabled {
+                color: #aab2bb; background: #f2f4f6; border-color: #e1e4e8;
+            }
+            QWidget#flowTab QScrollArea#moduleScroll {
+                background: transparent; border: none;
             }
         """)
 
@@ -105,46 +170,28 @@ class FlowTab(QWidget):
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(6)
 
-        # ===== 左栏：流程列表 =====
+        # ===== 左栏：流程列表（按分组组织，右键菜单管理流程） =====
         left = QWidget()
         llay = QVBoxLayout(left)
         llay.setContentsMargins(0, 0, 0, 0)
         llay.setSpacing(6)
-        flow_title = QLabel("流程")
-        flow_title.setStyleSheet(
-            "font-size: 11pt; font-weight: 600; color: #24292f; padding: 2px;")
-        llay.addWidget(flow_title)
         lbar1 = QHBoxLayout()
         lbar1.setSpacing(4)
-        self.new_btn = QPushButton("➕")
-        self.new_btn.setToolTip("新建流程（名称/轮数/热键）")
-        set_variant(self.new_btn, "success")
-        self.edit_btn = QPushButton("✎")
-        self.edit_btn.setToolTip("编辑流程名称/轮数/热键")
-        set_variant(self.edit_btn, "primary")
-        self.del_btn = QPushButton("🗑")
-        self.del_btn.setToolTip("删除流程")
-        set_variant(self.del_btn, "danger")
-        for b in (self.new_btn, self.edit_btn, self.del_btn):
-            b.setMaximumWidth(40)
-            lbar1.addWidget(b)
-        lbar1.addStretch(1)
+        self.new_group_btn = QPushButton("➕ 添加分组")
+        self.new_group_btn.setToolTip("新建流程分组（可在分组下添加流程）")
+        set_variant(self.new_group_btn, "primary")
+        lbar1.addWidget(self.new_group_btn, 1)
         llay.addLayout(lbar1)
-        lbar3 = QHBoxLayout()
-        lbar3.setSpacing(4)
-        self.import_btn = QPushButton("📥 导入")
-        self.import_btn.setToolTip("从流程 .json 文件导入一个流程（可用于备份恢复或分享）")
-        self.export_btn = QPushButton("📤 导出")
-        self.export_btn.setToolTip("把左侧选中的流程导出为 .json 文件")
-        lbar3.addWidget(self.import_btn, 1)
-        lbar3.addWidget(self.export_btn, 1)
-        llay.addLayout(lbar3)
-        self.list = QListWidget()
+        self.list = QTreeWidget()
         self.list.setObjectName("flowList")
-        self.list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        self.list.setWordWrap(True)
+        self.list.setHeaderHidden(True)
+        self.list.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
+        self.list.setRootIsDecorated(False)      # 分组头自带按钮，不需要系统展开箭头
+        self.list.setIndentation(14)
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._flow_context_menu)
         llay.addWidget(self.list, 1)
-        left.setMinimumWidth(150)
+        left.setMinimumWidth(200)
         splitter.addWidget(left)
 
         # ===== 中栏：步骤编排（实时编辑） =====
@@ -187,7 +234,7 @@ class FlowTab(QWidget):
         clay.addLayout(sbtn_row)
         splitter.addWidget(center)
 
-        # ===== 右栏：模块面板 =====
+        # ===== 右栏：模块面板（按功能分组，点击分组标题收起/展开） =====
         right = QWidget()
         rlay = QVBoxLayout(right)
         rlay.setContentsMargins(0, 0, 0, 0)
@@ -197,14 +244,66 @@ class FlowTab(QWidget):
         self.panel_box.setObjectName("modulePanel")
         panel = QVBoxLayout(self.panel_box)
         panel.setContentsMargins(8, 10, 8, 8)
-        panel.setSpacing(6)
-        self._module_btns = []
-        for t, label in FLOW_STEP_TYPES.items():
-            btn = ModuleButton(t, label)
-            btn.setMinimumHeight(40)
-            self._module_btns.append(btn)
-            panel.addWidget(btn)
-        panel.addStretch(1)
+        panel.setSpacing(2)
+
+        # 顶部工具行：右侧一个小按钮，一键收起所有分组
+        panel_top = QHBoxLayout()
+        panel_top.setSpacing(4)
+        self.collapse_all_btn = QPushButton("⏫ 全部收起")
+        self.collapse_all_btn.setObjectName("collapseAllBtn")
+        self.collapse_all_btn.setToolTip("一键收起所有模块分组（再次点击各分组标题可展开）")
+        self.collapse_all_btn.setCursor(Qt.PointingHandCursor)
+        self.collapse_all_btn.clicked.connect(self._collapse_all_groups)
+        panel_top.addStretch(1)
+        panel_top.addWidget(self.collapse_all_btn)
+        panel.addLayout(panel_top)
+
+        # 分组内容放进滚动区：全部展开时高度不够可滚动，折叠后自动收缩
+        scroll = QScrollArea()
+        scroll.setObjectName("moduleScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_box = QWidget()
+        scroll_lay = QVBoxLayout(scroll_box)
+        scroll_lay.setContentsMargins(0, 0, 0, 0)
+        scroll_lay.setSpacing(2)
+
+        self._module_btns = []                       # 全部模块按钮（锁定/解锁统一遍历）
+        self._group_headers: dict[str, QPushButton] = {}   # gid -> 分组标题按钮
+        self._group_wrappers: dict[str, QWidget] = {}      # gid -> 模块按钮容器
+        self._group_titles = {gid: title for gid, title, _ in MODULE_GROUPS}
+        collapsed = set(self.cfg.collapsed_module_groups)
+        for gid, title, types in MODULE_GROUPS:
+            header = QPushButton(f"▾ {title}" if gid not in collapsed else f"▸ {title}")
+            header.setProperty("groupHeader", True)
+            header.setCursor(Qt.PointingHandCursor)
+            header.setToolTip("点击收起/展开")
+            header.setCheckable(True)
+            header.setChecked(gid not in collapsed)
+            header.toggled.connect(lambda on, g=gid: self._on_group_toggled(g, on))
+            self._group_headers[gid] = header
+            scroll_lay.addWidget(header)
+
+            wrapper = QWidget()
+            # 不让分组容器被布局拉高：展开时组内按钮紧凑排列，不留空白
+            wrapper.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            wrap_lay = QVBoxLayout(wrapper)
+            wrap_lay.setContentsMargins(0, 0, 0, 0)
+            wrap_lay.setSpacing(3)
+            for t in types:
+                label = FLOW_STEP_TYPES[t]
+                btn = ModuleButton(t, label)
+                btn.setMinimumHeight(32)
+                self._module_btns.append(btn)
+                wrap_lay.addWidget(btn)
+            wrapper.setVisible(gid not in collapsed)
+            self._group_wrappers[gid] = wrapper
+            scroll_lay.addWidget(wrapper)
+
+        scroll_lay.addStretch(1)   # 多余空间收到底部：全收起时标题紧凑，全展开时按钮顶对齐
+        scroll.setWidget(scroll_box)
+        panel.addWidget(scroll, 1)
         rlay.addWidget(self.panel_box, 1)
         right.setMinimumWidth(150)
         splitter.addWidget(right)
@@ -212,44 +311,130 @@ class FlowTab(QWidget):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([150, 620, 150])
+        splitter.setSizes([210, 600, 150])
         self._splitter = splitter
         root.addWidget(splitter, 1)
 
         # ---- 信号 ----
-        self.new_btn.clicked.connect(self._new_flow)
-        self.edit_btn.clicked.connect(self._edit_flow)
-        self.del_btn.clicked.connect(self._del_flow)
+        self.new_group_btn.clicked.connect(self._add_group)
         self.run_btn.clicked.connect(self._toggle_selected)
-        self.import_btn.clicked.connect(self._import_flow)
-        self.export_btn.clicked.connect(self._export_flow)
-        self.list.itemDoubleClicked.connect(lambda *_: self._edit_flow())
+        self.list.itemDoubleClicked.connect(lambda *_: self._on_flow_double_clicked())
         self.list.itemSelectionChanged.connect(self.refresh_steps_view)
 
     def showEvent(self, ev):
-        """首次显示时按 15/68/17 应用三栏宽度（构造期 setSizes 会被布局覆盖）。"""
+        """首次显示时按比例应用三栏宽度（构造期 setSizes 会被布局覆盖）。"""
         super().showEvent(ev)
         if not self._ratio_applied and self.isVisible():
             self._ratio_applied = True
             total = sum(self._splitter.sizes()) or 1
-            self._splitter.setSizes([int(total * 0.15), int(total * 0.68),
-                                     int(total * 0.17)])
+            self._splitter.setSizes([int(total * 0.22), int(total * 0.62),
+                                     int(total * 0.16)])
 
-    # ---------- 左栏列表 ----------
+    # ---------- 左栏列表（分组树） ----------
     def refresh_list(self):
         self.list.blockSignals(True)
         self.list.clear()
+        collapsed = set(self.cfg.collapsed_flow_groups)
+        # 分组顺序：flow_groups 定义的分组在前，「未分组」兜底放最后
+        groups = [g for g in self.cfg.flow_groups if g.strip()]
+        by_group: dict[str, list[Flow]] = {g: [] for g in groups}
         for f in self._flows:
-            item = QListWidgetItem(self._flow_item_text(f))
-            item.setData(Qt.UserRole, f.id)
+            g = f.group if f.group in by_group else ""
+            by_group.setdefault(g, []).append(f)
+        for g in groups + [""]:
+            gitem = QTreeWidgetItem()
+            gitem.setData(0, Qt.UserRole, ("group", g))
+            gitem.setFlags(Qt.ItemIsEnabled)          # 分组头不可选中
+            self.list.addTopLevelItem(gitem)
+            expanded = g not in collapsed
+            self.list.setItemWidget(gitem, 0, self._group_header_widget(g, expanded))
+            for f in by_group.get(g, []):
+                citem = QTreeWidgetItem([self._flow_item_text(f)])
+                citem.setData(0, Qt.UserRole, ("flow", f.id))
+                runner = self._runners.get(f.id)
+                if runner and runner.is_running:
+                    citem.setForeground(0, QColor("#27ae60"))
+                gitem.addChild(citem)
+            gitem.setExpanded(expanded)
+        self.list.blockSignals(False)
+        self._restore_selection()
+        self.refresh_steps_view()
+
+    def _restore_selection(self):
+        """重建后恢复选中：优先选中运行中的流程，否则第一个流程。"""
+        for f in self._flows:
             runner = self._runners.get(f.id)
             if runner and runner.is_running:
-                item.setForeground(QColor("#27ae60"))
-            self.list.addItem(item)
-        self.list.blockSignals(False)
-        if self.list.currentRow() < 0 and self._flows:
-            self.list.setCurrentRow(0)
-        self.refresh_steps_view()
+                self._select_flow_item(f.id)
+                return
+        if self._flows:
+            self._select_flow_item(self._flows[0].id)
+
+    def _select_flow_item(self, flow_id: str):
+        item = self._flow_item(flow_id)
+        if item is not None:
+            self.list.setCurrentItem(item)
+
+    def _group_item(self, g: str) -> QTreeWidgetItem | None:
+        for i in range(self.list.topLevelItemCount()):
+            it = self.list.topLevelItem(i)
+            if it.data(0, Qt.UserRole) == ("group", g):
+                return it
+        return None
+
+    def _flow_item(self, flow_id: str) -> QTreeWidgetItem | None:
+        for i in range(self.list.topLevelItemCount()):
+            g = self.list.topLevelItem(i)
+            for j in range(g.childCount()):
+                c = g.child(j)
+                if c.data(0, Qt.UserRole) == ("flow", flow_id):
+                    return c
+        return None
+
+    def _group_header_widget(self, g: str, expanded: bool) -> QWidget:
+        """分组头：展开/收起按钮 + 在当前分组下新建流程的加号按钮。"""
+        name = g if g else "未分组"
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(2)
+        title = QPushButton(("▾ " if expanded else "▸ ") + name)
+        title.setObjectName("groupTitle")
+        title.setProperty("groupHeader", True)
+        title.setCursor(Qt.PointingHandCursor)
+        title.setToolTip("点击展开/收起分组")
+        title.setContextMenuPolicy(Qt.CustomContextMenu)
+        title.customContextMenuRequested.connect(
+            lambda pos, g=g: self._group_context_menu(g, title.mapToGlobal(pos)))
+        title.clicked.connect(lambda _, g=g: self._toggle_group(g))
+        h.addWidget(title, 1)
+        plus = QPushButton("＋")
+        plus.setCursor(Qt.PointingHandCursor)
+        plus.setToolTip(f"在「{name}」分组下新建流程")
+        plus.clicked.connect(lambda _, g=g: self._new_flow(g))
+        plus.setMaximumWidth(30)
+        h.addWidget(plus)
+        return w
+
+    def _toggle_group(self, g: str):
+        """点击分组头：切换展开/收起，并把状态持久化到 config。"""
+        item = self._group_item(g)
+        if item is None:
+            return
+        expanded = not item.isExpanded()
+        item.setExpanded(expanded)
+        header = self.list.itemWidget(item, 0)
+        if header is not None:
+            btn = header.findChild(QPushButton, "groupTitle")
+            if btn is not None:
+                btn.setText(("▾ " if expanded else "▸ ") + (g if g else "未分组"))
+        collapsed = set(self.cfg.collapsed_flow_groups)
+        if expanded:
+            collapsed.discard(g)
+        else:
+            collapsed.add(g)
+        self.cfg.collapsed_flow_groups = sorted(collapsed)
+        self.cfg.save()
 
     def _flow_item_text(self, f: Flow, failed: bool = False) -> str:
         """左栏条目只显示流程名（运行中加 ▶ 前缀；失败标注红色由调用方处理）。"""
@@ -261,30 +446,32 @@ class FlowTab(QWidget):
         return f.name
 
     def _update_left_item(self, flow_id: str, failed: bool = False):
-        """按流程当前状态刷新左栏三行条目。"""
+        """按流程当前状态刷新左栏对应条目。"""
         flow = next((f for f in self._flows if f.id == flow_id), None)
-        row = self._flow_row(flow_id)
-        if flow is None or row < 0:
+        item = self._flow_item(flow_id)
+        if flow is None or item is None:
             return
-        item = self.list.item(row)
-        item.setText(self._flow_item_text(flow, failed=failed))
+        item.setText(0, self._flow_item_text(flow, failed=failed))
         runner = self._runners.get(flow_id)
         if runner and runner.is_running:
-            item.setForeground(QColor("#27ae60"))
+            item.setForeground(0, QColor("#27ae60"))
         elif failed:
-            item.setForeground(QColor("#c0392b"))
+            item.setForeground(0, QColor("#c0392b"))
         else:
-            item.setForeground(self.list.palette().color(self.list.foregroundRole()))
+            item.setForeground(0, self.list.palette().color(self.list.foregroundRole()))
 
     @staticmethod
     def _loops_text(f: Flow) -> str:
         return "无限循环" if f.loops == 0 else f"{f.loops} 轮"
 
     def _selected_flow(self) -> Flow | None:
-        row = self.list.currentRow()
-        if 0 <= row < len(self._flows):
-            return self._flows[row]
-        return None
+        item = self.list.currentItem()
+        if item is None:
+            return None
+        data = item.data(0, Qt.UserRole)
+        if not data or data[0] != "flow":
+            return None
+        return next((f for f in self._flows if f.id == data[1]), None)
 
     def _selected_running(self) -> bool:
         flow = self._selected_flow()
@@ -297,6 +484,28 @@ class FlowTab(QWidget):
     def refresh_steps_view(self):
         self._reload_steps()
 
+    def _collapse_all_groups(self):
+        """一键收起全部模块分组（状态经 toggled 信号持久化到 config）。"""
+        for gid, header in self._group_headers.items():
+            if header.isChecked():
+                header.setChecked(False)   # 触发 toggled(False) -> _on_group_toggled 收起+持久化
+
+    def _on_group_toggled(self, gid: str, expanded: bool):
+        """分组标题点击：切换模块按钮区显示/隐藏，并把状态持久化到 config。"""
+        header = self._group_headers.get(gid)
+        wrapper = self._group_wrappers.get(gid)
+        if header is None or wrapper is None:
+            return
+        header.setText(("▾ " if expanded else "▸ ") + self._group_titles[gid])
+        wrapper.setVisible(expanded)
+        collapsed = set(self.cfg.collapsed_module_groups)
+        if expanded:
+            collapsed.discard(gid)
+        else:
+            collapsed.add(gid)
+        self.cfg.collapsed_module_groups = sorted(collapsed)
+        self.cfg.save()
+
     def _reload_steps(self):
         flow = self._selected_flow()
         running = self._selected_running()
@@ -305,6 +514,9 @@ class FlowTab(QWidget):
         # 锁定/解锁编辑控件
         for b in self._module_btns:
             b.setEnabled(editable)
+        for h in self._group_headers.values():
+            h.setEnabled(editable)
+        self.collapse_all_btn.setEnabled(editable)
         self.step_list.setEnabled(editable)
         self.step_edit_btn.setEnabled(editable)
         self.step_del_btn.setEnabled(editable)
@@ -631,21 +843,21 @@ class FlowTab(QWidget):
             done()
 
     # ---------- 流程元信息（新建/编辑） ----------
-    def _new_flow(self):
-        flow = Flow(name=f"流程 {len(self._flows) + 1}")
-        dlg = FlowMetaDialog(flow, create=True, parent=self)
+    def _new_flow(self, group: str = ""):
+        flow = Flow(name=f"流程 {len(self._flows) + 1}", group=group)
+        dlg = FlowMetaDialog(flow, create=True, parent=self, groups=self.cfg.flow_groups)
         if dlg.exec() == FlowMetaDialog.Accepted:
             dlg.apply_to(flow)
             self._flows.append(flow)
             self.refresh_list()
-            self.list.setCurrentRow(len(self._flows) - 1)
+            self._select_flow_item(flow.id)
             self.changed.emit()
 
     def _edit_flow(self):
         flow = self._selected_flow()
         if flow is None:
             return
-        dlg = FlowMetaDialog(flow, create=False, parent=self)
+        dlg = FlowMetaDialog(flow, create=False, parent=self, groups=self.cfg.flow_groups)
         if dlg.exec() == FlowMetaDialog.Accepted:
             dlg.apply_to(flow)
             self.refresh_list()
@@ -664,6 +876,129 @@ class FlowTab(QWidget):
         self._flows.remove(flow)
         self.refresh_list()
         self.changed.emit()
+
+    # ---------- 分组管理 ----------
+    def _add_group(self):
+        name, ok = QInputDialog.getText(self, "添加分组", "请输入分组名称：")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in self.cfg.flow_groups:
+            QMessageBox.information(self, "分组已存在", f"分组「{name}」已经存在。")
+            return
+        self.cfg.flow_groups.append(name)
+        self.cfg.save()
+        self.refresh_list()
+        self.changed.emit()
+
+    def _rename_group(self, g: str):
+        name, ok = QInputDialog.getText(self, "重命名分组", "新的分组名称：", text=g)
+        name = (name or "").strip()
+        if not ok or not name or name == g:
+            return
+        if name in self.cfg.flow_groups:
+            QMessageBox.information(self, "分组已存在", f"分组「{name}」已经存在。")
+            return
+        self.cfg.flow_groups = [name if x == g else x for x in self.cfg.flow_groups]
+        for f in self._flows:
+            if f.group == g:
+                f.group = name
+        self.cfg.save()
+        self.refresh_list()
+        self.changed.emit()
+
+    def _del_group(self, g: str):
+        if QMessageBox.question(self, "删除分组",
+                                f"确定删除分组「{g}」吗？\n组内流程将移到「未分组」。"
+                                ) != QMessageBox.Yes:
+            return
+        self.cfg.flow_groups = [x for x in self.cfg.flow_groups if x != g]
+        self.cfg.collapsed_flow_groups = [x for x in self.cfg.collapsed_flow_groups if x != g]
+        for f in self._flows:
+            if f.group == g:
+                f.group = ""
+        self.cfg.save()
+        self.refresh_list()
+        self.changed.emit()
+
+    # ---------- 左栏右键菜单 ----------
+    def _flow_context_menu(self, pos):
+        """流程列表右键：流程项 = 编辑/删除/导出；分组头 = 分组管理。"""
+        item = self.list.itemAt(pos)
+        if item is None:
+            return
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+        if data[0] == "group":
+            self._group_context_menu(data[1], self.list.viewport().mapToGlobal(pos))
+            return
+        flow = next((f for f in self._flows if f.id == data[1]), None)
+        if flow is None:
+            return
+        self.list.setCurrentItem(item)               # 右键即选中该流程
+        menu = QMenu(self)
+        self._style_menu(menu)
+        edit_act = menu.addAction("✎ 编辑流程")
+        del_act = menu.addAction("🗑 删除流程")
+        menu.addSeparator()
+        export_act = menu.addAction("📤 导出流程")
+        act = menu.exec(self.list.viewport().mapToGlobal(pos))
+        if act == edit_act:
+            self._edit_flow()
+        elif act == del_act:
+            self._del_flow()
+        elif act == export_act:
+            self._export_flow()
+
+    def _group_context_menu(self, g: str, pos):
+        """分组头右键：重命名/删除分组（「未分组」不可操作）。"""
+        if not g:
+            return
+        menu = QMenu(self)
+        self._style_menu(menu)
+        rename_act = menu.addAction("✎ 重命名分组")
+        del_act = menu.addAction("🗑 删除分组")
+        act = menu.exec(pos)
+        if act == rename_act:
+            self._rename_group(g)
+        elif act == del_act:
+            self._del_group(g)
+
+    @staticmethod
+    def _style_menu(menu: QMenu):
+        menu.setStyleSheet("""
+            QMenu {
+                background: #ffffff;
+                border: 1px solid #d8dee4;
+                border-radius: 8px;
+                padding: 6px;
+                font-size: 12pt;
+            }
+            QMenu::item {
+                color: #24292f;
+                padding: 9px 32px 9px 14px;
+                margin: 2px 4px;
+                border-radius: 6px;
+            }
+            QMenu::item:selected {
+                background: #1668a8;
+                color: #ffffff;
+            }
+            QMenu::item:disabled {
+                color: #a7afb8;
+                background: transparent;
+            }
+        """)
+
+    def _on_flow_double_clicked(self):
+        """双击流程条目 = 编辑流程（分组头双击由按钮自身处理）。"""
+        item = self.list.currentItem()
+        if item is None:
+            return
+        data = item.data(0, Qt.UserRole)
+        if data and data[0] == "flow":
+            self._edit_flow()
 
     # ---------- 流程导入 / 导出 ----------
     def _import_flow(self):
@@ -687,7 +1022,7 @@ class FlowTab(QWidget):
         flow.id = uuid.uuid4().hex[:12]   # 分配新 id，避免与现有流程/流程文件冲突
         self._flows.append(flow)
         self.refresh_list()
-        self.list.setCurrentRow(len(self._flows) - 1)
+        self._select_flow_item(flow.id)
         self.changed.emit()
         self._status_msg(f"已导入流程「{flow.name}」（{len(flow.steps)} 步）", 5000)
         return True
@@ -827,12 +1162,6 @@ class FlowTab(QWidget):
         return names
 
     # ---------- 状态回调 ----------
-    def _flow_row(self, flow_id: str) -> int:
-        for row in range(self.list.count()):
-            if self.list.item(row).data(Qt.UserRole) == flow_id:
-                return row
-        return -1
-
     def _on_step_started(self, flow_id: str, idx: int, name: str):
         self._update_left_item(flow_id)
         self._reload_steps()

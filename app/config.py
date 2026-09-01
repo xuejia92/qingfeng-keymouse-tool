@@ -186,9 +186,11 @@ class FindTask:
 # ---------------- 自动化流程 ----------------
 
 FLOW_STEP_TYPES = {"var": "变量", "log": "日志输出", "ocr": "文字识别",
+                   "text_find": "文字查找", "screenshot": "截图",
                    "click": "鼠标点击", "press": "键盘连按", "find": "找图点击",
                    "wait": "延时等待", "web": "网页操作", "app": "打开应用",
-                   "close_app": "关闭应用"}
+                   "close_app": "关闭应用", "clip_set": "赋值剪贴板",
+                   "clip_get": "获取剪贴板内容"}
 
 # 变量类型：值 -> 显示名
 VARIABLE_TYPES = {"string": "字符串", "integer": "整数", "float": "浮点数",
@@ -208,6 +210,7 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "mouse_button": c.mouse_button, "click_type": c.click_type,
             "interval_ms": c.interval_ms, "fixed_position": c.fixed_position,
             "pos_x": c.pos_x, "pos_y": c.pos_y,
+            "pos_var": "",                      # 坐标变量：值形如 "64,63" 的字符串，非空时优先于固定坐标
             "count": c.count if c.count > 0 else 1, "duration_sec": c.duration_sec,
             # 后台操作：按窗口标题动态查找目标窗口（句柄每次重启都变，不能存死）
             "background": False, "window_title": "",
@@ -245,6 +248,14 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "lang": "ch",                 # 识别语言（RapidOCR 默认中英混合，兼容占位）
             "multi_ocr": True,            # True=多行文本列表，False=拼接字符串
         }
+    if step_type == "text_find":
+        return {
+            "text": "",                   # 要查找的文字，支持 $变量名 引用
+            "region": "",                 # 查找区域 "x,y,w,h"，空=全屏
+            "click": False,               # True=找到后点击该文字
+            "click_button": "left",       # left / right
+            "variable": "",               # 结果变量：未勾选点击时写坐标 "x,y"，未找到写 false
+        }
     if step_type == "wait":
         return {"seconds": 1.0}
     if step_type == "app":
@@ -269,6 +280,22 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "wait_after_sec": 0.0,
             "tab_scope": "current",        # current / others / match
             "match_text": "",
+        }
+    if step_type == "clip_set":
+        return {
+            "name": "",                   # 要写入剪贴板的变量名（与 text 二选一，变量优先）
+            "text": "",                   # 直接写入剪贴板的文本，支持 $变量名 引用
+        }
+    if step_type == "clip_get":
+        return {
+            "variable": "",               # 接收剪贴板内容的变量名
+        }
+    if step_type == "screenshot":
+        return {
+            "mode": "fullscreen",         # fullscreen=全屏 / region=指定区域 / select=自己框选
+            "region": "",                 # 指定区域 "x,y,w,h"（物理像素，空=全屏）
+            "save_mode": "variable",      # variable=变量保存 / choose=自选保存（弹窗）
+            "variable": "",               # 变量保存时：截图绝对路径写入的结果变量
         }
     raise ValueError(f"未知步骤类型: {step_type}")
 
@@ -331,12 +358,28 @@ class FlowStep:
                 var = p.get("variable") or "未指定变量"
                 region = p.get("region") or "全屏"
                 return f"{region} → {var}"
+            if self.type == "text_find":
+                text = p.get("text") or "未填文字"
+                if len(text) > 20:
+                    text = text[:19] + "…"
+                act = "点击" if p.get("click") else "返回坐标"
+                return f"查找「{text}」· {act}"
             if self.type == "click":
                 btn = {"left": "左键", "right": "右键", "middle": "中键"}.get(p["mouse_button"], "左键")
                 ct = "双击" if p["click_type"] == "double" else "单击"
                 cnt = "无限" if int(p["count"]) == 0 else f"×{p['count']}"
                 bg = " · 置顶" if p.get("background") else ""
-                return f"{btn} {ct} · {p['interval_ms']}ms {cnt}{bg}"
+                pos = ""
+                if p.get("fixed_position"):
+                    pv = p.get("pos_var") or ""
+                    if pv:
+                        pos = f" · 坐标(变量 {pv})"
+                    else:
+                        # 兼容旧配置：pos_x_var / pos_y_var 各自独立
+                        xv, yv = p.get("pos_x_var") or "", p.get("pos_y_var") or ""
+                        if xv or yv:
+                            pos = f" · 坐标({xv or '固定'},{yv or '固定'})"
+                return f"{btn} {ct} · {p['interval_ms']}ms {cnt}{bg}{pos}"
             if self.type == "press":
                 from .keymap import hotkey_display
                 cnt = "无限" if int(p["count"]) == 0 else f"×{p['count']}"
@@ -359,6 +402,23 @@ class FlowStep:
                 if len(target) > 40:
                     target = target[:39] + "…"
                 return f"关闭 {target}"
+            if self.type == "clip_set":
+                name = p.get("name") or ""
+                text = (p.get("text") or "").strip()
+                if text and not name:
+                    if len(text) > 20:
+                        text = text[:19] + "…"
+                    return f"「{text}」 → 剪贴板"
+                return f"{name or '未选变量'} → 剪贴板"
+            if self.type == "clip_get":
+                return f"剪贴板 → {p.get('variable') or '未指定变量'}"
+            if self.type == "screenshot":
+                mode = {"fullscreen": "全屏", "region": "指定区域",
+                        "select": "自己框选"}.get(p.get("mode"), "全屏")
+                if p.get("save_mode") == "choose":
+                    return f"{mode}截图 · 自选保存"
+                var = p.get("variable") or ""
+                return f"{mode}截图 → {var}" if var else f"{mode}截图 · 变量保存"
             if self.type == "web":
                 act = p.get("action")
                 if act == "open":
@@ -415,6 +475,7 @@ def repair_web_pairs(steps: list) -> bool:
 class Flow:
     id: str = ""
     name: str = "新建流程"
+    group: str = ""                             # 所属分组名；空 = 未分组
     steps: list = field(default_factory=list)   # list[FlowStep]
     variables: list = field(default_factory=list) # list[FlowVariable]
     hotkey: str = ""                            # 可选启停热键
@@ -468,6 +529,7 @@ def flow_from_dict(data: dict) -> Flow | None:
         flow = Flow(
             id=str(data.get("id") or uuid.uuid4().hex[:12]),
             name=str(data.get("name", "流程"))[:50],
+            group=str(data.get("group", "") or "")[:50],
             steps=steps,
             variables=variables,
             hotkey=str(data.get("hotkey", "")),
@@ -641,7 +703,10 @@ class AppConfig:
     presser: PresserConfig = field(default_factory=PresserConfig)
     find_tasks: list[FindTask] = field(default_factory=list)
     flows: list[Flow] = field(default_factory=list)
+    flow_groups: list[str] = field(default_factory=list)  # 流程分组（顺序即显示顺序）
+    collapsed_flow_groups: list[str] = field(default_factory=list)  # 收起的流程分组名
     clear_log_on_run: bool = False        # 运行新流程时自动清空底部日志
+    collapsed_module_groups: list[str] = field(default_factory=list)  # 模块面板中收起的分组 id
 
     # ---------- 持久化 ----------
     def save(self) -> None:
@@ -739,6 +804,20 @@ class AppConfig:
             except (TypeError, ValueError):
                 continue
         cfg.find_tasks = tasks
+
+        # 模块面板分组收起状态（仅收录已知分组 id，未知的丢弃）
+        groups = data.get("collapsed_module_groups", [])
+        cfg.collapsed_module_groups = ([str(g) for g in groups if isinstance(g, str)]
+                                       if isinstance(groups, list) else [])
+
+        # 流程分组（名称列表，保持用户定义顺序）
+        fgs = data.get("flow_groups", [])
+        cfg.flow_groups = ([str(g)[:50] for g in fgs if isinstance(g, str) and g.strip()]
+                           if isinstance(fgs, list) else [])
+        # 流程分组收起状态（仅收录已知分组，未知的丢弃）
+        cfg.collapsed_flow_groups = ([str(g) for g in data.get("collapsed_flow_groups", [])
+                                      if isinstance(g, str) and g.strip()]
+                                     if isinstance(data.get("collapsed_flow_groups"), list) else [])
 
         # 流程：flows/ 目录为唯一存储源；旧版 config.json 内嵌流程按 id 补齐迁移
         # （首次升级整体迁入；此后恢复含流程的旧备份 config.json 也能找回目录里没有的流程）

@@ -11,21 +11,21 @@ import subprocess
 from PySide6.QtCore import Qt, QPoint, QRect, Signal, QMimeData
 from PySide6.QtGui import QColor, QDrag, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
+                               QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
                                QPushButton, QRadioButton, QSpinBox, QStyle, QStyledItemDelegate,
-                               QStyleOptionViewItem, QTableWidget,
-                               QTableWidgetItem, QToolTip, QVBoxLayout, QWidget)
+                               QStyleOptionViewItem, QToolTip, QVBoxLayout, QWidget)
 
-from ..config import VARIABLE_TYPES, WEB_ACTIONS, Flow, FlowStep, FlowVariable
+from ..config import VARIABLE_TYPES, WEB_ACTIONS, Flow, FlowStep
 from ..web_actors import LAUNCH_MODES, TAB_SCOPES
 from .hotkey_edit import HotkeyEdit
 
 MIME_TYPE = "application/x-qf-flow-type"
 
-_TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎",
-               "click": "🖱", "press": "⌨", "find": "🖼", "wait": "⏱",
-               "web": "🌐", "app": "🚀", "close_app": "⏹"}
+_TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "text_find": "🔍",
+               "screenshot": "📷", "click": "🖱", "press": "⌨", "find": "🖼",
+               "wait": "⏱", "web": "🌐", "app": "🚀", "close_app": "⏹",
+               "clip_set": "📤", "clip_get": "📥"}
 
 
 class ModuleButton(QPushButton):
@@ -254,13 +254,17 @@ class StepList(QListWidget):
 
 
 class FlowMetaDialog(QDialog):
-    """新建/编辑流程：只含流程名、运行轮数、启停热键。"""
+    """新建/编辑流程：流程名、所属分组、运行轮数、启停热键。
 
-    def __init__(self, flow: Flow, create: bool, parent=None):
+    groups 为 None 时不显示分组行（外部未提供分组列表的场景）。
+    """
+
+    def __init__(self, flow: Flow, create: bool, parent=None, groups: list[str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("新建流程" if create else "编辑流程")
         self.setMinimumWidth(380)
         self._flow = flow
+        self._groups = list(groups or [])
         self._build()
         self._fill(flow)
 
@@ -268,6 +272,12 @@ class FlowMetaDialog(QDialog):
         form = QFormLayout(self)
         self.name_edit = QLineEdit()
         form.addRow("流程名称", self.name_edit)
+        if self._groups:
+            self.group_combo = QComboBox()
+            self.group_combo.addItem("未分组", "")
+            for g in self._groups:
+                self.group_combo.addItem(g, g)
+            form.addRow("所属分组", self.group_combo)
         self.loops_spin = QSpinBox()
         self.loops_spin.setRange(0, 9999)
         self.loops_spin.setSpecialValueText("0 = 无限循环")
@@ -275,30 +285,6 @@ class FlowMetaDialog(QDialog):
         self.hotkey_edit = HotkeyEdit()
         self.hotkey_edit.setMaximumWidth(220)
         form.addRow("启停热键（可选）", self.hotkey_edit)
-
-        self.vars_table = QTableWidget(0, 3, self)
-        self.vars_table.setHorizontalHeaderLabels(["变量名", "类型", "默认值"])
-        self.vars_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.vars_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
-        self.vars_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.vars_table.setColumnWidth(1, 110)
-        self.vars_table.setMinimumHeight(140)
-        self.vars_table.verticalHeader().setVisible(False)
-        self._var_types = dict(VARIABLE_TYPES)
-        form.addRow("流程变量", self.vars_table)
-        vt_row = QHBoxLayout()
-        vt_add = QPushButton("添加变量")
-        vt_add.clicked.connect(self._add_var_row)
-        vt_del = QPushButton("删除所选变量")
-        vt_del.clicked.connect(self._del_var_row)
-        vt_row.addWidget(vt_add)
-        vt_row.addWidget(vt_del)
-        vt_row.addStretch(1)
-        form.addRow("", vt_row)
-        vt_tip = QLabel("变量可在右侧「变量 / 日志输出 / 文字识别」步骤中使用；引用写法 $变量名。")
-        vt_tip.setStyleSheet("color: #8a939c;")
-        vt_tip.setWordWrap(True)
-        form.addRow("", vt_tip)
         tip = QLabel("创建后在右侧把模块拖入步骤列表；参数双击步骤即可修改。")
         tip.setStyleSheet("color: #8a939c;")
         form.addRow("", tip)
@@ -309,50 +295,18 @@ class FlowMetaDialog(QDialog):
 
     def _fill(self, flow: Flow):
         self.name_edit.setText(flow.name)
+        if self._groups:
+            idx = self.group_combo.findData(flow.group)
+            self.group_combo.setCurrentIndex(max(0, idx))
         self.loops_spin.setValue(int(flow.loops))
         self.hotkey_edit.set_hotkey(flow.hotkey)
-        self.vars_table.setRowCount(0)
-        for v in getattr(flow, "variables", []) or []:
-            self._add_var_row(v.name, v.type, v.default_value)
-
-    def _var_combobox(self):
-        cb = QComboBox()
-        for t, label in self._var_types.items():
-            cb.addItem(label, t)
-        return cb
-
-    def _add_var_row(self, name: str = "", value_type: str = "string", default=""):
-        row = self.vars_table.rowCount()
-        self.vars_table.insertRow(row)
-        self.vars_table.setItem(row, 0, QTableWidgetItem(name or ""))
-        cb = self._var_combobox()
-        cb.setCurrentIndex(max(0, cb.findData(value_type)))
-        self.vars_table.setCellWidget(row, 1, cb)
-        self.vars_table.setItem(row, 2, QTableWidgetItem(default or ""))
-
-    def _del_var_row(self) -> None:
-        row = self.vars_table.currentRow()
-        if row >= 0:
-            self.vars_table.removeRow(row)
 
     def apply_to(self, flow: Flow) -> None:
         flow.name = self.name_edit.text().strip() or flow.name
+        if self._groups:
+            flow.group = self.group_combo.currentData() or ""
         flow.loops = self.loops_spin.value()
         flow.hotkey = self.hotkey_edit.hotkey()
-        flow.variables = []
-        seen = set()
-        for row in range(self.vars_table.rowCount()):
-            item = self.vars_table.item(row, 0)
-            name = (item.text().strip() if item else "")
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            cell = self.vars_table.cellWidget(row, 1)
-            value_type = cell.currentData() if cell else "string"
-            default_item = self.vars_table.item(row, 2)
-            default = default_item.text() if default_item else ""
-            flow.variables.append(FlowVariable(name=name, type=value_type,
-                                               default_value=default))
 
 
 class ProcessPickerDialog(QDialog):
@@ -459,6 +413,21 @@ class StepParamsDialog(QDialog):
         self._build(step)
         self._fill(step)
 
+    def accept(self) -> None:
+        """确定前校验：选中「变量坐标」但没选变量时拦截并提示。"""
+        if self._step.type == "click" and getattr(self, "var_radio", None) is not None \
+                and self.var_radio.isChecked() and not self._combo_value(self.pos_var):
+            QMessageBox.warning(self, "请设置变量坐标",
+                                "已选择「变量坐标」，请选择流程中声明的坐标变量。")
+            return
+        # 截图步骤：变量保存必须选择结果变量，否则截图路径无处可存
+        if self._step.type == "screenshot" and getattr(self, "save_var_radio", None) is not None \
+                and self.save_var_radio.isChecked() and not self._combo_value(self.shot_variable):
+            QMessageBox.warning(self, "请设置结果变量",
+                                "已选择「变量保存」，请选择接收截图路径的结果变量。")
+            return
+        super().accept()
+
     def _flow_var_names(self) -> list[str]:
         """当前流程中已声明的变量名（按 var 步骤出现顺序去重）。
 
@@ -481,6 +450,46 @@ class StepParamsDialog(QDialog):
             return names
         except Exception:
             return []
+
+    def _var_combo(self, placeholder: str = "") -> QComboBox:
+        """构建非可编辑的变量下拉：只列流程中已声明的变量（「变量」步骤声明）。
+
+        首项为空占位；旧配置里保存的变量名不在列表时，由 _set_combo_value
+        动态补项保留，避免回填丢失。
+        """
+        combo = QComboBox()
+        combo.addItem(placeholder, "")
+        for name in self._flow_var_names():
+            combo.addItem(name, name)
+        return combo
+
+    def _var_combo_hint(self, form: QFormLayout) -> None:
+        """流程中还没有任何变量时，在表单里补一行引导提示。"""
+        if self._flow_var_names():
+            return
+        hint = QLabel("流程中暂无变量：先添加「变量」步骤声明，再回来选择。")
+        hint.setStyleSheet("color: #8a939c; font-size: 9pt;")
+        hint.setWordWrap(True)
+        form.addRow("", hint)
+
+    def _sync_pos_rows(self) -> None:
+        """点击位置三选一：跟随/固定坐标/变量坐标，切换时联动控件行显隐。"""
+        self._fixed_pos_widget.setVisible(self.fixed_radio.isChecked())
+        self._var_pos_widget.setVisible(self.var_radio.isChecked())
+        self.adjustSize()
+
+    def _sync_shot_rows(self) -> None:
+        """截图方式联动：只有「指定区域」才显示区域行。"""
+        mode = self.shot_mode.currentData()
+        self._shot_region_widget.setVisible(mode == "region")
+        self.adjustSize()
+
+    def _sync_shot_save_rows(self) -> None:
+        """保存位置二选一：变量保存 -> 结果变量行；自选保存 -> 说明行。"""
+        var_mode = self.save_var_radio.isChecked()
+        self._shot_var_widget.setVisible(var_mode)
+        self._shot_choose_hint_widget.setVisible(not var_mode)
+        self.adjustSize()
 
     # ---------- UI ----------
     def _build(self, step: FlowStep):
@@ -509,18 +518,42 @@ class StepParamsDialog(QDialog):
 
         elif t == "log":
             self.log_vars = QComboBox()
-            self.log_vars.setEditable(True)
-            self.log_vars.setInsertPolicy(QComboBox.NoInsert)   # 手动输入不插入列表
             self.log_vars.addItem("全部变量", "")
             for name in self._flow_var_names():
                 self.log_vars.addItem(name, name)
-            self.log_vars.setToolTip("下拉选择单个变量，或手动输入多个（逗号分隔）；留空=输出全部变量")
+            self.log_vars.setToolTip("下拉选择要输出的变量；选「全部变量」输出全部")
             form.addRow("输出变量", self.log_vars)
             self.log_text = QLineEdit()
             self.log_text.setPlaceholderText("附加文本，可用 $变量名 引用（可选）")
             form.addRow("附加文本", self.log_text)
             hint = QLabel("运行时会输出到底部日志/悬浮日志控制台，便于调试流程。")
             hint.setStyleSheet("color: #8a939c;")
+            form.addRow("", hint)
+
+        elif t == "clip_set":
+            self.clip_name = self._var_combo("（不使用变量）")
+            self.clip_name.setToolTip("选择变量：把该变量的值（转为文本）写入剪贴板（优先）")
+            form.addRow("变量", self.clip_name)
+            self.clip_text = QLineEdit()
+            self.clip_text.setPlaceholderText("或直接输入要写入剪贴板的文本，可用 $变量名 引用")
+            self.clip_text.setToolTip("选变量时此项忽略；留空且未选变量则步骤失败")
+            form.addRow("自定义文本", self.clip_text)
+            self._var_combo_hint(form)
+            hint = QLabel("把变量值或自定义文本写入剪贴板，供其他程序粘贴使用。\n"
+                          "两种来源二选一：选了变量用变量值；否则用下面的文本。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "clip_get":
+            self.clip_variable = self._var_combo("（选择变量）")
+            self.clip_variable.setToolTip("读取剪贴板文本并赋值给该变量（字符串类型）")
+            form.addRow("变量名", self.clip_variable)
+            self._var_combo_hint(form)
+            hint = QLabel("读取系统剪贴板的文本内容，赋值给指定变量。\n"
+                          "若剪贴板里没有文本，变量会被设为空字符串。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
             form.addRow("", hint)
 
         elif t == "ocr":
@@ -547,15 +580,111 @@ class StepParamsDialog(QDialog):
             hint.setStyleSheet("color: #8a939c;")
             hint.setWordWrap(True)
             form.addRow("", hint)
-            # 结果变量放最下面：下拉选择已有变量，也允许输入新变量名
-            self.ocr_variable = QComboBox()
-            self.ocr_variable.setEditable(True)
-            self.ocr_variable.setInsertPolicy(QComboBox.NoInsert)
-            for name in self._flow_var_names():
-                self.ocr_variable.addItem(name, name)
-            self.ocr_variable.setPlaceholderText("选择已有变量，或输入新变量名")
+            # 结果变量放最下面：下拉选择已有变量（由「变量」步骤声明）
+            self.ocr_variable = self._var_combo("（结果变量）")
             self.ocr_variable.setToolTip("识别结果保存到该变量（多行=列表，单行=字符串）")
             form.addRow("结果变量", self.ocr_variable)
+            self._var_combo_hint(form)
+
+        elif t == "text_find":
+            self.tf_text = QLineEdit()
+            self.tf_text.setPlaceholderText("要查找的文字，可用 $变量名 引用（必填）")
+            form.addRow("查找文字", self.tf_text)
+            region_row = QHBoxLayout()
+            self.region_edit = QLineEdit()
+            self.region_edit.setReadOnly(True)
+            pick_region = QPushButton("框选区域…")
+            pick_region.clicked.connect(self._request_region)
+            pick_region.setToolTip("隐藏本窗口后框选查找区域（与找图区域一致）")
+            clear_region = QPushButton("恢复全屏")
+            clear_region.clicked.connect(lambda: self._set_region_text(None))
+            region_row.addWidget(self.region_edit, 1)
+            region_row.addWidget(pick_region)
+            region_row.addWidget(clear_region)
+            form.addRow("查找区域", region_row)
+            self.tf_click = QCheckBox("找到后点击该文字")
+            self.tf_click.setToolTip("勾选后找到文字直接用鼠标点击；不勾选则把坐标写入结果变量")
+            form.addRow("", self.tf_click)
+            self.tf_button = QComboBox()
+            self.tf_button.addItem("鼠标左键", "left")
+            self.tf_button.addItem("鼠标右键", "right")
+            self.tf_button.setEnabled(False)
+            form.addRow("点击按键", self.tf_button)
+            self.tf_click.toggled.connect(self.tf_button.setEnabled)
+            self.tf_variable = self._var_combo("（可不设置）")
+            self.tf_variable.setToolTip("可选。未勾选点击时写入坐标 \"x,y\"；未找到文字写入 false。\n"
+                                        "仅查找/点击时不设置也可以")
+            form.addRow("结果变量（可选）", self.tf_variable)
+            hint = QLabel("在屏幕/指定区域查找文字：勾选点击则找到即点击；不勾选则把坐标\n"
+                          "写入结果变量，未找到时写入 false（步骤不会因未找到而失败）。\n"
+                          "结果变量可留空不设置，仅执行查找/点击即可。\n"
+                          "需要 RapidOCR 才能运行：pip install rapidocr_onnxruntime")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "screenshot":
+            self.shot_mode = QComboBox()
+            self.shot_mode.addItem("全屏截图", "fullscreen")
+            self.shot_mode.addItem("指定区域截图", "region")
+            self.shot_mode.addItem("自己框选截图", "select")
+            self.shot_mode.setToolTip(
+                "全屏=整个虚拟桌面；指定区域=用下方保存的区域；自己框选=运行时弹出框选遮罩")
+            form.addRow("截图方式", self.shot_mode)
+
+            # 指定区域行：只有「指定区域截图」时显示
+            self._shot_region_widget = QWidget()
+            region_row = QHBoxLayout(self._shot_region_widget)
+            region_row.setContentsMargins(0, 0, 0, 0)
+            self.region_edit = QLineEdit()
+            self.region_edit.setReadOnly(True)
+            pick_region = QPushButton("框选区域…")
+            pick_region.clicked.connect(self._request_region)
+            pick_region.setToolTip("隐藏本窗口后框选截图区域（与找图/文字识别区域一致）")
+            clear_region = QPushButton("恢复全屏")
+            clear_region.clicked.connect(lambda: self._set_region_text(None))
+            region_row.addWidget(self.region_edit, 1)
+            region_row.addWidget(pick_region)
+            region_row.addWidget(clear_region)
+            form.addRow("截图区域", self._shot_region_widget)
+
+            # 保存位置：变量保存 / 自选保存（二选一）
+            save_row = QHBoxLayout()
+            self.save_var_radio = QRadioButton("变量保存")
+            self.save_choose_radio = QRadioButton("自选保存")
+            self.save_var_radio.setToolTip(
+                "保存到程序目录 templates/jietu/，并把图片绝对路径写入结果变量")
+            self.save_choose_radio.setToolTip("运行时弹出「另存为」对话框，由你指定保存位置")
+            save_row.addWidget(self.save_var_radio)
+            save_row.addWidget(self.save_choose_radio)
+            save_row.addStretch(1)
+            form.addRow("保存位置", save_row)
+
+            # 变量保存：结果变量下拉行
+            self._shot_var_widget = QWidget()
+            var_row = QHBoxLayout(self._shot_var_widget)
+            var_row.setContentsMargins(0, 0, 0, 0)
+            self.shot_variable = self._var_combo("（选择变量）")
+            self.shot_variable.setToolTip(
+                "截图保存后，把图片的绝对路径写入该变量（后续日志/剪贴板/点击等步骤可用）")
+            var_row.addWidget(self.shot_variable, 1)
+            form.addRow("结果变量", self._shot_var_widget)
+            self._var_combo_hint(form)
+
+            # 自选保存：说明行（运行时弹窗）
+            self._shot_choose_hint = QLabel(
+                "运行时弹出「另存为」对话框，选择保存位置；\n取消对话框则本步骤失败。")
+            self._shot_choose_hint.setStyleSheet("color: #8a939c;")
+            self._shot_choose_hint.setWordWrap(True)
+            self._shot_choose_hint_widget = QWidget()
+            hint_lay = QHBoxLayout(self._shot_choose_hint_widget)
+            hint_lay.setContentsMargins(0, 0, 0, 0)
+            hint_lay.addWidget(self._shot_choose_hint)
+            form.addRow("", self._shot_choose_hint_widget)
+
+            self.shot_mode.currentIndexChanged.connect(self._sync_shot_rows)
+            self.save_var_radio.toggled.connect(self._sync_shot_save_rows)
+            self._sync_shot_save_rows()
 
         elif t == "click":
             self.btn_combo = QComboBox()
@@ -570,20 +699,46 @@ class StepParamsDialog(QDialog):
             form.addRow("点击间隔", self.interval)
             pos_row = QHBoxLayout()
             self.follow_radio = QRadioButton("跟随当前鼠标")
-            self.fixed_radio = QRadioButton("固定坐标 X")
+            self.fixed_radio = QRadioButton("固定坐标")
+            self.var_radio = QRadioButton("变量坐标")
+            self.var_radio.setToolTip("选变量后以变量值作为坐标，格式 \"64,63\"（x,y）")
+            pos_row.addWidget(self.follow_radio)
+            pos_row.addWidget(self.fixed_radio)
+            pos_row.addWidget(self.var_radio)
+            pos_row.addStretch(1)
+            form.addRow("点击位置", pos_row)
+
+            # 固定坐标控件行：X Y + 屏幕点选（仅固定坐标模式显示）
             self.pos_x = self._spin(-99999, 99999)
             self.pos_y = self._spin(-99999, 99999)
-            pick = QPushButton("📍 屏幕点选坐标")
+            pick = QPushButton("📍 屏幕点选")
             pick.setToolTip("隐藏本程序后，点击屏幕任意位置取坐标（Esc 取消）")
             pick.clicked.connect(self._request_point)
             self.pick_btn = pick
-            pos_row.addWidget(self.follow_radio)
-            pos_row.addWidget(self.fixed_radio)
-            pos_row.addWidget(self.pos_x)
-            pos_row.addWidget(QLabel("Y"))
-            pos_row.addWidget(self.pos_y)
-            pos_row.addWidget(pick)
-            form.addRow("点击位置", pos_row)
+            self._fixed_pos_widget = QWidget()
+            fixed_row = QHBoxLayout(self._fixed_pos_widget)
+            fixed_row.setContentsMargins(0, 0, 0, 0)
+            fixed_row.addWidget(self.pos_x)
+            fixed_row.addWidget(QLabel("Y"))
+            fixed_row.addWidget(self.pos_y)
+            fixed_row.addWidget(pick)
+            fixed_row.addStretch(1)
+            form.addRow("", self._fixed_pos_widget)
+
+            # 变量坐标控件行：变量下拉（仅变量坐标模式显示）
+            self.pos_var = self._var_combo("（请选择变量）")
+            self.pos_var.setToolTip("必须选择一个流程变量，其值为坐标字符串 \"64,63\"（x,y）")
+            self._var_pos_widget = QWidget()
+            var_row = QHBoxLayout(self._var_pos_widget)
+            var_row.setContentsMargins(0, 0, 0, 0)
+            var_row.addWidget(self.pos_var)
+            var_row.addStretch(1)
+            form.addRow("", self._var_pos_widget)
+
+            self.follow_radio.toggled.connect(self._sync_pos_rows)
+            self.fixed_radio.toggled.connect(self._sync_pos_rows)
+            self.var_radio.toggled.connect(self._sync_pos_rows)
+            self._var_combo_hint(form)
             self.count = self._spin(0, 999_999_999)
             self.count.setSpecialValueText("0 = 无限（流程中按 1 次执行）")
             form.addRow("点击次数", self.count)
@@ -919,7 +1074,8 @@ class StepParamsDialog(QDialog):
 
     @staticmethod
     def _set_combo_value(combo: QComboBox, value: str):
-        """回填可编辑下拉：值在列表里就选中该项，否则作为编辑文本；空值选第一项。"""
+        """回填变量下拉：值在列表里就选中该项；不在列表（旧配置残留）时补项选中，
+        保证再次保存不丢失；空值选第一项（占位/全部变量）。"""
         value = (value or "").strip()
         if not value:
             combo.setCurrentIndex(0)
@@ -927,8 +1083,11 @@ class StepParamsDialog(QDialog):
         idx = combo.findData(value)
         if idx >= 0:
             combo.setCurrentIndex(idx)
-        else:
+        elif combo.isEditable():
             combo.setEditText(value)
+        else:
+            combo.addItem(value, value)
+            combo.setCurrentIndex(combo.count() - 1)
 
     @staticmethod
     def _combo_value(combo: QComboBox) -> str:
@@ -953,16 +1112,48 @@ class StepParamsDialog(QDialog):
         elif t == "log":
             self._set_combo_value(self.log_vars, p.get("variables", "") or "")
             self.log_text.setText(p.get("text", "") or "")
+        elif t == "clip_set":
+            self._set_combo_value(self.clip_name, p.get("name", "") or "")
+            self.clip_text.setText(p.get("text", "") or "")
+        elif t == "clip_get":
+            self._set_combo_value(self.clip_variable, p.get("variable", "") or "")
         elif t == "ocr":
             self._set_combo_value(self.ocr_variable, p.get("variable", "") or "")
             self.ocr_lang.setCurrentIndex(max(0, self.ocr_lang.findData(p.get("lang", "ch"))))
             self.ocr_multi.setChecked(bool(p.get("multi_ocr", True)))
             self._set_region_text(p.get("region", "") or "")
+        elif t == "text_find":
+            self.tf_text.setText(p.get("text", "") or "")
+            self._set_region_text(p.get("region", "") or "")
+            self.tf_click.setChecked(bool(p.get("click")))
+            self.tf_button.setCurrentIndex(
+                max(0, self.tf_button.findData(p.get("click_button", "left"))))
+            self.tf_button.setEnabled(self.tf_click.isChecked())
+            self._set_combo_value(self.tf_variable, p.get("variable", "") or "")
+        elif t == "screenshot":
+            self.shot_mode.setCurrentIndex(
+                max(0, self.shot_mode.findData(p.get("mode", "fullscreen"))))
+            self._set_region_text(p.get("region", "") or "")
+            if p.get("save_mode") == "choose":
+                self.save_choose_radio.setChecked(True)
+            else:
+                self.save_var_radio.setChecked(True)
+            self._set_combo_value(self.shot_variable, p.get("variable", "") or "")
+            self._sync_shot_rows()
+            self._sync_shot_save_rows()
         elif t == "click":
-            self.follow_radio.setChecked(not p.get("fixed_position"))
-            self.fixed_radio.setChecked(bool(p.get("fixed_position")))
+            pv = (p.get("pos_var") or "").strip()
+            if p.get("fixed_position"):
+                if pv:
+                    self.var_radio.setChecked(True)
+                else:
+                    self.fixed_radio.setChecked(True)
+            else:
+                self.follow_radio.setChecked(True)
             self.pos_x.setValue(int(p.get("pos_x", 0)))
             self.pos_y.setValue(int(p.get("pos_y", 0)))
+            self._set_combo_value(self.pos_var, pv)
+            self._sync_pos_rows()
             self.count.setValue(int(p.get("count", 1)))
             self.duration.setValue(float(p.get("duration_sec", 0)))
             self._fill_background(p)
@@ -1028,6 +1219,13 @@ class StepParamsDialog(QDialog):
                 "variables": self._combo_value(self.log_vars),
                 "text": self.log_text.text(),
             })
+        elif t == "clip_set":
+            step.params.update({
+                "name": self._combo_value(self.clip_name),
+                "text": self.clip_text.text(),
+            })
+        elif t == "clip_get":
+            step.params.update({"variable": self._combo_value(self.clip_variable)})
         elif t == "ocr":
             step.params.update({
                 "variable": self._combo_value(self.ocr_variable),
@@ -1035,13 +1233,32 @@ class StepParamsDialog(QDialog):
                 "multi_ocr": self.ocr_multi.isChecked(),
                 "region": getattr(self, "_region", step.params.get("region", "")) or "",
             })
+        elif t == "text_find":
+            step.params.update({
+                "text": self.tf_text.text().strip(),
+                "region": getattr(self, "_region", step.params.get("region", "")) or "",
+                "click": self.tf_click.isChecked(),
+                "click_button": self.tf_button.currentData(),
+                "variable": self._combo_value(self.tf_variable),
+            })
+        elif t == "screenshot":
+            var_mode = self.save_var_radio.isChecked()
+            step.params.update({
+                "mode": self.shot_mode.currentData(),
+                "region": getattr(self, "_region", step.params.get("region", "")) or "",
+                "save_mode": "variable" if var_mode else "choose",
+                "variable": self._combo_value(self.shot_variable) if var_mode else "",
+            })
         elif t == "click":
+            pv = self._combo_value(self.pos_var) if self.var_radio.isChecked() else ""
             step.params.update({
                 "mouse_button": self.btn_combo.currentData(),
                 "click_type": self.type_combo.currentData(),
                 "interval_ms": self.interval.value(),
-                "fixed_position": self.fixed_radio.isChecked(),
+                # 变量坐标模式也算固定位置（不跟随鼠标），由 pos_var 区分
+                "fixed_position": self.fixed_radio.isChecked() or self.var_radio.isChecked(),
                 "pos_x": self.pos_x.value(), "pos_y": self.pos_y.value(),
+                "pos_var": pv,
                 "count": self.count.value(), "duration_sec": self.duration.value(),
             })
             self._apply_background(step)

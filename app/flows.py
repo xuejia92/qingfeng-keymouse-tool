@@ -13,9 +13,11 @@ from PySide6.QtCore import QObject, Signal
 
 from .config import FLOW_STEP_TYPES, Flow
 from .logbus import log
-from .tasks import (run_app_step, run_click_step, run_close_app_step,
-                    run_find_step, run_log_step, run_ocr_step, run_press_step,
-                    run_var_step, run_web_step)
+from .tasks import (run_app_step, run_click_step, run_clip_get_step,
+                    run_clip_set_step, run_close_app_step, run_find_step,
+                    run_log_step, run_ocr_step, run_press_step,
+                    run_screenshot_step, run_text_find_step, run_var_step,
+                    run_web_step)
 
 
 class FlowVariableStore:
@@ -141,8 +143,16 @@ class FlowRunner(QObject):
             return run_log_step(step.params, vars.values)
         elif step.type == "ocr":
             return run_ocr_step(step.params, vars.values, self._stop)
+        elif step.type == "text_find":
+            return run_text_find_step(step.params, vars.values, self._stop)
+        elif step.type == "clip_set":
+            return run_clip_set_step(step.params, vars.values)
+        elif step.type == "clip_get":
+            return run_clip_get_step(step.params, vars.values, vars.types)
+        elif step.type == "screenshot":
+            return run_screenshot_step(step.params, vars.values, self._stop)
         if step.type == "click":
-            reason = run_click_step(step.params, self._stop, progress)
+            reason = run_click_step(step.params, self._stop, progress, vars.values)
         elif step.type == "press":
             reason = run_press_step(step.params, self._stop, progress)
         elif step.type == "find":

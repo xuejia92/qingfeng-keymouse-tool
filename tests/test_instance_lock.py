@@ -10,7 +10,8 @@ import os
 import sys
 import unittest
 
-from app.instance_lock import _extract_pid, _pid_exists, _remove_lock_file
+from app.instance_lock import (_extract_pid, _pid_exists, _process_is_self,
+                               _remove_lock_file, try_acquire)
 
 
 class TestExtractPid(unittest.TestCase):
