@@ -216,8 +216,9 @@ class TestUpgradeBat(unittest.TestCase):
             self.assertIn("del /f /q", content)
             self.assertIn("ping -n 2 127.0.0.1", content)
             self.assertIn("geq 120", content)      # 超时兜底，不死等
-            # 顶替、启动、自删
+            # 顶替、启动、自删；启动前留 2 秒余量（旧进程 _MEI 清理 + 杀软扫描）
             self.assertIn("move /y", content)
+            self.assertLess(content.index("move /y"), content.index("ping -n 3"))
             self.assertIn('start "" "%EXE%"', content)
             self.assertIn('del /f /q "%~f0"', content)
         finally:
