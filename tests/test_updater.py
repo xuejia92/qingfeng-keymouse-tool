@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +15,7 @@ from app.updater import (
     _clean_version,
     _release_version,
     _tag_download_urls,
+    _write_upgrade_bat,
     compare_versions,
     manifest_version,
     resolve_download_urls,
@@ -182,6 +185,37 @@ class TestResolveSources(unittest.TestCase):
             self.assertEqual(urls, ["https://m/a.exe"])
             self.assertEqual(m.call_count, 2)
             fm.assert_called_once()
+
+
+class TestUpgradeBat(unittest.TestCase):
+    """升级收尾 bat 的生成（PyInstaller onefile 升级的关键环节）。
+
+    内容错了会导致升级后旧 exe 删不掉 / 新 exe 没启动 / 中文路径乱码，
+    这类问题只在用户点「重启升级」时暴露，必须钉测试。
+    """
+
+    def test_bat_generated_with_gbk_and_commands(self):
+        exe = os.path.join(tempfile.gettempdir(), "清风自动化键鼠工具.exe")
+        new = exe + ".new"
+        bat = _write_upgrade_bat(exe, new)
+        try:
+            self.assertTrue(os.path.isfile(bat), "应生成 bat 文件")
+            with open(bat, encoding="gbk") as f:   # 中文路径必须 GBK 可读回
+                content = f.read()
+            self.assertIn("清风自动化键鼠工具.exe", content)
+            self.assertIn(":wait", content)                # 等待循环
+            self.assertIn("tasklist", content)
+            self.assertIn(f'del /f /q "{exe}"', content)  # 删旧 exe
+            self.assertIn(f'move /y "{new}" "{exe}"', content)  # 顶替
+            self.assertIn(f'start "" "{exe}"', content)   # 启动新程序
+            self.assertIn('del /f /q "%~f0"', content)    # 自删
+        finally:
+            if os.path.isfile(bat):
+                os.remove(bat)
+
+    def test_bat_failure_returns_empty(self):
+        bad = os.path.join("Z:\\nonexistent_dir_xyz", "a.exe")  # 不存在的盘/目录
+        self.assertEqual(_write_upgrade_bat(bad, bad + ".new"), "")
 
 
 if __name__ == "__main__":
