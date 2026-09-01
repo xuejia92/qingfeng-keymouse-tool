@@ -36,12 +36,15 @@ class TestFindImageConfig(unittest.TestCase):
 
     def test_default_params(self):
         p = default_step_params("find_image")
-        self.assertEqual(set(p), {"image", "image_path", "confidence", "region", "variable"})
+        self.assertEqual(set(p), {"image", "image_path", "confidence", "region",
+                                  "variable", "preview", "preview_duration"})
         self.assertEqual(p["image"], "")
         self.assertEqual(p["image_path"], "")
         self.assertEqual(p["confidence"], 0.85)
         self.assertEqual(p["region"], "")
         self.assertEqual(p["variable"], "")
+        self.assertFalse(p["preview"])
+        self.assertEqual(p["preview_duration"], 1.0)
 
     def test_summary(self):
         s = FlowStep(type="find_image", params={"image": "tpl.png", "variable": "pos"})
@@ -122,6 +125,63 @@ class TestRunFindImageStep(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("找图失败", why)
 
+    def test_preview_on_found_highlights(self):
+        """勾选效果预览且命中：在目标区域画红框（默认 1 秒）。"""
+        template, screen = _img(4, 3), _img(20, 20)
+        with mock.patch.object(finder, "load_template", return_value=template), \
+             mock.patch.object(finder, "grab_full_screen", return_value=screen), \
+             mock.patch.object(finder, "locate", return_value=(11, 9, 0.95)), \
+             mock.patch("app.find_preview.show_find_highlight") as highlight:
+            ok, _ = run_find_image_step(
+                dict(PARAMS, preview=True, preview_duration=1.0), {})
+        self.assertTrue(ok)
+        highlight.assert_called_once_with((9, 8, 13, 11), 1.0)
+
+    def test_preview_custom_duration(self):
+        """自定义持续时间透传给红框。"""
+        template, screen = _img(4, 3), _img(20, 20)
+        with mock.patch.object(finder, "load_template", return_value=template), \
+             mock.patch.object(finder, "grab_full_screen", return_value=screen), \
+             mock.patch.object(finder, "locate", return_value=(11, 9, 0.95)), \
+             mock.patch("app.find_preview.show_find_highlight") as highlight:
+            ok, _ = run_find_image_step(
+                dict(PARAMS, preview=True, preview_duration=2.5), {})
+        self.assertTrue(ok)
+        highlight.assert_called_once_with((9, 8, 13, 11), 2.5)
+
+    def test_preview_off_no_highlight(self):
+        """未勾选效果预览：不画红框。"""
+        with mock.patch.object(finder, "load_template", return_value=_img(4, 3)), \
+             mock.patch.object(finder, "grab_full_screen", return_value=_img(20, 20)), \
+             mock.patch.object(finder, "locate", return_value=(11, 9, 0.95)), \
+             mock.patch("app.find_preview.show_find_highlight") as highlight:
+            ok, _ = run_find_image_step(PARAMS, {})
+        self.assertTrue(ok)
+        highlight.assert_not_called()
+
+    def test_preview_not_found_no_highlight(self):
+        """未找到目标：不画红框，结果写 false。"""
+        with mock.patch.object(finder, "load_template", return_value=_img(4, 3)), \
+             mock.patch.object(finder, "grab_full_screen", return_value=_img(20, 20)), \
+             mock.patch.object(finder, "locate", return_value=None), \
+             mock.patch("app.find_preview.show_find_highlight") as highlight:
+            variables = {}
+            ok, _ = run_find_image_step(dict(PARAMS, preview=True), variables)
+        self.assertTrue(ok)
+        self.assertIs(variables["pos"], False)
+        highlight.assert_not_called()
+
+    def test_preview_failure_does_not_fail_step(self):
+        """红框预览抛异常：不影响找图本身。"""
+        with mock.patch.object(finder, "load_template", return_value=_img(4, 3)), \
+             mock.patch.object(finder, "grab_full_screen", return_value=_img(20, 20)), \
+             mock.patch.object(finder, "locate", return_value=(11, 9, 0.95)), \
+             mock.patch("app.find_preview.show_find_highlight",
+                        side_effect=RuntimeError("no qt")):
+            ok, why = run_find_image_step(dict(PARAMS, preview=True), {})
+        self.assertTrue(ok)
+        self.assertIn("找到目标", why)
+
 
 # ---------- 对话框 ----------
 
@@ -137,9 +197,12 @@ class TestFindImageDialog(unittest.TestCase):
 
     def test_form_roundtrip(self):
         dlg = self._open({"image": "tpl.png", "image_path": "", "confidence": 0.9,
-                          "region": "10,20,100,50", "variable": ""})
+                          "region": "10,20,100,50", "variable": "",
+                          "preview": True, "preview_duration": 2.5})
         self.assertEqual(dlg.confidence.value(), 0.9)
         self.assertEqual(dlg.region_edit.text(), "10, 20, 100 x 50")
+        self.assertTrue(dlg.preview_check.isChecked())
+        self.assertEqual(dlg.preview_spin.value(), 2.5)
         step = FlowStep(type="find_image")
         dlg._set_combo_value(dlg.find_var, "shot")
         dlg.apply_to(step)
@@ -147,6 +210,19 @@ class TestFindImageDialog(unittest.TestCase):
         self.assertEqual(step.params["confidence"], 0.9)
         self.assertEqual(step.params["region"], "10,20,100,50")
         self.assertEqual(step.params["variable"], "shot")
+        self.assertTrue(step.params["preview"])
+        self.assertEqual(step.params["preview_duration"], 2.5)
+
+    def test_form_preview_off_by_default(self):
+        """默认不勾选预览，时长 1 秒，spinbox 禁用。"""
+        dlg = self._open(PARAMS)
+        self.assertFalse(dlg.preview_check.isChecked())
+        self.assertEqual(dlg.preview_spin.value(), 1.0)
+        self.assertFalse(dlg.preview_spin.isEnabled())
+        step = FlowStep(type="find_image")
+        dlg.apply_to(step)
+        self.assertFalse(step.params["preview"])
+        self.assertEqual(step.params["preview_duration"], 1.0)
 
     def test_apply_manual_region(self):
         """手动输入「左上x,左上y,右下x,右下y」转成 x,y,w,h。"""

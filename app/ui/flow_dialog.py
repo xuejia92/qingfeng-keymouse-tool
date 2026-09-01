@@ -750,6 +750,24 @@ class StepParamsDialog(QDialog):
             self.find_var.setToolTip("找到后把目标矩形区域 \"左上x,左上y,右下x,右下y\" 写入该变量；未找到写入 false")
             form.addRow("结果变量", self.find_var)
             self._var_combo_hint(form)
+
+            # 效果预览：找到后在目标区域画红框，可设持续时间
+            preview_row = QHBoxLayout()
+            self.preview_check = QCheckBox("找到后红框高亮")
+            self.preview_check.setToolTip("勾选后，找到目标时在被找到的图片区域画一个红框")
+            self.preview_spin = QDoubleSpinBox()
+            self.preview_spin.setRange(0.5, 10.0)
+            self.preview_spin.setDecimals(1)
+            self.preview_spin.setSingleStep(0.5)
+            self.preview_spin.setValue(1.0)
+            self.preview_spin.setSuffix(" 秒")
+            self.preview_spin.setEnabled(False)
+            self.preview_check.toggled.connect(self.preview_spin.setEnabled)
+            preview_row.addWidget(self.preview_check)
+            preview_row.addWidget(self.preview_spin)
+            preview_row.addStretch(1)
+            form.addRow("效果预览", preview_row)
+
             hint = QLabel("在屏幕 / 指定区域用模板匹配找图：找到则把矩形区域坐标 \"左上x,左上y,右下x,右下y\" 写入结果变量，\n"
                           "未找到写入 false（步骤不会因未找到而失败，可据此分支）。\n"
                           "区域为空=全屏；也可点击「框选区域…」或输入左上/右下角坐标。")
@@ -1218,6 +1236,9 @@ class StepParamsDialog(QDialog):
             self.confidence.setValue(float(p.get("confidence", 0.85)))
             self._set_region_text(p.get("region", "") or "")
             self._set_combo_value(self.find_var, p.get("variable", "") or "")
+            self.preview_check.setChecked(bool(p.get("preview")))
+            self.preview_spin.setValue(float(p.get("preview_duration", 1.0) or 1.0))
+            self.preview_spin.setEnabled(self.preview_check.isChecked())
         elif t == "click":
             pv = (p.get("pos_var") or "").strip()
             if p.get("fixed_position"):
@@ -1333,6 +1354,8 @@ class StepParamsDialog(QDialog):
                 "confidence": round(self.confidence.value(), 2),
                 "region": getattr(self, "_region", step.params.get("region", "")) or "",
                 "variable": self._combo_value(self.find_var),
+                "preview": self.preview_check.isChecked(),
+                "preview_duration": self.preview_spin.value(),
             })
         elif t == "click":
             pv = self._combo_value(self.pos_var) if self.var_radio.isChecked() else ""

@@ -350,6 +350,7 @@ def run_find_image_step(p: dict, variables: dict,
     未找到：把 false 写入结果变量。
     步骤本身不因未找到而失败（供后续步骤按变量值分支），
     模板图加载失败 / 未指定结果变量才算失败。
+    勾选「效果预览」且命中时，在被找到的区域画红框（默认 1 秒，可设时长）。
     """
     if stop is not None and stop.is_set():
         return False, "已手动停止"
@@ -380,6 +381,13 @@ def run_find_image_step(p: dict, variables: dict,
     right = left + tw
     bottom = top + th
     variables[var] = f"{left},{top},{right},{bottom}"
+    if p.get("preview"):
+        try:
+            from .find_preview import show_find_highlight
+            show_find_highlight((left, top, right, bottom),
+                                float(p.get("preview_duration", 1.0) or 1.0))
+        except Exception:
+            pass    # 预览失败不影响找图本身（如无 Qt 环境）
     return True, f"找到目标（区域 {left},{top},{right},{bottom}，置信度 {score:.2f}）"
 
 
