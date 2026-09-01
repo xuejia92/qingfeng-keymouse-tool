@@ -7,7 +7,7 @@ QTimer 到期自动关闭（不阻塞找图步骤）。
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRect, Qt, QTimer
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -48,9 +48,19 @@ class _HighlightOverlay(QWidget):
         self.deleteLater()
 
     def paintEvent(self, event):
+        # 关键：DPI 转换。窗口 setGeometry 用 logical 像素（设备无关），
+        # Qt 渲染时按 devicePixelRatioF() 自动放大到物理像素；
+        # 但 paintEvent 的 QPainter 坐标是 logical（与窗口 geometry 一致），
+        # 而 finder 返回的 rect 是 mss 物理像素坐标。直接画会让红框偏
+        # DPR 倍（125% 缩放时偏 25%）。这里除以 DPR 转成 logical 坐标。
+        dpr = self.devicePixelRatioF() or 1.0
+        x1 = self._rect.left() / dpr
+        y1 = self._rect.top() / dpr
+        x2 = self._rect.right() / dpr
+        y2 = self._rect.bottom() / dpr
         p = QPainter(self)
         p.setPen(QPen(self._color, self._width))
-        p.drawRect(self._rect)
+        p.drawRect(QRectF(QPointF(x1, y1), QPointF(x2, y2)))
 
 
 def show_find_highlight(rect: tuple[int, int, int, int], duration: float = 1.0) -> None:

@@ -261,5 +261,88 @@ class TestFindImageDialog(unittest.TestCase):
         warn.assert_called_once()
 
 
+# ---------- find_preview 自身：DPI 转换（高 DPI 屏必备） ----------
+
+class TestFindPreviewDpiConversion(unittest.TestCase):
+    """高 DPI 屏下：窗口 setGeometry 是 logical 像素，painter 坐标也是 logical，
+    但 finder 返回的是 mss 物理像素——必须除以 DPR，否则红框画偏。
+
+    修复回归测试：直接验证 paintEvent 把物理 rect 转 logical 画到 QPainter。
+    """
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+        self.app = QApplication.instance() or QApplication([])
+
+    def _new_overlay(self, rect, dpr_mock):
+        from app.find_preview import _HighlightOverlay
+        w = _HighlightOverlay(rect, 60000)   # 60s timer 避免干扰
+        w.devicePixelRatioF = lambda: dpr_mock
+        return w
+
+    def test_paint_125_dpr_divides_physical_to_logical(self):
+        """DPR=1.25（125% 缩放）：物理 (200,100,800,500) → logical (160,80,640,400)。"""
+        from PySide6.QtGui import QPainter, QPaintEvent
+        w = self._new_overlay((200, 100, 800, 500), 1.25)
+        try:
+            with mock.patch.object(QPainter, "drawRect") as draw:
+                w.paintEvent(QPaintEvent(w.rect()))
+            self.assertEqual(draw.call_count, 1)
+            rectf = draw.call_args.args[0]
+            self.assertAlmostEqual(rectf.left(), 160.0, places=2)
+            self.assertAlmostEqual(rectf.top(), 80.0, places=2)
+            self.assertAlmostEqual(rectf.right(), 640.0, places=2)
+            self.assertAlmostEqual(rectf.bottom(), 400.0, places=2)
+        finally:
+            w.close()
+            self.app.processEvents()
+
+    def test_paint_100_dpr_no_offset(self):
+        """DPR=1.0：不缩放，物理坐标原样画。"""
+        from PySide6.QtGui import QPainter, QPaintEvent
+        w = self._new_overlay((100, 200, 300, 400), 1.0)
+        try:
+            with mock.patch.object(QPainter, "drawRect") as draw:
+                w.paintEvent(QPaintEvent(w.rect()))
+            rectf = draw.call_args.args[0]
+            self.assertAlmostEqual(rectf.left(), 100.0, places=2)
+            self.assertAlmostEqual(rectf.top(), 200.0, places=2)
+            self.assertAlmostEqual(rectf.right(), 300.0, places=2)
+            self.assertAlmostEqual(rectf.bottom(), 400.0, places=2)
+        finally:
+            w.close()
+            self.app.processEvents()
+
+    def test_paint_150_dpr(self):
+        """DPR=1.5（150% 缩放）：物理 (300,300,900,600) → logical (200,200,600,400)。"""
+        from PySide6.QtGui import QPainter, QPaintEvent
+        w = self._new_overlay((300, 300, 900, 600), 1.5)
+        try:
+            with mock.patch.object(QPainter, "drawRect") as draw:
+                w.paintEvent(QPaintEvent(w.rect()))
+            rectf = draw.call_args.args[0]
+            self.assertAlmostEqual(rectf.left(), 200.0, places=2)
+            self.assertAlmostEqual(rectf.top(), 200.0, places=2)
+            self.assertAlmostEqual(rectf.right(), 600.0, places=2)
+            self.assertAlmostEqual(rectf.bottom(), 400.0, places=2)
+        finally:
+            w.close()
+            self.app.processEvents()
+
+    def test_paint_dpr_zero_fallback_to_one(self):
+        """DPR=0（异常值）兜底用 1.0，不抛错、不除零。"""
+        from PySide6.QtGui import QPainter, QPaintEvent
+        w = self._new_overlay((100, 100, 200, 200), 0.0)
+        try:
+            with mock.patch.object(QPainter, "drawRect") as draw:
+                w.paintEvent(QPaintEvent(w.rect()))
+            rectf = draw.call_args.args[0]
+            self.assertAlmostEqual(rectf.left(), 100.0, places=2)
+            self.assertAlmostEqual(rectf.right(), 200.0, places=2)
+        finally:
+            w.close()
+            self.app.processEvents()
+
+
 if __name__ == "__main__":
     unittest.main()
