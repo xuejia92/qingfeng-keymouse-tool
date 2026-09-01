@@ -145,7 +145,7 @@ class MainWindow(QMainWindow):
             "QProgressBar::chunk{background:#1668a8; border-radius:3px;}")
         self.update_progress.hide()
         self.statusBar().addWidget(self.update_progress)
-        self._progress_visible = False
+        self._progress_visible = True    # 下载中默认展开进度条，点击可收起
         self._refresh_status_hint()
         self._pending_update: tuple[str, list[str]] | None = None
         self._downloaded_file: str | None = None
@@ -554,7 +554,7 @@ class MainWindow(QMainWindow):
             self.update_hint.hide()
             self.update_btn.hide()
             self.update_progress.hide()
-            self._progress_visible = False
+            self._progress_visible = True   # 重置为默认展开
             return
         remote = (self._pending_update or ("", []))[0]
         self.update_dot.show()
@@ -571,13 +571,13 @@ class MainWindow(QMainWindow):
             self.update_btn.setText("重启升级")
             self.update_btn.setEnabled(True)
             self.update_progress.hide()
-            self._progress_visible = False
+            self._progress_visible = True   # 下次下载默认展开
         elif state == "failed":
             self.update_hint.setText(f"新版本 {remote} 下载失败")
             self.update_btn.setText("重新下载")
             self.update_btn.setEnabled(True)
             self.update_progress.hide()
-            self._progress_visible = False
+            self._progress_visible = True
 
     def _restart_upgrade(self) -> None:
         """左下角按钮：下载中点击=展开/收起进度条；已就绪=替换 exe 并重启；
