@@ -8,10 +8,11 @@
   ASCII，按「任意 .exe」兜底匹配）；GitHub 兜底失败时回退 Gitee 附件拼地址或
   清单里的 download_url 自定义直链
 - 注意：Gitee raw 链接对大文件要求登录，匿名 403，不能用 raw 地址分发 exe
-- 替换方式：Windows 允许运行中的 exe 原地改名 —— 当前 exe 改为 *.old 腾出名字，
-  下载好的新 exe 顶替原名；替换成功后立即分离一个收尾进程（新 exe --after-update
-  参数），主程序退出后自动删除 *.old 并重新打开最新程序；
-  下次启动的 cleanup_old_exe() 兜底清理漏网残留
+- 替换方式（PyInstaller onefile 适配）：下载的 exe 暂存为 exe.new，写入升级收尾
+  bat 并分离运行 —— bat 轮询等待当前进程完全退出后：删除旧 exe、新 exe 顶替、
+  重新打开最新程序、自删。不做原地替换、不立即启动新进程，避免新旧 onefile
+  进程竞争 _MEI 临时目录触发 bootloader 弹窗；下次启动的 cleanup_old_exe()
+  兜底清理历史残留的 *.old
 
 发布新版本流程：在 GitHub 建 Release（显示名带版本号如 v3.0.5），上传新 exe 附件。
 """
@@ -234,29 +235,47 @@ def download_update(url: str, dest: str, progress_cb=None, stop_event=None,
         return False, str(e)
 
 
-def _schedule_after_update(exe: str, old: str) -> None:
-    """分离一个新 exe 的收尾进程（--after-update）：主程序退出后删除 *.old
-    并重新打开最新程序。
+def _write_upgrade_bat(exe: str, new: str) -> str:
+    """写升级收尾 bat（GBK 编码，兼容中文路径），返回 bat 路径；失败返回 ""。
 
-    运行中的 exe（已改名为 .old）自身无法删除自己，新实例也会与主程序争单实例锁，
-    所以交给独立进程等主程序退出后再收尾；
-    若届时删除失败，下次启动的 cleanup_old_exe() 会兜底清理。
+    逻辑：轮询等待当前 exe 进程完全退出 -> 删除旧 exe -> 新 exe(.new) 顶替 ->
+    启动新程序 -> 删除自身。由独立 cmd 进程执行：不碰运行中的 exe、不依赖主程序。
     """
-    if sys.platform != "win32":
-        return
+    exe_name = os.path.basename(exe)
+    bat = exe + ".upgrade.bat"
+    lines = [
+        "@echo off",
+        "rem 清风自动化键鼠工具升级收尾脚本（由 updater 生成，可安全删除）",
+        ":wait",
+        f'tasklist /FI "IMAGENAME eq {exe_name}" 2>nul | find /i "{exe_name}" >nul',
+        "if not errorlevel 1 (",
+        "    timeout /t 1 /nobreak >nul",
+        "    goto wait",
+        ")",
+        f'del /f /q "{exe}" 2>nul',
+        f'move /y "{new}" "{exe}" >nul 2>&1',
+        f'start "" "{exe}"',
+        'del /f /q "%~f0" 2>nul',
+    ]
     try:
-        subprocess.Popen([exe, "--after-update", old, exe],
-                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+        with open(bat, "w", encoding="gbk", errors="replace") as f:
+            f.write("\r\n".join(lines) + "\r\n")
+        return bat
     except OSError:
-        logger.debug("启动更新收尾进程失败", exc_info=True)
+        return ""
 
 
 def install_update(downloaded: str) -> tuple[bool, str]:
-    """用下载好的新程序替换当前 exe（运行中改名腾位），返回 (是否成功, 原因)。
+    """用下载好的新程序替换当前 exe，返回 (是否成功, 原因)。
 
-    成功后由调用方更新本地 config.json 的 version 字段并退出程序。
+    PyInstaller onefile 适配：运行中的 bootloader 锁定 exe 文件，不能原地
+    替换；也不能替换后立即启动新 exe（新旧两个 onefile 进程并存会互相竞争
+    _MEI 临时目录、被安全软件扫描锁定，触发 "Failed to start embedded
+    python interpreter" 和 _MEI 目录清理失败两个弹窗）。
+
+    改为：新 exe 暂存为 exe.new，写入收尾 bat 并分离运行 —— bat 等当前
+    进程完全退出后：删除旧 exe -> 新 exe 顶替 -> 启动新程序 -> 自删。
+    调用方随后退出程序即可。
     """
     exe = current_exe_path()
     if not exe or not os.path.isfile(exe):
@@ -267,21 +286,28 @@ def install_update(downloaded: str) -> tuple[bool, str]:
         return False, "下载文件与当前程序是同一个文件"
     if not _is_pe_file(downloaded):
         return False, "下载的文件不是有效的 Windows 程序"
-    old = exe + ".old"
-    _remove(old)
+    new = exe + ".new"
     try:
-        os.replace(exe, old)          # 运行中的 exe 原地改名，腾出原名
-        os.replace(downloaded, exe)   # 新程序顶替原名
-        _schedule_after_update(exe, old)   # 主程序退出后：删 .old + 重新打开新程序
-        return True, ""
+        _remove(new)
+        os.replace(downloaded, new)          # 暂存，不动运行中的 exe
     except OSError as e:
-        if not os.path.isfile(exe) and os.path.isfile(old):
-            try:
-                os.replace(old, exe)  # 回滚，保证原程序还在
-            except OSError:
-                pass
-        logger.warning("更新替换失败", exc_info=True)
-        return False, f"替换程序失败：{e}"
+        return False, f"暂存更新文件失败：{e}"
+    bat = _write_upgrade_bat(exe, new)
+    if not bat:
+        _remove(new)
+        return False, "写入升级脚本失败"
+    try:
+        subprocess.Popen(
+            ["cmd", "/c", bat],
+            cwd=os.path.dirname(exe),
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                           | getattr(subprocess, "DETACHED_PROCESS", 0)),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+    except OSError as e:
+        _remove(new)
+        return False, f"启动升级脚本失败：{e}"
+    return True, ""
 
 
 def cleanup_old_exe() -> None:
