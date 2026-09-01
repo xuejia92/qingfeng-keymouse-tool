@@ -6,13 +6,17 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from app.updater import (
+    _asset_download_url,
     _clean_version,
+    _release_version,
     _tag_download_urls,
     compare_versions,
     manifest_version,
     resolve_download_urls,
+    resolve_update_sources,
 )
 
 
@@ -89,6 +93,95 @@ class TestDownloadUrls(unittest.TestCase):
 
     def test_blank_custom_url_ignored(self):
         self.assertEqual(len(resolve_download_urls({"download_url": "  "}, "1.0")), 2)
+
+
+class TestAssetUrl(unittest.TestCase):
+    """GitHub/Gitee 附件直链挑选：精确名优先，任意 .exe 兜底。"""
+
+    def test_exact_filename_wins(self):
+        assets = [
+            {"name": "default.exe", "browser_download_url": "https://a/default.exe"},
+            {"name": "清风自动化键鼠工具.exe", "browser_download_url": "https://a/real.exe"},
+        ]
+        self.assertEqual(_asset_download_url(assets), "https://a/real.exe")
+
+    def test_any_exe_fallback(self):
+        """GitHub 资产名是 ASCII（QingFeng_KeyMouse_Tool.exe），不能精确匹配也要能挑中。"""
+        assets = [{"name": "QingFeng_KeyMouse_Tool.exe",
+                   "browser_download_url": "https://a/x.exe"}]
+        self.assertEqual(_asset_download_url(assets), "https://a/x.exe")
+
+    def test_skips_non_exe_and_partials(self):
+        assets = [
+            {"name": "readme.txt", "browser_download_url": "https://a/r.txt"},
+            {"name": "old.exe.download", "browser_download_url": "https://a/o.exe.download"},
+            {"name": "bad", "browser_download_url": "https://a/bad"},
+        ]
+        self.assertIsNone(_asset_download_url(assets))
+
+    def test_empty(self):
+        self.assertIsNone(_asset_download_url(None))
+        self.assertIsNone(_asset_download_url([]))
+
+
+class TestReleaseVersion(unittest.TestCase):
+    """版本号取 release 显示名 name 优先（GitHub tag 是中文），tag_name 兜底。"""
+
+    def test_name_preferred(self):
+        self.assertEqual(_release_version(
+            {"name": "v3.0.5", "tag_name": "键鼠自动化"}), "v3.0.5")
+
+    def test_tag_fallback(self):
+        self.assertEqual(_release_version({"tag_name": "v3.0.1"}), "v3.0.1")
+
+    def test_empty(self):
+        self.assertEqual(_release_version({}), "")
+        self.assertEqual(_release_version(None), "")
+
+
+class TestResolveSources(unittest.TestCase):
+    """更新源优先级：GitHub -> Gitee -> manifest；均用 mock 不联网。"""
+
+    def test_github_first_and_no_gitee_call(self):
+        rel = {"name": "v3.1.0", "tag_name": "键鼠自动化",
+               "assets": [{"name": "QingFeng_KeyMouse_Tool.exe",
+                           "browser_download_url": "https://gh/x/1.exe"}]}
+        with patch("app.updater.fetch_latest_release",
+                   return_value=rel) as m, \
+             patch("app.updater.fetch_manifest") as fm:
+            ver, urls = resolve_update_sources()
+            self.assertEqual(ver, "v3.1.0")
+            self.assertEqual(urls, ["https://gh/x/1.exe"])
+            m.assert_called_once()
+            fm.assert_not_called()
+
+    def test_fallback_to_gitee(self):
+        """GitHub 失败（返回 None）时走 Gitee，并补拼 Gitee 附件候选。"""
+        def fake_fetch(api="", timeout=15.0):
+            if "github" in api:
+                return None
+            return {"tag_name": "v2.0.0",
+                    "assets": [{"name": "清风自动化键鼠工具.exe",
+                                "browser_download_url": "https://gitee/2.exe"}]}
+        with patch("app.updater.fetch_latest_release", side_effect=fake_fetch) as m, \
+             patch("app.updater.fetch_manifest") as fm:
+            ver, urls = resolve_update_sources()
+            self.assertEqual(ver, "v2.0.0")
+            self.assertEqual(urls[0], "https://gitee/2.exe")
+            self.assertGreaterEqual(len(urls), 3)   # 直链 + 2 个拼地址候选
+            self.assertEqual(m.call_count, 2)       # 先 GitHub 后 Gitee
+            fm.assert_not_called()
+
+    def test_fallback_to_manifest(self):
+        with patch("app.updater.fetch_latest_release", return_value=None) as m, \
+             patch("app.updater.fetch_manifest",
+                   return_value={"version": "9.9.9",
+                                 "download_url": "https://m/a.exe"}) as fm:
+            ver, urls = resolve_update_sources()
+            self.assertEqual(ver, "9.9.9")
+            self.assertEqual(urls, ["https://m/a.exe"])
+            self.assertEqual(m.call_count, 2)
+            fm.assert_called_once()
 
 
 if __name__ == "__main__":

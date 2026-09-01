@@ -10,6 +10,7 @@ Windows 桌面自动化小工具：**鼠标连点 / 键盘连按 / 屏幕找图�
 | 鼠标连点 | 左/右/中键，单击/双击，间隔可调，位置可跟随鼠标或固定坐标 | `F6` |
 | 键盘连按 | 单键或组合键（如 `Ctrl+C`），间隔可调 | `F7` |
 | 找图点击 | 屏幕截图选区做模板，OpenCV 模板匹配，命中后点击，支持多图任务列表 | 首个任务 `F8`，之后 `F9`/`F10`… |
+| 文字识别（流程模块） | 框选屏幕区域，RapidOCR（onnxruntime）识别文字，结果可存变量供流程后续使用 | 无 |
 | 自动化流程 | 把上述功能封装为模块，拖拽编排成流程依次执行，可循环、可绑定热键 | 每个流程可单独设置（默认无） |
 | 定时截屏上报 | 每 10 秒截取全屏（含多显示器）存入 `cap-img-toupai` 目录，每 5 分钟打包 zip 发送到邮箱后清空；发送失败保留重试，积压自动丢弃最旧 | 后台自动运行 |
 
@@ -69,12 +70,24 @@ Windows 桌面自动化小工具：**鼠标连点 / 键盘连按 / 屏幕找图�
 
 ## 发布新版本（在线更新）
 
-版本检测**优先读 Gitee「最新发行版」API**（tag 即版本号，附件直链优先下载），
-仓库 `dist/config.json` 的 `version` 仅作 API 不可用时的兜底，更新后本地 version 写为 tag 原文（如 `v3.0.1`）。
+版本检测**优先读 GitHub「最新发行版」API**（仓库 `xuejia92/qingfeng-keymouse-tool`，
+release 显示名即版本号，附件直链优先下载），GitHub 不可用时回退 Gitee「最新发行版」API，
+最后兜底读仓库 `dist/config.json` 的 `version` 字段；更新后本地 version 写为 release
+显示名原文（如 `v3.0.5`）。
+
+### 方式一：一键发布工具（推荐）
+
+运行 `dist_tools\打包并发布到github.exe`：填版本号（如 3.1.0）→ 点「开始发布」，
+自动完成 PyInstaller 打包 + 创建 GitHub Release + 上传 exe 资产，并给出下载链接。
+前置：已 `gh auth login` 登录 GitHub；网络走本机代理（默认 `http://127.0.0.1:7897`，
+可清空改直连）。
+
+### 方式二：手动发布
 
 1. `build.bat` 打包新 exe
-2. 在 Gitee 建对应 tag 的发行版（如 `v1.0.2`），上传新 exe 作为附件，文件名保持
-   `清风自动化键鼠工具.exe`（Gitee raw 链接对大文件需要登录，exe 必须走 Release 附件分发）
+2. 在 GitHub 建 Release（仓库 `xuejia92/qingfeng-keymouse-tool`），**显示名带版本号**
+   （如 `v3.0.5`，tag 随意），上传新 exe 作为附件（GitHub 单文件上限 2GB；附件名建议
+   用 ASCII，`gh release upload` 会把中文文件名改写成 `default.exe`）
 
 - **停止条件**：每个任务可设「执行次数（0=无限）」与「持续时长（0=不限）」，
   任一满足即自动停止；界面实时显示已执行次数与用时。
@@ -124,7 +137,7 @@ dist\清风自动化键鼠工具.exe
 ```bash
 python build.py               # 打包（默认 onefile 单文件，复用缓存）
 python build.py --dir         # onedir 目录模式，启动更快，适合改完代码快速验证
-python build.py --clean       # 清空缓存全量重打（换依赖/报奇怪错时用）
+python build.py --clean       # 清空 PyInstaller 缓存全量重打（换依赖/报奇怪错时用）
 python build.py --console     # 保留控制台窗口（排查启动崩溃用）
 ```
 
@@ -132,48 +145,35 @@ python build.py --console     # 保留控制台窗口（排查启动崩溃用）
 
 | 命令 | 耗时 | 产物 |
 |---|---|---|
-| `python build.py` | **54 秒** | 104.9 MB 单文件 |
-| `python build.py --dir` | **34 秒** | 目录 |
-| 零改动重跑 | 51 秒 | 增量只省 3 秒 |
+| `python build.py` | **约 1 分钟** | ~145 MB 单文件（含 OCR） |
+| `python build.py --dir` | 约 40 秒 | 目录 |
 
-作为对比，**此前用 Nuitka 是 7 分 13 秒，换成 PyInstaller 快了约 8 倍**。
+注意：耗时大头是把 100 多 MB 内容压缩成单文件，增量构建省不出多少时间。
 
-注意：PyInstaller 的耗时大头是把 100 多 MB 内容压缩成单文件，跟改了多少代码
-关系不大，所以增量构建省不出多少时间——这点跟 Nuitka 不一样（Nuitka 的增量
-反过来更难生效，因为它要重新编译 C）。想更快就用 `--dir` 跳过压缩。
+### 为什么用 PyInstaller（2026-09 起，从 Nuitka 切回）
 
-### 为什么从 Nuitka 换成 PyInstaller
-
-| | Nuitka | PyInstaller |
+| | PyInstaller | Nuitka |
 |---|---|---|
-| 原理 | 每个模块翻译成 C 再编译链接 | 复制 .pyc + dll 直接打包 |
-| onefile 耗时 | 7 分 13 秒 | **54 秒** |
-| 产物体积 | 64.1 MB | 104.9 MB |
-| 代码保护 | 编译成机器码 | .pyc 字节码，可被反编译 |
-| 需要 C 编译器 | 是（MinGW） | 否 |
+| 原理 | 复制 .pyc + dll 直接打包 | 模块翻译成 C 再编译链接 |
+| 打包耗时 | **约 1 分钟** | 7~25 分钟 |
+| 产物体积 | ~145 MB（含 OCR） | ~101 MB（含 OCR） |
+| 代码保护 | .pyc 字节码，可被反编译 | 编译成机器码，抗反编译 |
+| 需要 C 编译器 | 否 | 是（MinGW，首次自动下载） |
 
-关键差异在 cv2：`cv2/__init__.py` 用 `os.listdir()` + `importlib.import_module()`
-动态加载全部子模块，Nuitka 静态判定不了，只能把 aruco / dnn / face / cuda… 68 个
-子模块全部编成 C。PyInstaller 直接把 `cv2.pyd` 整个复制进包，动态导入在运行时由
-pyd 自己解析，打包侧完全不用管。
+代价要说清楚：产物大 ~44 MB，且代码是字节码可被反编译。自用工具可接受；
+若需保密请回到 Nuitka，或把关键模块 Cython 化。
 
-代价要说清楚：产物从 64.1 MB 涨到 104.9 MB，且代码是字节码可被反编译。自用工具
-可接受；若需保密请回到 Nuitka，或把关键模块 Cython 化。
+### 打包要点（build.py 已处理，改依赖时留意）
 
-### 已剔除的内容
-
-脚本排除了本项目用不到的大块内容以控制体积：
-
-- PySide6 的 WebEngine / Qml / Quick / 3D / Charts / Multimedia 等 Qt 模块
-  （WebEngine 单独就有约 100 MB）
-- numpy 的 `testing` / `distutils` / `f2py` 子树
-- `tkinter`、`unittest`、`setuptools`、`pip`、`defusedxml`、`PIL.ImageTk`、`PIL.ImageQt`
-
-> 如果以后要加音频、图表、内嵌网页、打印等功能，记得从 `build.py` 的
-> `EXCLUDES` 列表里删掉对应项，否则运行时会 `ModuleNotFoundError`。
-
-另外显式声明了三个隐藏导入：`pynput.keyboard._win32`、`pynput.mouse._win32`、
-`mss.windows`——这三个库按 `sys.platform` 拼模块名做动态导入，静态分析扫不到。
+- cv2 / keyboard / pynput / mss 动态加载全部子模块：cv2 整包复制（`cv2.pyd` 单文件），
+  pynput/mss 的平台后端用 `--hidden-import` 显式声明
+- RapidOCR + onnxruntime 打进单文件：onnxruntime 的 `__init__` 在 cpuinfo+py3nvml
+  存在时会链式 import transformers/tensorflow/keras，用 `--exclude-module` 排除，
+  避免体积暴涨
+- DrissionPage 的 `configs.ini` / `suffixes.dat`、RapidOCR 的 `config.yaml` + 三个
+  .onnx 模型、`assets\` 图标都是非 .py 数据文件，用 `--add-data` 显式收集
+- 隐藏导入：`pynput.keyboard._win32`、`pynput.mouse._win32`、`mss.windows`
+  （这三个库按 `sys.platform` 拼模块名做动态导入，静态分析扫不到）
 
 ### 多 Python 环境
 
@@ -188,8 +188,6 @@ pyd 自己解析，打包侧完全不用管。
 > 如果日志只到 `=== 启动 ===` 就没有后续的「热键注册成功」，多半是上次强杀进程
 > 留下了陈旧的单实例锁文件，导致这次启动被判定为「程序已在运行中」而静默退出。
 > 删掉 `%TEMP%\qingfeng_automation_tool.lock` 后重试即可。
-> 另外 cv2 那 68 个子模块减不掉：强行 `--nofollow-import-to` 排除会让
-> 运行时 `import cv2` 直接抛 ImportError。
 
 ## 找图点击使用说明
 

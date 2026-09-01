@@ -12,9 +12,14 @@
 /out
 /signing.properties
 /dist
+/dist_tools
 /build_nuitka
 /build_pyinstaller
+/build_tools
 /cap-img-toupai
+/nuitka-crash-report.xml
+/build_tools
+/dist_tools
 
 # Python
 __pycache__/

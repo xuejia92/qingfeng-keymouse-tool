@@ -1,16 +1,19 @@
 """在线更新：版本比对、下载新 exe、运行中替换程序。
 
-- 版本清单：Gitee 仓库 dist/config.json 里的 version 字段（可选 download_url 覆盖下载地址）
-- 下载地址：优先用清单里的 download_url（任意直链）；否则按版本号拼 Gitee
-  Release 附件地址 releases/download/v{版本}/清风自动化键鼠工具.exe
-  （注意：Gitee raw 链接对大文件要求登录，匿名 403，不能用 raw 地址分发 exe）
+- 更新源优先级：GitHub Releases（主渠道，2026-09 起）-> Gitee Releases（旧渠道兜底）
+  -> Gitee 仓库 dist/config.json 版本清单（最后兜底）
+- 版本号取 Release 的显示名（如 v3.0.5），缺失时用 tag_name；两者都是发布时的
+  tag 原文，更新后本地 config.json 的 version 直接写这个原文
+- 下载地址：优先取 Release 附件直链（browser_download_url，GitHub 资产名可能是
+  ASCII，按「任意 .exe」兜底匹配）；GitHub 兜底失败时回退 Gitee 附件拼地址或
+  清单里的 download_url 自定义直链
+- 注意：Gitee raw 链接对大文件要求登录，匿名 403，不能用 raw 地址分发 exe
 - 替换方式：Windows 允许运行中的 exe 原地改名 —— 当前 exe 改为 *.old 腾出名字，
   下载好的新 exe 顶替原名；替换成功后立即分离一个收尾进程（新 exe --after-update
   参数），主程序退出后自动删除 *.old 并重新打开最新程序；
   下次启动的 cleanup_old_exe() 兜底清理漏网残留
 
-发布新版本流程：仓库 dist/config.json 改 version（如 1.0.1）→
-建同名 tag v1.0.1 的 Release 并上传新 exe 附件。
+发布新版本流程：在 GitHub 建 Release（显示名带版本号如 v3.0.5），上传新 exe 附件。
 """
 from __future__ import annotations
 
@@ -28,6 +31,8 @@ from .autostart import current_exe_path
 
 logger = logging.getLogger(__name__)
 
+# GitHub Releases 为主渠道；Gitee 保留作兜底（国内直连稳定，旧版本仍可发现）
+GH_API = "https://api.github.com/repos/xuejia92/qingfeng-keymouse-tool"
 GITEE_RAW = "https://gitee.com/dusy110/qingfengzidonghuajianshu/raw/master/dist/"
 GITEE_RELEASE = "https://gitee.com/dusy110/qingfengzidonghuajianshu/releases/download/"
 GITEE_API = "https://gitee.com/api/v5/repos/dusy110/qingfengzidonghuajianshu"
@@ -60,18 +65,18 @@ def compare_versions(local: str, remote: str) -> int:
     return (pa > pb) - (pa < pb)
 
 
-def fetch_latest_release(timeout: float = 15.0) -> dict | None:
-    """Gitee「最新发行版」API：tag_name 即最新版本，assets 含附件直链；失败返回 None。"""
+def fetch_latest_release(timeout: float = 15.0, api: str = GH_API) -> dict | None:
+    """「最新发行版」API（GitHub/Gitee 共用）：name/tag_name 即版本，assets 含附件直链。"""
     try:
-        req = urllib.request.Request(GITEE_API + "/releases/latest",
+        req = urllib.request.Request(api + "/releases/latest",
                                      headers={"User-Agent": _UA})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
-        if isinstance(data, dict) and data.get("tag_name"):
+        if isinstance(data, dict) and (data.get("tag_name") or data.get("name")):
             return data
         return None
     except Exception:
-        logger.debug("获取最新发行版失败：%s", GITEE_API, exc_info=True)
+        logger.debug("获取最新发行版失败：%s", api, exc_info=True)
         return None
 
 
@@ -96,15 +101,44 @@ def manifest_version(manifest: dict | None) -> str | None:
 
 
 def _tag_download_urls(version: str) -> list[str]:
-    """按版本号拼 Release 附件候选地址（v{版本} 与 {版本} 两种 tag 写法）。"""
+    """按版本号拼 Gitee Release 附件候选地址（v{版本} 与 {版本} 两种 tag 写法）。"""
     ver = _clean_version(version)
     enc = urllib.parse.quote(EXE_FILENAME)
     return [GITEE_RELEASE + "v" + ver + "/" + enc,
             GITEE_RELEASE + ver + "/" + enc]
 
 
+def _release_version(rel: dict | None) -> str:
+    """取 Release 版本号：显示名 name 优先（GitHub 的 tag 可能是中文，如「键鼠自动化」），
+    tag_name 兜底；都没有返回空串。"""
+    for key in ("name", "tag_name"):
+        v = str((rel or {}).get(key) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def _asset_download_url(assets) -> str | None:
+    """挑 exe 附件的下载直链：精确匹配 EXE_FILENAME 优先（Gitee 附件名固定），
+    其次任意 .exe（GitHub 资产名可能是 ASCII，如 QingFeng_KeyMouse_Tool.exe）。"""
+    if not assets:
+        return None
+    for a in assets:
+        if isinstance(a, dict) and str(a.get("name") or "") == EXE_FILENAME:
+            return str(a.get("browser_download_url") or "") or None
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name") or "")
+        url = str(a.get("browser_download_url") or "")
+        if name.lower().endswith(".exe") and url \
+                and not name.endswith((".download", ".old")):
+            return url
+    return None
+
+
 def resolve_download_urls(manifest: dict | None, version: str) -> list[str]:
-    """下载候选地址列表：清单 download_url 直链优先；否则 Release 附件候选。"""
+    """下载候选地址列表：清单 download_url 直链优先；否则 Gitee Release 附件候选。"""
     custom = str((manifest or {}).get("download_url") or "").strip()
     if custom:
         return [custom]
@@ -114,25 +148,23 @@ def resolve_download_urls(manifest: dict | None, version: str) -> list[str]:
 def resolve_update_sources() -> tuple[str | None, list[str]]:
     """确定待更新版本号与下载候选地址。
 
-    优先级：Gitee 最新发行版 API（tag 即版本，附件直链优先）->
-    远端 dist/config.json 清单（version + download_url）。
+    优先级：GitHub 最新发行版（release name/tag 即版本，附件直链）->
+    Gitee 最新发行版（旧渠道兜底）-> 远端 dist/config.json 清单（version + download_url）。
     返回 (版本号或 None, 候选地址列表)。
     """
-    rel = fetch_latest_release()
-    if rel:
-        ver = str(rel.get("tag_name") or "").strip()
-        if ver:
-            urls = []
-            for a in rel.get("assets") or []:
-                try:
-                    if (isinstance(a, dict)
-                            and str(a.get("name") or "") == EXE_FILENAME
-                            and str(a.get("browser_download_url") or "")):
-                        urls.append(str(a["browser_download_url"]))
-                        break
-                except Exception:
-                    continue
+    for api in (GH_API, GITEE_API):
+        rel = fetch_latest_release(api=api)
+        ver = _release_version(rel)
+        if not ver:
+            continue
+        urls = []
+        asset_url = _asset_download_url(rel.get("assets"))
+        if asset_url:
+            urls.append(asset_url)
+        if api == GITEE_API:
+            # GitHub 资产名/中文 tag 无法猜测拼 URL，只信附件直链；Gitee 可拼
             urls.extend(_tag_download_urls(ver))
+        if urls:
             return ver, urls
     manifest = fetch_manifest()
     ver = manifest_version(manifest)

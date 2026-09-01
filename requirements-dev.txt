@@ -2,5 +2,5 @@
 #   pip install -r requirements.txt -r requirements-dev.txt
 -r requirements.txt
 
-# 打包工具（Nuitka 方案：体积小、抗反编译；需要 C 编译器，首次自动下载 MinGW）
-nuitka>=2.0
+# 打包工具（PyInstaller 方案：约 54 秒出单文件，不需要 C 编译器）
+pyinstaller>=6.0

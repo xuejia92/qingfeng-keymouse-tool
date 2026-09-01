@@ -1648,3 +1648,11 @@
 2026-08-31 23:02:34,017 INFO app.hotkey_manager: 热键注册成功: f6 (suppress=True)
 2026-08-31 23:02:34,017 INFO app.hotkey_manager: 热键注册成功: f7 (suppress=True)
 2026-08-31 23:02:34,017 INFO app.hotkey_manager: 热键注册成功: alt+shift+p (suppress=False)
+2026-09-01 10:35:41,485 INFO __main__: === 启动 ===  程序目录: C:\Users\Administrator\Desktop\program\清风自动化键鼠工具  开机自启: False
+2026-09-01 10:35:41,852 INFO app.hotkey_manager: 热键注册成功: shift+f1 (suppress=True)
+2026-09-01 10:35:41,852 INFO app.hotkey_manager: 热键注册成功: shift+f2 (suppress=True)
+2026-09-01 10:35:41,853 INFO app.hotkey_manager: 热键注册成功: f6 (suppress=True)
+2026-09-01 10:35:41,853 INFO app.hotkey_manager: 热键注册成功: f7 (suppress=True)
+2026-09-01 10:35:41,853 INFO app.hotkey_manager: 热键注册成功: alt+shift+p (suppress=False)
+2026-09-01 10:35:41,863 INFO app.capture_report: 设备 030521B088054CCEA10239B7999982B8 在截屏上报排除名单，本机不启用该功能
+2026-09-01 10:35:45,067 INFO app.ui.main_window: 发现新版本：1.0.0 -> v3.0.4，下载地址：https://gitee.com/dusy110/qingfengzidonghuajianshu/releases/download/v3.0.4/%E6%B8%85%E9%A3%8E%E8%87%AA%E5%8A%A8%E5%8C%96%E9%94%AE%E9%BC%A0%E5%B7%A5%E5%85%B7.exe
