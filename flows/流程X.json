@@ -1,15 +1,19 @@
 {
-  "id": "70ce81d660af",
+  "id": "9c8331a5ca5f",
   "name": "流程X",
   "group": "",
   "steps": [
     {
-      "type": "var",
-      "name": "变量",
+      "type": "find_image",
+      "name": "找图",
       "params": {
-        "name": "",
-        "type": "string",
-        "default_value": ""
+        "image": "",
+        "image_path": "",
+        "confidence": 0.85,
+        "region": "",
+        "variable": "",
+        "preview": false,
+        "preview_duration": 1.0
       },
       "continue_on_fail": false,
       "pair_id": ""
