@@ -1,9 +1,0 @@
-流程数: 1
- - 流程 1 步数 1 热键 '' 超时 [10.0]
-当前行: 0 总数: 1
---- 点击运行按钮 ---
-选中: 流程 1 | runner 存在: True | 运行中: True | 当前步: 0
-左栏文本: '▶ 流程 1'
-右栏标题: 「流程 1」运行中 · 步骤 1/1
-8秒后: 运行中: True | 状态: <PySide6.QtCore.SignalInstance stateChanged(QString,QString) at 0x0000021D3A6DB830>
-ALL DONE

@@ -1,4 +1,0 @@
-start toggle
-exec
-quit-now
-after exec

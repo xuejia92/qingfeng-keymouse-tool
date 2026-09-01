@@ -1,3 +1,0 @@
-win visible: True
-  _start_template_capture called
-after wait: win visible: False | start calls: 1 | run calls: 0

@@ -24,6 +24,9 @@
 /templates
 /flows
 /app.log
+# 本地开发数据（调试残留 / AI 记忆 / 崩溃报告）
+/.zcode
+/.workbuddy-ai
 
 # Python
 __pycache__/
