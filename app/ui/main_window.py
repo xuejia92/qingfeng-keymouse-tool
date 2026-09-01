@@ -10,8 +10,8 @@ import sys
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow,
-                               QMessageBox, QPushButton, QTabWidget, QVBoxLayout,
-                               QWidget)
+                               QMessageBox, QProgressBar, QPushButton,
+                               QTabWidget, QVBoxLayout, QWidget)
 
 from ..config import APP_NAME, AppConfig, ClickerConfig, PresserConfig
 from ..capture_report import stop as stop_capture
@@ -134,6 +134,18 @@ class MainWindow(QMainWindow):
         self.update_btn.clicked.connect(self._restart_upgrade)
         self.update_btn.hide()
         self.statusBar().addWidget(self.update_btn)
+        # 下载进度条：下载中点击「下载中…」按钮可展开/收起
+        self.update_progress = QProgressBar()
+        self.update_progress.setFixedWidth(200)
+        self.update_progress.setFixedHeight(16)
+        self.update_progress.setTextVisible(True)
+        self.update_progress.setStyleSheet(
+            "QProgressBar{background:#eee; border:none; border-radius:3px;"
+            " text-align:center; font-size:10px; color:#555;}"
+            "QProgressBar::chunk{background:#1668a8; border-radius:3px;}")
+        self.update_progress.hide()
+        self.statusBar().addWidget(self.update_progress)
+        self._progress_visible = False
         self._refresh_status_hint()
         self._pending_update: tuple[str, list[str]] | None = None
         self._downloaded_file: str | None = None
@@ -506,9 +518,21 @@ class MainWindow(QMainWindow):
     def _start_auto_download(self, download_urls: list[str]) -> None:
         """后台线程自动下载新版本到本地（不打断用户操作）。"""
         self._downloader = AutoDownloader(download_urls)
+        self._downloader.progress.connect(self._on_download_progress)
         self._downloader.completed.connect(self._on_download_completed)
         self._downloader.failed.connect(self._on_download_failed)
         self._downloader.start()
+
+    def _on_download_progress(self, done: int, total: int) -> None:
+        """下载中实时刷新状态栏进度条（仅在展开时可见）。"""
+        if total > 0:
+            self.update_progress.setRange(0, 100)
+            self.update_progress.setValue(min(100, int(done * 100 / total)))
+            self.update_progress.setFormat(
+                f"{done / 1048576:.0f} / {total / 1048576:.0f} MB")
+        else:
+            self.update_progress.setRange(0, 0)   # 服务器未返回大小：滚动不定进度
+            self.update_progress.setFormat(f"{done / 1048576:.0f} MB")
 
     def _on_download_completed(self, file: str) -> None:
         self._downloaded_file = file
@@ -523,12 +547,14 @@ class MainWindow(QMainWindow):
         logging.getLogger(__name__).warning("自动下载新版本失败：%s", err)
 
     def _set_update_state(self, state: str) -> None:
-        """按状态刷新状态栏左下角的红点 / 提示文字 / 按钮。"""
+        """按状态刷新状态栏左下角的红点 / 提示文字 / 按钮 / 进度条。"""
         self._update_state = state
         if state == "idle":
             self.update_dot.hide()
             self.update_hint.hide()
             self.update_btn.hide()
+            self.update_progress.hide()
+            self._progress_visible = False
             return
         remote = (self._pending_update or ("", []))[0]
         self.update_dot.show()
@@ -537,19 +563,28 @@ class MainWindow(QMainWindow):
         if state == "downloading":
             self.update_hint.setText(f"已检测到新版本 {remote}，正在自动下载…")
             self.update_btn.setText("下载中…")
-            self.update_btn.setEnabled(False)
+            self.update_btn.setEnabled(True)   # 可点击：展开/收起实时进度条
+            self.update_progress.setVisible(self._progress_visible)
         elif state == "ready":
             self.update_hint.setText(f"新版本 {remote} 已下载")
             self.update_btn.setText("重启升级")
             self.update_btn.setEnabled(True)
+            self.update_progress.hide()
+            self._progress_visible = False
         elif state == "failed":
             self.update_hint.setText(f"新版本 {remote} 下载失败")
             self.update_btn.setText("重新下载")
             self.update_btn.setEnabled(True)
+            self.update_progress.hide()
+            self._progress_visible = False
 
     def _restart_upgrade(self) -> None:
-        """左下角「重启升级 / 重新下载」按钮：已就绪则替换 exe 并重启，
-        失败则重新自动下载。"""
+        """左下角按钮：下载中点击=展开/收起进度条；已就绪=替换 exe 并重启；
+        失败=重新自动下载。"""
+        if self._update_state == "downloading":
+            self._progress_visible = not self._progress_visible
+            self.update_progress.setVisible(self._progress_visible)
+            return
         if self._update_state == "ready" and self._downloaded_file:
             ok, why = install_update(self._downloaded_file)
             if not ok:
@@ -564,6 +599,8 @@ class MainWindow(QMainWindow):
             QApplication.quit()
         elif self._update_state == "failed":
             urls = (self._pending_update or ("", []))[1]
+            self._progress_visible = False
+            self.update_progress.hide()
             self._set_update_state("downloading")
             self._start_auto_download(urls)
 

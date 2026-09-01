@@ -39,11 +39,13 @@ class VersionFetcher(QObject):
 class AutoDownloader(QObject):
     """后台线程自动下载新版本（不弹窗，供状态栏「重启升级」流程使用）。
 
-    completed 带回下载好的本地文件路径；failed 带回失败原因。
+    completed 带回下载好的本地文件路径；failed 带回失败原因；
+    progress 实时回传 (已下载字节, 总字节；0=服务器未给大小)。
     """
 
     completed = Signal(str)
     failed = Signal(str)
+    progress = Signal(int, int)
 
     def __init__(self, download_urls: list[str]):
         super().__init__()
@@ -67,7 +69,9 @@ class AutoDownloader(QObject):
             last = "下载失败"
             try:
                 for url in urls:   # 依次尝试候选地址
-                    ok, why = download_update(url, dest)
+                    ok, why = download_update(
+                        url, dest,
+                        progress_cb=lambda d, t: self.progress.emit(d, t))
                     if ok:
                         self.completed.emit(dest)
                         return
