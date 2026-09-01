@@ -144,18 +144,17 @@ class FlowTab(QWidget):
             QWidget#flowTab QGroupBox#modulePanel QPushButton[groupHeader="true"]:disabled {
                 color: #aab2bb; background: #f2f4f6;
             }
-            /* 「全部收起」图标按钮：无文字、小方框、浅蓝描边 */
-            QWidget#flowTab QGroupBox#modulePanel QPushButton#collapseAllBtn {
-                text-align: center; padding: 0;
-                font-size: 11pt; color: #1668a8;
-                border: 1px solid #b9d3e8; border-radius: 5px;
-                background: #f3f8fd;
+            /* 面板标题（可点击文字按钮）：点击一键收起/展开全部分组 */
+            QWidget#flowTab QPushButton#panelTitleBtn {
+                text-align: left; padding: 2px 6px;
+                font-size: 10pt; font-weight: 600; color: #1668a8;
+                border: none; border-radius: 4px; background: transparent;
             }
-            QWidget#flowTab QGroupBox#modulePanel QPushButton#collapseAllBtn:hover {
-                background: #dce8f4;
+            QWidget#flowTab QPushButton#panelTitleBtn:hover {
+                background: #e9f0f8;
             }
-            QWidget#flowTab QGroupBox#modulePanel QPushButton#collapseAllBtn:disabled {
-                color: #aab2bb; background: #f2f4f6; border-color: #e1e4e8;
+            QWidget#flowTab QPushButton#panelTitleBtn:disabled {
+                color: #aab2bb; background: transparent;
             }
             QWidget#flowTab QScrollArea#moduleScroll {
                 background: transparent; border: none;
@@ -240,18 +239,17 @@ class FlowTab(QWidget):
         rlay.setContentsMargins(0, 0, 0, 0)
         rlay.setSpacing(2)
 
-        # 收起按钮放在面板外框上方右侧（原 QGroupBox 标题位置）
+        # 面板标题：可点击文字（点击一键收起/展开全部分组），文字后带 ^ 符号
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(0)
+        self.panel_title_btn = QPushButton("模块面板 ^")
+        self.panel_title_btn.setObjectName("panelTitleBtn")
+        self.panel_title_btn.setToolTip("点击一键收起/展开所有模块分组")
+        self.panel_title_btn.setCursor(Qt.PointingHandCursor)
+        self.panel_title_btn.clicked.connect(self._toggle_collapse_all)
+        btn_row.addWidget(self.panel_title_btn)
         btn_row.addStretch(1)
-        self.collapse_all_btn = QPushButton("⏫")
-        self.collapse_all_btn.setObjectName("collapseAllBtn")
-        self.collapse_all_btn.setToolTip("一键收起所有模块分组（再次点击各分组标题可展开）")
-        self.collapse_all_btn.setCursor(Qt.PointingHandCursor)
-        self.collapse_all_btn.setFixedSize(26, 24)
-        self.collapse_all_btn.clicked.connect(self._collapse_all_groups)
-        btn_row.addWidget(self.collapse_all_btn)
         rlay.addLayout(btn_row)
 
         self.panel_box = QGroupBox()
@@ -486,11 +484,17 @@ class FlowTab(QWidget):
     def refresh_steps_view(self):
         self._reload_steps()
 
-    def _collapse_all_groups(self):
-        """一键收起全部模块分组（状态经 toggled 信号持久化到 config）。"""
-        for gid, header in self._group_headers.items():
-            if header.isChecked():
-                header.setChecked(False)   # 触发 toggled(False) -> _on_group_toggled 收起+持久化
+    def _toggle_collapse_all(self):
+        """点击面板标题：一键收起/展开全部模块分组（状态经 toggled 信号持久化）。"""
+        all_collapsed = all(not h.isChecked() for h in self._group_headers.values())
+        for header in self._group_headers.values():
+            header.setChecked(all_collapsed)   # 全收起 -> 展开全部；否则收起全部
+        self._update_panel_title()
+
+    def _update_panel_title(self):
+        """标题符号随状态刷新：有分组展开显示 ^（点击收起），全部收起显示 v（点击展开）。"""
+        all_collapsed = all(not h.isChecked() for h in self._group_headers.values())
+        self.panel_title_btn.setText("模块面板 ^" if not all_collapsed else "模块面板 v")
 
     def _on_group_toggled(self, gid: str, expanded: bool):
         """分组标题点击：切换模块按钮区显示/隐藏，并把状态持久化到 config。"""
@@ -507,6 +511,7 @@ class FlowTab(QWidget):
             collapsed.add(gid)
         self.cfg.collapsed_module_groups = sorted(collapsed)
         self.cfg.save()
+        self._update_panel_title()   # 单独展开/收起分组后同步刷新标题符号
 
     def _reload_steps(self):
         flow = self._selected_flow()
@@ -518,12 +523,12 @@ class FlowTab(QWidget):
             b.setEnabled(editable)
         for h in self._group_headers.values():
             h.setEnabled(editable)
-        self.collapse_all_btn.setEnabled(editable)
         self.step_list.setEnabled(editable)
         self.step_edit_btn.setEnabled(editable)
         self.step_del_btn.setEnabled(editable)
-        self.panel_box.setTitle("模块面板" if editable
-                                else "模块面板（流程运行中，已锁定编辑）")
+        self.panel_title_btn.setEnabled(editable)
+        self.panel_title_btn.setToolTip("点击一键收起/展开所有模块分组" if editable
+                                        else "流程运行中，已锁定编辑")
         self._update_run_button()
 
     def _update_run_button(self):

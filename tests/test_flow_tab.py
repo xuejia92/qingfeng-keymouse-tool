@@ -252,37 +252,55 @@ class TestModulePanelCollapseAll(unittest.TestCase):
         self.cfg.collapsed_module_groups = []
         self.tab = FlowTab(self.cfg)
 
-    def test_collapse_all_button_exists(self):
-        self.assertIsNotNone(self.tab.collapse_all_btn)
-        self.assertEqual(self.tab.collapse_all_btn.text(), "⏫")  # 纯图标、无文字
-        self.assertIn("收起", self.tab.collapse_all_btn.toolTip())
+    def test_panel_title_button_exists(self):
+        self.assertIsNotNone(self.tab.panel_title_btn)
+        self.assertEqual(self.tab.panel_title_btn.text(), "模块面板 ^")  # 文字后带 ^
+        self.cfg.flows.append(Flow(name="流程X"))
+        self.tab.refresh_list()                       # 选中流程 -> 编辑解锁
+        self.assertIn("收起", self.tab.panel_title_btn.toolTip())
 
     def test_collapse_all_collapses_every_group_and_persists(self):
-        """点击全部收起：所有分组标题变 ▸、内容隐藏、状态全部持久化。"""
+        """点击面板标题：所有分组变 ▸、内容隐藏、标题变 v、状态全部持久化。"""
         self.cfg.flows.append(Flow(name="流程X"))  # 原地追加，_flows 引用同一列表
         self.tab.refresh_list()                       # 选中流程 -> 编辑解锁
-        self.assertTrue(self.tab.collapse_all_btn.isEnabled())
+        self.assertTrue(self.tab.panel_title_btn.isEnabled())
 
         with mock.patch.object(AppConfig, "save") as save:
-            self.tab.collapse_all_btn.click()
+            self.tab.panel_title_btn.click()
         for header in self.tab._group_headers.values():
             self.assertTrue(header.text().startswith("▸"))
         for wrapper in self.tab._group_wrappers.values():
             self.assertTrue(wrapper.isHidden())
         self.assertEqual(sorted(self.cfg.collapsed_module_groups),
                          sorted(gid for gid, _, _ in MODULE_GROUPS))
+        self.assertEqual(self.tab.panel_title_btn.text(), "模块面板 v")
         save.assert_called()
 
     def test_collapse_all_expands_individually(self):
-        """全部收起后，点单个分组标题仍可单独展开。"""
+        """全部收起后，点单个分组标题仍可单独展开，标题符号回 ^。"""
         self.cfg.flows.append(Flow(name="流程X"))
         self.tab.refresh_list()
-        self.tab.collapse_all_btn.click()
+        self.tab.panel_title_btn.click()
         self.tab._group_headers["input"].setChecked(True)   # 单独展开 input
         self.assertFalse(self.tab._group_wrappers["input"].isHidden())
         self.assertTrue(self.tab._group_wrappers["perceive"].isHidden())
         self.assertEqual(sorted(self.cfg.collapsed_module_groups),
                          sorted(gid for gid, _, _ in MODULE_GROUPS if gid != "input"))
+        self.assertEqual(self.tab.panel_title_btn.text(), "模块面板 ^")
+
+    def test_collapse_all_toggles_back_to_expand(self):
+        """全部收起后再点标题：所有分组重新展开，标题回 ^。"""
+        self.cfg.flows.append(Flow(name="流程X"))
+        self.tab.refresh_list()
+        self.tab.panel_title_btn.click()        # 全部收起
+        self.tab.panel_title_btn.click()        # 全部展开
+        for header in self.tab._group_headers.values():
+            self.assertTrue(header.isChecked())
+            self.assertTrue(header.text().startswith("▾"))
+        for wrapper in self.tab._group_wrappers.values():
+            self.assertFalse(wrapper.isHidden())
+        self.assertEqual(self.cfg.collapsed_module_groups, [])
+        self.assertEqual(self.tab.panel_title_btn.text(), "模块面板 ^")
 
     def test_perceive_group_renamed_with_screenshot(self):
         """「文字识别」分组改名为「目标识别」，并纳入新模块「截图」。"""
