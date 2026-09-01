@@ -65,6 +65,97 @@ class TestMainWindowScreenSize(unittest.TestCase):
         self.assertLessEqual(h, 1040)
 
 
+class TestUpdateManualFlow(unittest.TestCase):
+    """手动更新状态机：检测到新版本只提示，点「下载更新」才开始下载。
+
+    状态流转 idle -> available（下载更新）-> downloading（下载中…，点按钮
+    收起/展开进度条）-> ready（重启升级）/ failed（重新下载）。下载由用户
+    触发，任何分支都不允许自动开始——这是行为约定，必须钉测试。
+    """
+
+    def _win(self):
+        """不跑 __init__ 的 MainWindow，只挂状态机用到的属性（widget 全 Mock）。"""
+        from app.ui.main_window import MainWindow
+        win = MainWindow.__new__(MainWindow)
+        win.cfg = mock.Mock(version="1.0.0")
+        win.update_dot = mock.Mock()
+        win.update_hint = mock.Mock()
+        win.update_btn = mock.Mock()
+        win.update_progress = mock.Mock()
+        win._progress_visible = True
+        win._pending_update = None
+        win._downloaded_file = None
+        win._update_state = "idle"
+        return win
+
+    def test_fetched_shows_hint_without_downloading(self):
+        """检测到新版本：进 available，提示 +「下载更新」按钮，不启动下载。"""
+        win = self._win()
+        with mock.patch.object(type(win), "_start_download") as dl:
+            win._on_version_fetched(("v9.9.9", ["https://x/1.exe"]))
+            self.assertEqual(win._update_state, "available")
+            dl.assert_not_called()                       # 手动模式：绝不自动下载
+        win.update_hint.setText.assert_called_with("发现新版本 v9.9.9")
+        win.update_btn.setText.assert_called_with("下载更新")
+
+    def test_older_remote_stays_idle(self):
+        """远端版本不比本地新：保持 idle，不提示不下载。"""
+        win = self._win()
+        win.cfg = mock.Mock(version="3.0.2")
+        with mock.patch.object(type(win), "_start_download") as dl:
+            win._on_version_fetched(("v3.0.2", ["https://x/1.exe"]))
+            self.assertEqual(win._update_state, "idle")
+            dl.assert_not_called()
+
+    def test_click_available_starts_download(self):
+        """available 状态点击按钮：进入 downloading 并真正启动下载。"""
+        win = self._win()
+        win._pending_update = ("v9.9.9", ["https://x/1.exe"])
+        win._update_state = "available"
+        with mock.patch.object(type(win), "_start_download") as dl:
+            win._restart_upgrade()
+            dl.assert_called_once_with(["https://x/1.exe"])
+        self.assertEqual(win._update_state, "downloading")
+        win.update_btn.setText.assert_called_with("下载中…")
+
+    def test_click_downloading_toggles_progress(self):
+        """下载中点击按钮：只切换进度条显隐，不影响下载。"""
+        win = self._win()
+        win._update_state = "downloading"
+        win._progress_visible = True
+        win._restart_upgrade()
+        self.assertFalse(win._progress_visible)
+        win.update_progress.setVisible.assert_called_with(False)
+
+    def test_download_completed_ready(self):
+        """下载完成：ready 状态 +「重启升级」按钮。"""
+        win = self._win()
+        win._pending_update = ("v9.9.9", [])
+        win._on_download_completed(r"C:\tmp\x.exe")
+        self.assertEqual(win._update_state, "ready")
+        self.assertEqual(win._downloaded_file, r"C:\tmp\x.exe")
+        win.update_btn.setText.assert_called_with("重启升级")
+
+    def test_failed_click_retries_download(self):
+        """下载失败后点击「重新下载」：重新进入 downloading 并重试。"""
+        win = self._win()
+        win._pending_update = ("v9.9.9", ["https://x/1.exe"])
+        win._update_state = "failed"
+        with mock.patch.object(type(win), "_start_download") as dl:
+            win._restart_upgrade()
+            dl.assert_called_once()
+        self.assertEqual(win._update_state, "downloading")
+
+    def test_non_idle_not_retriggered(self):
+        """非 idle 状态下再次检测到新版本：不重复触发、不覆盖在途流程。"""
+        win = self._win()
+        win._update_state = "downloading"
+        win._pending_update = ("v9.9.9", ["u1"])
+        win._on_version_fetched(("v9.9.9", ["u1"]))
+        self.assertEqual(win._update_state, "downloading")
+        self.assertEqual(win._pending_update, ("v9.9.9", ["u1"]))
+
+
 class TestLogPanel(unittest.TestCase):
     """日志面板：展开/收缩切换文本区显隐、文本追加、摘要显示。"""
 

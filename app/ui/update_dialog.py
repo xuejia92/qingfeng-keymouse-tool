@@ -37,7 +37,7 @@ class VersionFetcher(QObject):
 
 
 class AutoDownloader(QObject):
-    """后台线程自动下载新版本（不弹窗，供状态栏「重启升级」流程使用）。
+    """后台线程下载新版本（不弹窗，供状态栏手动更新流程使用）。
 
     completed 带回下载好的本地文件路径；failed 带回失败原因；
     progress 实时回传 (已下载字节, 总字节；0=服务器未给大小)。
@@ -80,7 +80,7 @@ class AutoDownloader(QObject):
             finally:
                 self._running = False
 
-        threading.Thread(target=work, daemon=True, name="自动下载更新").start()
+        threading.Thread(target=work, daemon=True, name="手动下载更新").start()
 
 
 class DownloadDialog(QDialog):

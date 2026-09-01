@@ -115,8 +115,8 @@ class MainWindow(QMainWindow):
         blay.addWidget(stop_btn)
         self.statusBar().addPermanentWidget(bottom)
         self.statusBar().setStyleSheet("QStatusBar{border-top: 1px solid #ddd;}")
-        # 状态栏左下角：红点 + 提示文字 + 「重启升级」按钮
-        # 检测到新版本自动后台下载：红点 +「已检测到新版本」→ 下载完成按钮可用
+        # 状态栏左下角：红点 + 提示文字 + 更新按钮
+        # 手动更新：检测到新版本仅提示，点「下载更新」才开始下载，完成后「重启升级」
         self.update_dot = QLabel()
         self.update_dot.setFixedSize(10, 10)
         self.update_dot.setStyleSheet("background: #e53935; border-radius: 5px;")
@@ -149,7 +149,7 @@ class MainWindow(QMainWindow):
         self._refresh_status_hint()
         self._pending_update: tuple[str, list[str]] | None = None
         self._downloaded_file: str | None = None
-        self._update_state = "idle"        # idle / downloading / ready / failed
+        self._update_state = "idle"        # idle / available / downloading / ready / failed
         self._update_fail_reason = ""
 
         # ---- 信号接线 ----
@@ -505,18 +505,17 @@ class MainWindow(QMainWindow):
             logging.getLogger(__name__).info("检查更新：当前 %s 已是最新（远端 %s）",
                                              local, remote)
             return
-        # 已有更新流程（下载中 / 已就绪 / 失败待重试）时不重复触发
+        # 已有更新流程（待下载 / 下载中 / 已就绪 / 失败待重试）时不重复触发
         if self._update_state != "idle":
             return
-        logging.getLogger(__name__).info("发现新版本：%s -> %s，开始自动下载：%s",
-                                         local, remote, download_urls[0])
-        # 不弹窗：红点 + 提示文字，后台线程自动下载，完成后「重启升级」按钮可用
+        logging.getLogger(__name__).info("发现新版本：%s -> %s，等待用户手动下载",
+                                         local, remote)
+        # 手动下载：红点 + 提示文字 + 「下载更新」按钮，用户点击才开始下载
         self._pending_update = (remote, download_urls)
-        self._set_update_state("downloading")
-        self._start_auto_download(download_urls)
+        self._set_update_state("available")
 
-    def _start_auto_download(self, download_urls: list[str]) -> None:
-        """后台线程自动下载新版本到本地（不打断用户操作）。"""
+    def _start_download(self, download_urls: list[str]) -> None:
+        """后台线程下载新版本到本地（由用户点击「下载更新」/「重新下载」触发）。"""
         self._downloader = AutoDownloader(download_urls)
         self._downloader.progress.connect(self._on_download_progress)
         self._downloader.completed.connect(self._on_download_completed)
@@ -544,7 +543,7 @@ class MainWindow(QMainWindow):
         self._update_fail_reason = err
         self._update_state = "failed"
         self._set_update_state("failed")
-        logging.getLogger(__name__).warning("自动下载新版本失败：%s", err)
+        logging.getLogger(__name__).warning("下载新版本失败：%s", err)
 
     def _set_update_state(self, state: str) -> None:
         """按状态刷新状态栏左下角的红点 / 提示文字 / 按钮 / 进度条。"""
@@ -560,8 +559,14 @@ class MainWindow(QMainWindow):
         self.update_dot.show()
         self.update_hint.show()
         self.update_btn.show()
-        if state == "downloading":
-            self.update_hint.setText(f"已检测到新版本 {remote}，正在自动下载…")
+        if state == "available":
+            self.update_hint.setText(f"发现新版本 {remote}")
+            self.update_btn.setText("下载更新")
+            self.update_btn.setEnabled(True)
+            self.update_progress.hide()
+            self._progress_visible = True   # 开始下载后默认展开
+        elif state == "downloading":
+            self.update_hint.setText(f"正在下载新版本 {remote}…")
             self.update_btn.setText("下载中…")
             self.update_btn.setEnabled(True)   # 可点击：收起/展开实时进度条
             self._progress_visible = True       # 默认展开进度条，点击可收起
@@ -580,8 +585,13 @@ class MainWindow(QMainWindow):
             self._progress_visible = True
 
     def _restart_upgrade(self) -> None:
-        """左下角按钮：下载中点击=展开/收起进度条；已就绪=替换 exe 并重启；
-        失败=重新自动下载。"""
+        """左下角按钮：待下载=开始手动下载；下载中点击=展开/收起进度条；
+        已就绪=替换 exe 并重启；失败=重新下载。"""
+        if self._update_state in ("available", "failed"):
+            urls = (self._pending_update or ("", []))[1]
+            self._set_update_state("downloading")   # 内部默认展开进度条
+            self._start_download(urls)
+            return
         if self._update_state == "downloading":
             self._progress_visible = not self._progress_visible
             self.update_progress.setVisible(self._progress_visible)
@@ -598,10 +608,6 @@ class MainWindow(QMainWindow):
             logging.getLogger(__name__).info("重启升级：已替换为 %s，程序退出", remote)
             self.shutdown()
             QApplication.quit()
-        elif self._update_state == "failed":
-            urls = (self._pending_update or ("", []))[1]
-            self._set_update_state("downloading")   # 内部默认展开进度条
-            self._start_auto_download(urls)
 
     # ---------- 窗口显隐 ----------
     def _hide_for_capture(self) -> None:
