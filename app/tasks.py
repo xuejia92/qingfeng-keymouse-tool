@@ -302,9 +302,9 @@ def run_screenshot_step(p: dict, variables: dict,
     """执行「截图」步骤：按指定区域截图，保存到文件。
 
     返回 (成功?, 原因)。保存方式：
-      - variable（变量保存）：保存到 <程序目录>/templates/jietu/（不存在自动创建）；
+      - variable（默认保存）：保存到 <程序目录>/templates/jietu/（不存在自动创建）；
       - choose（自选保存）：弹「另存为」对话框由用户选择保存位置，取消视为失败。
-    两种方式都会把图片的绝对路径写入结果变量（variable 参数）。
+    默认保存必须指定结果变量；自选保存可选（选了也会把绝对路径写入变量）。
 
     「另存为对话框」需要主线程 UI，通过 screenshot_actor.ui_call 调度到主线程执行
     （后台线程阻塞等待结果，主线程用嵌套事件循环处理交互）。
@@ -316,8 +316,8 @@ def run_screenshot_step(p: dict, variables: dict,
     var = (p.get("variable") or "").strip()
     region = str(p.get("region") or "")
 
-    # 结果变量必填（两种保存方式都要把路径写入变量），在抓图前校验避免无谓抓屏
-    if not var:
+    # 默认保存必须指定结果变量（自选保存可选），在抓图前校验避免无谓抓屏
+    if save_mode != "choose" and not var:
         return False, "未指定结果变量"
 
     import cv2  # 与 finder/capture_overlay 同一依赖，仅本步骤用到
@@ -337,7 +337,8 @@ def run_screenshot_step(p: dict, variables: dict,
     except Exception as e:
         return False, f"截图失败：{type(e).__name__}: {e}"
 
-    variables[var] = path
+    if var:
+        variables[var] = path
     return True, f"截图已保存：{path}"
 
 

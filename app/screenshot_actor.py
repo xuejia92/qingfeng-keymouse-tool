@@ -8,7 +8,7 @@
 这里提供 ui_call(fn)：后台线程把函数交给主线程事件循环执行并阻塞等待结果，
 主线程里用嵌套 QEventLoop 处理遮罩交互（与 QDialog.exec 同理），不会死锁。
 
-目录规则：变量保存时写入 <程序目录>/templates/jietu/（不存在自动创建），
+目录规则：默认保存时写入 <程序目录>/templates/jietu/（不存在自动创建），
 与 templates/（找图模板）同根，都随程序目录走（打包版 = exe 同级）。
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from .config import TEMPLATE_DIR, parse_region_str
 
-# 截图步骤「变量保存」的默认保存目录：<程序目录>/templates/jietu/
+# 截图步骤「默认保存」的保存目录：<程序目录>/templates/jietu/
 JIETU_DIR = os.path.join(TEMPLATE_DIR, "jietu")
 
 

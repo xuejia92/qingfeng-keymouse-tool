@@ -420,15 +420,15 @@ class StepParamsDialog(QDialog):
             QMessageBox.warning(self, "请设置变量坐标",
                                 "已选择「变量坐标」，请选择流程中声明的坐标变量。")
             return
-        # 截图步骤：必须框选区域，且必须选择结果变量（变量保存/自选保存都会写入路径）
+        # 截图步骤：必须框选区域；「默认保存」必须选择结果变量（自选保存可选）
         if self._step.type == "screenshot" and getattr(self, "save_var_radio", None) is not None:
             if not getattr(self, "_region", ""):
                 QMessageBox.warning(self, "请设置截图区域",
                                     "请先点击「框选区域…」选择截图区域。")
                 return
-            if not self._combo_value(self.shot_variable):
+            if self.save_var_radio.isChecked() and not self._combo_value(self.shot_variable):
                 QMessageBox.warning(self, "请设置结果变量",
-                                    "请选择接收截图路径的结果变量（变量保存和自选保存都会写入）。")
+                                    "已选择「默认保存」，请选择接收截图路径的结果变量。")
                 return
         super().accept()
 
@@ -637,23 +637,24 @@ class StepParamsDialog(QDialog):
             region_row.addWidget(clear_region)
             form.addRow("截图区域", self._shot_region_widget)
 
-            # 保存位置：变量保存 / 自选保存（二选一）
+            # 保存位置：默认保存 / 自选保存（二选一）
             save_row = QHBoxLayout()
-            self.save_var_radio = QRadioButton("变量保存")
+            self.save_var_radio = QRadioButton("默认保存")
             self.save_choose_radio = QRadioButton("自选保存")
             self.save_var_radio.setToolTip(
                 "保存到程序目录 templates/jietu/，并把图片绝对路径写入结果变量")
-            self.save_choose_radio.setToolTip("运行时弹出「另存为」对话框，由你指定保存位置")
+            self.save_choose_radio.setToolTip(
+                "运行时弹出「另存为」对话框，由你指定保存位置（结果变量可选）")
             save_row.addWidget(self.save_var_radio)
             save_row.addWidget(self.save_choose_radio)
             save_row.addStretch(1)
             form.addRow("保存位置", save_row)
 
-            # 结果变量下拉行（变量保存与自选保存都会把路径写入该变量）
+            # 结果变量下拉行（默认保存必填；自选保存可选，选了也会写入路径）
             self._shot_var_widget = QWidget()
             var_row = QHBoxLayout(self._shot_var_widget)
             var_row.setContentsMargins(0, 0, 0, 0)
-            self.shot_variable = self._var_combo("（选择变量）")
+            self.shot_variable = self._var_combo("（可选，自选保存可不选）")
             self.shot_variable.setToolTip(
                 "截图保存后，把图片的绝对路径写入该变量（后续日志/剪贴板/点击等步骤可用）")
             var_row.addWidget(self.shot_variable, 1)

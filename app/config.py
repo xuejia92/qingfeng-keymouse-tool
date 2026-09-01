@@ -293,8 +293,8 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
     if step_type == "screenshot":
         return {
             "region": "",                 # 指定区域 "x,y,w,h"（物理像素，必填）
-            "save_mode": "variable",      # variable=变量保存 / choose=自选保存（弹窗）
-            "variable": "",               # 截图绝对路径写入的结果变量（两种保存方式都写入）
+            "save_mode": "variable",      # variable=默认保存 / choose=自选保存（弹窗）
+            "variable": "",               # 截图绝对路径写入的结果变量（默认保存必填，自选保存可选）
         }
     raise ValueError(f"未知步骤类型: {step_type}")
 
@@ -415,7 +415,7 @@ class FlowStep:
                 var = p.get("variable") or ""
                 if p.get("save_mode") == "choose":
                     return f"截图 → 自选保存 → {var}" if var else "截图 → 自选保存"
-                return f"截图 → {var}" if var else "截图 → 变量保存"
+                return f"截图 → {var}" if var else "截图 → 默认保存"
             if self.type == "web":
                 act = p.get("action")
                 if act == "open":

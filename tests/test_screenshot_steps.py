@@ -43,7 +43,7 @@ class TestScreenshotConfig(unittest.TestCase):
     def test_summary_variable_mode(self):
         s = FlowStep(type="screenshot")
         self.assertIn("截图", s.summary())
-        self.assertIn("变量保存", s.summary())
+        self.assertIn("默认保存", s.summary())
         s2 = FlowStep(type="screenshot", params={"variable": "path"})
         self.assertIn("截图", s2.summary())
         self.assertIn("path", s2.summary())
@@ -51,7 +51,7 @@ class TestScreenshotConfig(unittest.TestCase):
     def test_summary_choose_mode(self):
         s = FlowStep(type="screenshot", params={"save_mode": "choose"})
         self.assertIn("自选保存", s.summary())
-        self.assertNotIn("变量保存", s.summary())
+        self.assertNotIn("默认保存", s.summary())
         s2 = FlowStep(type="screenshot", params={"save_mode": "choose", "variable": "shot"})
         self.assertIn("自选保存", s2.summary())
         self.assertIn("shot", s2.summary())
@@ -61,7 +61,7 @@ class TestScreenshotConfig(unittest.TestCase):
 
 class TestRunScreenshotStep(unittest.TestCase):
     def test_region_variable_mode(self):
-        """指定区域 + 变量保存：按区域抓图，保存到 jietu 目录并写入结果变量。"""
+        """指定区域 + 默认保存：按区域抓图，保存到 jietu 目录并写入结果变量。"""
         variables = {}
         path = r"C:\prog\templates\jietu\截图_1.png"
         with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()) as grab, \
@@ -106,14 +106,26 @@ class TestRunScreenshotStep(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("取消", why)
 
-    def test_variable_required_for_both_save_modes(self):
-        """变量保存/自选保存都没选结果变量：失败（校验先于抓图）。"""
-        for sm in ("variable", "choose"):
-            with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()) as grab:
-                ok, why = run_screenshot_step(dict(PARAMS, save_mode=sm, variable=""), {})
-            self.assertFalse(ok)
-            self.assertIn("结果变量", why)
-            grab.assert_not_called()    # 参数校验先于抓图
+    def test_variable_required_for_default_save(self):
+        """默认保存但没选结果变量：失败（校验先于抓图）。"""
+        with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()) as grab:
+            ok, why = run_screenshot_step(dict(PARAMS, save_mode="variable", variable=""), {})
+        self.assertFalse(ok)
+        self.assertIn("结果变量", why)
+        grab.assert_not_called()    # 参数校验先于抓图
+
+    def test_choose_mode_without_variable(self):
+        """自选保存不选结果变量：成功，不写变量。"""
+        user_path = r"D:\pics\my.png"
+        variables = {}
+        with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()), \
+             mock.patch.object(screenshot_actor, "ui_call", return_value=user_path), \
+             mock.patch("cv2.imwrite"):
+            ok, why = run_screenshot_step(dict(PARAMS, save_mode="choose", variable=""),
+                                          variables)
+        self.assertTrue(ok)
+        self.assertIn(user_path, why)
+        self.assertEqual(variables, {})   # 未选变量则不写入
 
     def test_stopped(self):
         stop = threading.Event()
@@ -236,13 +248,20 @@ class TestScreenshotDialog(unittest.TestCase):
             dlg.accept()
         warn.assert_called_once()
 
-    def test_variable_required_for_both_save_modes(self):
-        """变量保存/自选保存都没选结果变量：确定都被拦截并提示。"""
-        for sm in ("variable", "choose"):
-            dlg = self._open({"region": "10,20,100,50", "save_mode": sm, "variable": ""})
-            with mock.patch("app.ui.flow_dialog.QMessageBox.warning") as warn:
-                dlg.accept()
-            warn.assert_called_once()
+    def test_variable_required_for_default_save(self):
+        """默认保存但没选结果变量：确定被拦截并提示。"""
+        dlg = self._open({"region": "10,20,100,50", "save_mode": "variable", "variable": ""})
+        with mock.patch("app.ui.flow_dialog.QMessageBox.warning") as warn:
+            dlg.accept()
+        warn.assert_called_once()
+
+    def test_choose_mode_variable_optional(self):
+        """自选保存不选结果变量：确定直接通过（区域已选）。"""
+        dlg = self._open({"region": "10,20,100,50", "save_mode": "choose", "variable": ""})
+        self.assertTrue(dlg.save_choose_radio.isChecked())
+        with mock.patch("app.ui.flow_dialog.QMessageBox.warning") as warn:
+            dlg.accept()
+        warn.assert_not_called()
 
 
 if __name__ == "__main__":
