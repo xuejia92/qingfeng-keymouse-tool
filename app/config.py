@@ -187,6 +187,7 @@ class FindTask:
 
 FLOW_STEP_TYPES = {"var": "变量", "log": "日志输出", "ocr": "文字识别",
                    "text_find": "文字查找", "screenshot": "截图",
+                   "find_image": "找图",
                    "click": "鼠标点击", "press": "键盘连按", "find": "找图点击",
                    "wait": "延时等待", "web": "网页操作", "app": "打开应用",
                    "close_app": "关闭应用", "clip_set": "赋值剪贴板",
@@ -289,6 +290,14 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
     if step_type == "clip_get":
         return {
             "variable": "",               # 接收剪贴板内容的变量名
+        }
+    if step_type == "find_image":
+        return {
+            "image": "",                 # 模板图文件名（templates/ 下，截屏/上传生成）
+            "image_path": "",            # 模板图绝对路径（跨目录运行时兜底）
+            "confidence": 0.85,          # 匹配置信度阈值 0.5~0.99
+            "region": "",                # 查找区域 "x,y,w,h"（物理像素），空=全屏
+            "variable": "",              # 结果变量：找到写中心坐标 "x,y"，未找到写 false
         }
     if step_type == "screenshot":
         return {
@@ -411,6 +420,9 @@ class FlowStep:
                 return f"{name or '未选变量'} → 剪贴板"
             if self.type == "clip_get":
                 return f"剪贴板 → {p.get('variable') or '未指定变量'}"
+            if self.type == "find_image":
+                img = os.path.basename(p.get("image") or "") or "未选模板"
+                return f"找图 {img} → {p.get('variable') or '未指定变量'}"
             if self.type == "screenshot":
                 var = p.get("variable") or ""
                 if p.get("save_mode") == "choose":

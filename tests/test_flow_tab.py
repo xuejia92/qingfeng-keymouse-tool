@@ -303,11 +303,12 @@ class TestModulePanelCollapseAll(unittest.TestCase):
         self.assertEqual(self.tab.panel_title_btn.text(), "模块面板 ^")
 
     def test_perceive_group_renamed_with_screenshot(self):
-        """「文字识别」分组改名为「目标识别」，并纳入新模块「截图」。"""
+        """「文字识别」分组改名为「目标识别」，并纳入「截图」「找图」模块。"""
         titles = {gid: title for gid, title, _ in MODULE_GROUPS}
         self.assertEqual(titles["perceive"], "目标识别")
         types = {gid: ts for gid, _, ts in MODULE_GROUPS}
         self.assertIn("screenshot", types["perceive"])
+        self.assertIn("find_image", types["perceive"])
         header = self.tab._group_headers["perceive"]
         self.assertIn("目标识别", header.text())
 

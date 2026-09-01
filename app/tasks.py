@@ -342,6 +342,41 @@ def run_screenshot_step(p: dict, variables: dict,
     return True, f"截图已保存：{path}"
 
 
+def run_find_image_step(p: dict, variables: dict,
+                        stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「找图」步骤：模板匹配在屏幕 / 指定区域找图。
+
+    找到：把目标中心坐标 "x,y" 写入结果变量；未找到：把 false 写入结果变量。
+    步骤本身不因未找到而失败（供后续步骤按变量值分支），
+    模板图加载失败 / 未指定结果变量才算失败。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    var = (p.get("variable") or "").strip()
+    if not var:
+        return False, "未指定结果变量"
+    template = finder.load_template(
+        resolve_template_path(p.get("image", ""), p.get("image_path", "")) or "")
+    if template is None:
+        return False, "模板图加载失败"
+    region = parse_region_str(str(p.get("region", "") or ""))
+    confidence = float(p.get("confidence", 0.85) or 0.85)
+    try:
+        screen = finder.grab_full_screen()
+        if region is not None:
+            hit = finder.locate_in_region(template, screen, confidence, region)
+        else:
+            hit = finder.locate(template, screen, confidence)
+    except Exception as e:
+        return False, f"找图失败：{type(e).__name__}: {e}"
+    if hit is None:
+        variables[var] = False
+        return True, "未找到目标"
+    cx, cy, score = hit
+    variables[var] = f"{int(cx)},{int(cy)}"
+    return True, f"找到目标（{int(cx)}, {int(cy)}，置信度 {score:.2f}）"
+
+
 def _coord_from_var(expr: str, variables: dict | None, default: int) -> int:
     """解析坐标轴的变量引用：expr 为变量名时取其整数值，未定义/非数字回退默认值。"""
     name = (expr or "").strip()

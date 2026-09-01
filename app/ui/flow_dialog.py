@@ -23,7 +23,8 @@ from .hotkey_edit import HotkeyEdit
 MIME_TYPE = "application/x-qf-flow-type"
 
 _TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "text_find": "🔍",
-               "screenshot": "📷", "click": "🖱", "press": "⌨", "find": "🖼",
+               "screenshot": "📷", "find_image": "🎯",
+               "click": "🖱", "press": "⌨", "find": "🖼",
                "wait": "⏱", "web": "🌐", "app": "🚀", "close_app": "⏹",
                "clip_set": "📤", "clip_get": "📥"}
 
@@ -430,6 +431,16 @@ class StepParamsDialog(QDialog):
                 QMessageBox.warning(self, "请设置结果变量",
                                     "已选择「默认保存」，请选择接收截图路径的结果变量。")
                 return
+        # 找图步骤：必须设置模板图与结果变量
+        if self._step.type == "find_image" and getattr(self, "find_var", None) is not None:
+            if not getattr(self, "_image", ""):
+                QMessageBox.warning(self, "请设置模板图",
+                                    "请先「屏幕截图选区」或「上传图片」设置找图模板。")
+                return
+            if not self._combo_value(self.find_var):
+                QMessageBox.warning(self, "请设置结果变量",
+                                    "请选择接收找图坐标的结果变量。")
+                return
         super().accept()
 
     def _flow_var_names(self) -> list[str]:
@@ -674,6 +685,77 @@ class StepParamsDialog(QDialog):
 
             self.save_var_radio.toggled.connect(self._sync_shot_save_rows)
             self._sync_shot_save_rows()
+
+        elif t == "find_image":
+            # 模板图：预览 + 屏幕截图选区 + 上传本地图片
+            img_row = QHBoxLayout()
+            self.preview = QLabel()
+            self.preview.setFixedSize(230, 150)
+            self.preview.setAlignment(Qt.AlignCenter)
+            self.preview.setStyleSheet(
+                "border: 1px solid #c9d1d9; border-radius: 6px; background: #f7f9fb;")
+            img_row.addWidget(self.preview)
+
+            side = QVBoxLayout()
+            side.setSpacing(6)
+            self.capture_btn = QPushButton("📷 屏幕截图选区")
+            self.capture_btn.setToolTip("冻结屏幕 -> 框选 -> 双击确认，生成找图模板")
+            self.capture_btn.clicked.connect(self._request_capture)
+            side.addWidget(self.capture_btn)
+            self.upload_btn = QPushButton("📁 上传图片")
+            self.upload_btn.setToolTip("从本地选择一张图片作为找图模板（自动复制到程序模板目录）")
+            self.upload_btn.clicked.connect(self._pick_image)
+            side.addWidget(self.upload_btn)
+            self.image_edit = QLineEdit()
+            self.image_edit.setReadOnly(True)
+            self.image_edit.setStyleSheet("color: #8a939c; border: none; background: transparent;")
+            side.addWidget(self.image_edit)
+            side.addStretch(1)
+            img_row.addLayout(side, 1)
+            form.addRow("模板图", img_row)
+
+            self.confidence = QDoubleSpinBox()
+            self.confidence.setRange(0.5, 0.99)
+            self.confidence.setDecimals(2)
+            self.confidence.setSingleStep(0.01)
+            form.addRow("匹配置信度", self.confidence)
+
+            # 查找区域：空=全屏；可框选或手动输入左上/右下角坐标
+            region_row = QHBoxLayout()
+            self.region_edit = QLineEdit()
+            self.region_edit.setReadOnly(True)
+            self.region_edit.setToolTip("左上角 x,y 与宽高；空=全屏（整个虚拟桌面）")
+            pick_region = QPushButton("框选区域…")
+            pick_region.clicked.connect(self._request_region)
+            pick_region.setToolTip("隐藏本窗口后框选查找区域（与找图/文字识别区域一致）")
+            clear_region = QPushButton("恢复全屏")
+            clear_region.clicked.connect(lambda: self._set_region_text(None))
+            region_row.addWidget(self.region_edit, 1)
+            region_row.addWidget(pick_region)
+            region_row.addWidget(clear_region)
+            form.addRow("查找区域", region_row)
+
+            manual_row = QHBoxLayout()
+            self.manual_edit = QLineEdit()
+            self.manual_edit.setPlaceholderText("左上x,左上y,右下x,右下y（如 100,200,400,500）")
+            self.manual_edit.setToolTip("直接输入矩形区域左上角与右下角坐标，4 个数字逗号分隔")
+            apply_btn = QPushButton("应用")
+            apply_btn.setToolTip("解析输入坐标并设为查找区域")
+            apply_btn.clicked.connect(self._apply_manual_region)
+            manual_row.addWidget(self.manual_edit, 1)
+            manual_row.addWidget(apply_btn)
+            form.addRow("坐标输入", manual_row)
+
+            self.find_var = self._var_combo("（选择变量）")
+            self.find_var.setToolTip("找到后把目标中心坐标 \"x,y\" 写入该变量；未找到写入 false")
+            form.addRow("结果变量", self.find_var)
+            self._var_combo_hint(form)
+            hint = QLabel("在屏幕 / 指定区域用模板匹配找图：找到则把中心坐标 \"x,y\" 写入结果变量，\n"
+                          "未找到写入 false（步骤不会因未找到而失败，可据此分支）。\n"
+                          "区域为空=全屏；也可点击「框选区域…」或输入左上/右下角坐标。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
 
         elif t == "click":
             self.btn_combo = QComboBox()
@@ -1127,6 +1209,13 @@ class StepParamsDialog(QDialog):
                 self.save_var_radio.setChecked(True)
             self._set_combo_value(self.shot_variable, p.get("variable", "") or "")
             self._sync_shot_save_rows()
+        elif t == "find_image":
+            self._image = p.get("image", "") or ""
+            self._image_path = p.get("image_path", "") or ""
+            self._update_preview()
+            self.confidence.setValue(float(p.get("confidence", 0.85)))
+            self._set_region_text(p.get("region", "") or "")
+            self._set_combo_value(self.find_var, p.get("variable", "") or "")
         elif t == "click":
             pv = (p.get("pos_var") or "").strip()
             if p.get("fixed_position"):
@@ -1233,6 +1322,16 @@ class StepParamsDialog(QDialog):
                 "save_mode": "variable" if self.save_var_radio.isChecked() else "choose",
                 "variable": self._combo_value(self.shot_variable),
             })
+        elif t == "find_image":
+            new_image = getattr(self, "_image", "") or step.params.get("image", "") or ""
+            new_path = getattr(self, "_image_path", "") or step.params.get("image_path", "") or ""
+            step.params.update({
+                "image": new_image,
+                "image_path": new_path,
+                "confidence": round(self.confidence.value(), 2),
+                "region": getattr(self, "_region", step.params.get("region", "")) or "",
+                "variable": self._combo_value(self.find_var),
+            })
         elif t == "click":
             pv = self._combo_value(self.pos_var) if self.var_radio.isChecked() else ""
             step.params.update({
@@ -1315,6 +1414,29 @@ class StepParamsDialog(QDialog):
             self._image_path = fullpath
         self._update_preview()
 
+    def _pick_image(self):
+        """从本地选择一张图片作为找图模板，复制到 templates/ 供跨目录运行。"""
+        from PySide6.QtWidgets import QFileDialog
+        import shutil
+        import time
+        import uuid
+        from ..config import TEMPLATE_DIR
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择模板图片", os.path.expanduser("~"),
+            "图片文件 (*.png *.jpg *.jpeg *.bmp);;所有文件 (*)")
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower() or ".png"
+        name = f"tpl_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}{ext}"
+        os.makedirs(TEMPLATE_DIR, exist_ok=True)
+        dst = os.path.join(TEMPLATE_DIR, name)
+        try:
+            shutil.copyfile(path, dst)
+        except OSError as e:
+            QMessageBox.warning(self, "复制失败", f"无法复制图片到模板目录：{e}")
+            return
+        self.set_template_image(name, dst)
+
     def finish_template_capture(self):
         if not self.isVisible():
             self.show()
@@ -1346,6 +1468,33 @@ class StepParamsDialog(QDialog):
         self._region = region or ""
         rt = parse_region_str(self._region)
         self.region_edit.setText(f"{rt[0]}, {rt[1]}, {rt[2]} x {rt[3]}" if rt else "全屏（整个虚拟桌面）")
+
+    def _apply_manual_region(self):
+        """解析「左上x,左上y,右下x,右下y」输入，转成 "x,y,w,h" 存入 _region 并刷新显示。"""
+        text = (self.manual_edit.text() or "").strip()
+        text = text.replace("（", "(").replace("）", ")").replace("，", ",")
+        parts = []
+        for v in text.strip("() ").split(","):
+            v = v.strip()
+            if not v:
+                continue
+            try:
+                parts.append(int(v))
+            except ValueError:
+                QMessageBox.warning(self, "坐标格式错误",
+                                    "请按「左上x,左上y,右下x,右下y」输入 4 个整数，\n如 100,200,400,500。")
+                return
+        if len(parts) != 4:
+            QMessageBox.warning(self, "坐标格式错误",
+                                "需要 4 个数字：左上x,左上y,右下x,右下y，\n如 100,200,400,500。")
+            return
+        x1, y1, x2, y2 = parts
+        if x2 <= x1 or y2 <= y1:
+            QMessageBox.warning(self, "坐标无效",
+                                "右下角坐标需大于左上角坐标（x2>x1 且 y2>y1）。")
+            return
+        self._set_region_text(f"{x1},{y1},{x2 - x1},{y2 - y1}")
+        self.manual_edit.clear()
 
     def _request_region(self):
         self.hide()

@@ -34,7 +34,7 @@ from .widgets import set_variant
 # 组 id 同时用于持久化收起状态（config.json 的 collapsed_module_groups）。
 MODULE_GROUPS = [
     ("input",    "键鼠操作",   ["click", "press", "find"]),
-    ("perceive", "目标识别",   ["ocr", "text_find", "screenshot"]),
+    ("perceive", "目标识别",   ["ocr", "text_find", "screenshot", "find_image"]),
     ("app_web",  "应用与网页", ["app", "close_app", "web"]),
     ("logic",    "变量与日志", ["var", "wait", "log", "clip_set", "clip_get"]),
 ]
