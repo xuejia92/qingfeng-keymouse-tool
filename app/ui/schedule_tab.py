@@ -41,6 +41,7 @@ class ScheduleTab(QWidget):
         self.flow_tab = flow_tab
         self._tasks = cfg.schedule_tasks
         self.runner = ScheduleRunner(lambda: self._tasks)
+        self._probe = None   # 临时窗口探针引用（定位一闪而逝弹窗用）
         self.runner.due.connect(self._on_due)
         self._build_ui()
         self.refresh_list()
@@ -298,18 +299,22 @@ class ScheduleTab(QWidget):
         else:
             collapsed.add(g)
         self.cfg.collapsed_schedule_groups = sorted(collapsed)
-        self.cfg.save()
+        self.cfg.save(save_flows=False)
 
     # ---------- 右栏详情 ----------
     @staticmethod
     def _clear_layout(lay):
-        """彻底清空布局：递归收集所有 widget 后立即 setParent(None) + deleteLater。
+        """彻底清空布局：递归收集所有 widget 后 hide + setParent(None) + deleteLater。
 
         之前的实现只处理直接子 widget。嵌套布局（head / btns 等）里的按钮和标签
         takeAt 后仍挂在 detail 下，下次刷新就出现「上一份残留 + 当前份」的
         双重渲染（最显眼的就是一个超大红色删除按钮盖住整页）。
         setParent(None) 立即切断父子关系、findChildren 找不到、不再参与绘制；
         deleteLater 再释放内存。
+
+        注意顺序：必须先 hide() 再 setParent(None)——可见控件被 setParent(None)
+        摘除的瞬间会变成「可见的顶层窗口」，在下一次事件循环 flush 时创建原生
+        窗口闪现一下才销毁（定时任务每跑一次就闪一批空白窗的根因）。
         """
         widgets: list = []
         def collect(l):
@@ -324,6 +329,7 @@ class ScheduleTab(QWidget):
                         collect(sub)
         collect(lay)
         for w in widgets:
+            w.hide()           # 先隐藏：避免摘除父级后作为顶层窗口闪现
             w.setParent(None)
             w.deleteLater()
 
@@ -478,7 +484,7 @@ class ScheduleTab(QWidget):
         self._fire(task)
 
     def _after_task_change(self, task, select: bool):
-        self.cfg.save()
+        self.cfg.save(save_flows=False)
         self.refresh_list()
         if select and task is not None:
             self._select_task_item(task.id)
@@ -494,7 +500,7 @@ class ScheduleTab(QWidget):
             QMessageBox.information(self, "分组已存在", f"分组「{name}」已经存在。")
             return
         self.cfg.schedule_groups.append(name)
-        self.cfg.save()
+        self.cfg.save(save_flows=False)
         self.refresh_list()
         self.changed.emit()
 
@@ -514,7 +520,7 @@ class ScheduleTab(QWidget):
         for t in self._tasks:
             if t.group == g:
                 t.group = name
-        self.cfg.save()
+        self.cfg.save(save_flows=False)
         self.refresh_list()
         self.changed.emit()
 
@@ -528,7 +534,7 @@ class ScheduleTab(QWidget):
         for t in self._tasks:
             if t.group == g:
                 t.group = ""
-        self.cfg.save()
+        self.cfg.save(save_flows=False)
         self.refresh_list()
         self.changed.emit()
 
@@ -593,6 +599,26 @@ class ScheduleTab(QWidget):
         """)
 
     # ---------- 调度触发 ----------
+    def _status_msg(self, text: str, ms: int = 8000):
+        """向主窗口状态栏发轻提示（无状态栏环境如测试/最小化时静默跳过）。"""
+        win = self.window()
+        if win is not None and hasattr(win, "statusBar"):
+            win.statusBar().showMessage(text, ms)
+
+    def _alert_once(self, task: ScheduleTask, message: str):
+        """异常告警：同一任务同一天最多提示一次，避免秒级任务反复打扰。
+
+        无人值守触发不弹模态框，只走状态栏 + 日志；last_alert_date 记录
+        「YYYY-MM-DD」，跨天自动恢复提示资格。调用方负责持久化（save_flows=False）。
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        if task.last_alert_date == today:
+            log(message)   # 当天已提示过：仍记日志，但不重复打扰
+            return
+        task.last_alert_date = today
+        log(message)
+        self._status_msg(message)
+
     def _on_due(self, task_id: str, flow_id: str):
         """调度线程到期回调（经信号排队已在主线程）。
 
@@ -602,16 +628,17 @@ class ScheduleTab(QWidget):
         task = next((t for t in self._tasks if t.id == task_id), None)
         if task is None:
             return
+        self._start_probe()
         self._fire(task, silent=True)
 
     def _fire(self, task: ScheduleTask, silent: bool = False):
         now = datetime.now()
         flow = self._flow_of(task)
         if flow is None or not flow.steps:
-            log(f"定时任务「{task.name}」未执行：找不到流程或流程为空，已自动停用")
+            self._alert_once(task, f"定时任务「{task.name}」未执行：找不到流程或流程为空，已自动停用")
             task.enabled = False
             task.next_run = ""
-            self.cfg.save()
+            self.cfg.save(save_flows=False)
             self.refresh_list()
             return
         started = self.flow_tab.start_flow_if_idle(task.flow_id, silent=silent)
@@ -626,7 +653,6 @@ class ScheduleTab(QWidget):
             else:
                 task.next_run = format_dt(next_run_time(task, now))
         else:
-            log(f"定时任务「{task.name}」触发：流程「{flow.name}」已在运行，跳过本次")
             # last_run 不更新：流程没真正启动，记录保持原状更准确；
             # 下面 next_run 仍要刷新，循环型任务按规则继续排期。
             if task.mode == "once":
@@ -635,7 +661,9 @@ class ScheduleTab(QWidget):
                 if task.missed_fires > 3:
                     task.enabled = False
                     task.next_run = ""
-                    log(f"一次性任务「{task.name}」连续 {task.missed_fires} 次因流程繁忙未执行，已放弃")
+                    self._alert_once(
+                        task, f"一次性任务「{task.name}」连续 {task.missed_fires} 次"
+                              "因流程繁忙未执行，已放弃")
                 else:
                     new_once = now + timedelta(seconds=60)
                     task.once_at = new_once.strftime("%Y-%m-%d %H:%M:%S")
@@ -644,8 +672,11 @@ class ScheduleTab(QWidget):
                         f"（第 {task.missed_fires}/3 次）")
             else:
                 task.next_run = format_dt(next_run_time(task, now))
+                self._alert_once(
+                    task, f"定时任务「{task.name}」触发时流程「{flow.name}」"
+                          "正在运行，已跳过本次")
         self.runner.invalidate(task.id)
-        self.cfg.save()
+        self.cfg.save(save_flows=False)
         self.refresh_list()
 
     # ---------- 外部联动 ----------
@@ -669,9 +700,9 @@ class ScheduleTab(QWidget):
                 t.next_run = ""
                 self.runner.invalidate(t.id)
                 changed = True
-                log(f"定时任务「{t.name}」的流程已被删除，已自动停用")
+                self._alert_once(t, f"定时任务「{t.name}」的流程已被删除，已自动停用")
         if changed:
-            self.cfg.save()
+            self.cfg.save(save_flows=False)
         self.refresh_list()
 
     def shutdown(self):

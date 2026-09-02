@@ -545,6 +545,7 @@ class ScheduleTask:
     last_run: str = ""                 # 上次运行时间「YYYY-MM-DD HH:MM:SS」
     next_run: str = ""                 # 下次运行时间「YYYY-MM-DD HH:MM:SS」
     missed_fires: int = 0              # 连续因流程繁忙被跳过的次数（一次任务用，超 3 次放弃）
+    last_alert_date: str = ""          # 上次状态栏告警日期「YYYY-MM-DD」；同一天同一任务最多提示一次
 
     def __post_init__(self):
         if not self.id:
@@ -579,6 +580,7 @@ def schedule_from_dict(data: dict) -> ScheduleTask:
         last_run=str(data.get("last_run", "") or ""),
         next_run=str(data.get("next_run", "") or ""),
         missed_fires=int(clamp(data.get("missed_fires", 0), 0, 999)),
+        last_alert_date=str(data.get("last_alert_date", "") or "")[:10],
     )
 
 
@@ -807,12 +809,19 @@ class AppConfig:
     collapsed_schedule_groups: list[str] = field(default_factory=list)  # 收起的定时任务分组名
 
     # ---------- 持久化 ----------
-    def save(self) -> None:
+    def save(self, save_flows: bool = True) -> None:
+        """保存配置。save_flows=False 时只写 config.json、不触碰 flows/ 目录。
+
+        定时任务页的所有保存路径都用 save_flows=False：那些操作只改
+        schedule_tasks/schedule_groups 等字段，流程文件本身没有任何变化，
+        没必要每次触发（秒级任务可能每秒一次）把 flows/ 下所有流程重写一遍。
+        """
         data = asdict(self)
         data.pop("flows", None)   # 流程已拆分为 flows/ 目录下的独立文件
         os.makedirs(BASE_DIR, exist_ok=True)
         _atomic_write_json(CONFIG_PATH, data)   # 原子写，避免写一半损坏配置
-        save_flows_dir(self.flows)
+        if save_flows:
+            save_flows_dir(self.flows)
 
     @classmethod
     def load(cls) -> "AppConfig":

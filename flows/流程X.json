@@ -1,91 +1,28 @@
 {
-  "id": "20d4752be3a1",
+  "id": "bac05f0d9ea7",
   "name": "流程X",
   "group": "",
   "steps": [
     {
-      "type": "click",
-      "name": "鼠标点击",
+      "type": "var",
+      "name": "变量",
       "params": {
-        "mouse_button": "left",
-        "click_type": "single",
-        "interval_ms": 100,
-        "fixed_position": false,
-        "pos_x": 0,
-        "pos_y": 0,
-        "pos_var": "",
-        "count": 1,
-        "duration_sec": 0.0,
-        "background": false,
-        "window_title": ""
+        "name": "x",
+        "type": "string",
+        "default_value": ""
       },
       "continue_on_fail": false,
       "pair_id": ""
     },
     {
-      "type": "ocr",
-      "name": "文字识别",
+      "type": "log",
+      "name": "日志输出",
       "params": {
-        "region": "",
-        "variable": "",
-        "lang": "ch",
-        "multi_ocr": true
+        "variables": "",
+        "text": ""
       },
       "continue_on_fail": false,
       "pair_id": ""
-    },
-    {
-      "type": "screenshot",
-      "name": "截图",
-      "params": {
-        "region": "",
-        "save_mode": "variable",
-        "variable": ""
-      },
-      "continue_on_fail": false,
-      "pair_id": ""
-    },
-    {
-      "type": "app",
-      "name": "打开应用",
-      "params": {
-        "path": "",
-        "wait_sec": 2.0
-      },
-      "continue_on_fail": false,
-      "pair_id": ""
-    },
-    {
-      "type": "web",
-      "name": "网页操作",
-      "params": {
-        "action": "open",
-        "url": "",
-        "launch_mode": "front",
-        "tab_target": "reuse",
-        "load_timeout_sec": 20.0,
-        "wait_after_sec": 0.0,
-        "tab_scope": "current",
-        "match_text": ""
-      },
-      "continue_on_fail": false,
-      "pair_id": "fe56a3787d9a"
-    },
-    {
-      "type": "web",
-      "name": "网页操作",
-      "params": {
-        "action": "close_browser",
-        "url": "",
-        "launch_mode": "front",
-        "tab_target": "reuse",
-        "load_timeout_sec": 20.0,
-        "wait_after_sec": 0.0,
-        "tab_scope": "current",
-        "match_text": ""
-      },
-      "continue_on_fail": false,
-      "pair_id": "fe56a3787d9a"
     }
   ],
   "variables": [],

@@ -33,7 +33,27 @@
   "collapsed_flow_groups": [],
   "clear_log_on_run": false,
   "collapsed_module_groups": [],
-  "schedule_tasks": [],
+  "schedule_tasks": [
+    {
+      "id": "221320e78f8f",
+      "name": "新建定时任务",
+      "group": "",
+      "flow_id": "bac05f0d9ea7",
+      "flow_name": "流程X",
+      "enabled": false,
+      "mode": "second",
+      "interval": 1,
+      "at_time": "09:00",
+      "weekdays": [],
+      "monthdays": [],
+      "once_at": "2026-09-02 13:52",
+      "cron": "",
+      "last_run": "2026-09-02 13:34:51",
+      "next_run": "2026-09-02 13:34:52",
+      "missed_fires": 0,
+      "last_alert_date": ""
+    }
+  ],
   "schedule_groups": [],
   "collapsed_schedule_groups": []
 }

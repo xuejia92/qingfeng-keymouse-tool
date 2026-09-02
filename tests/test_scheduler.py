@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from datetime import datetime
 
@@ -196,6 +197,36 @@ class TestConfigRoundtrip(unittest.TestCase):
             cfg2 = AppConfig.load()
             self.assertEqual(cfg2.schedule_tasks[0].missed_fires, 2)
 
+    def test_last_alert_date_roundtrip(self):
+        """last_alert_date 告警日期随配置持久化（跨天恢复提示资格的依据）。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            cfg.schedule_tasks = [ScheduleTask(
+                name="t", mode="day", at_time="09:00",
+                flow_id=cfg.flows[0].id, flow_name="F",
+                last_alert_date="2026-09-02")]
+            cfg.save()
+            cfg2 = AppConfig.load()
+            self.assertEqual(cfg2.schedule_tasks[0].last_alert_date, "2026-09-02")
+
+    def test_last_alert_date_default_when_missing(self):
+        """旧配置没有 last_alert_date 字段时默认为空（下次触发即可提示）。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            cfg.schedule_tasks = [ScheduleTask(
+                name="t", mode="day", at_time="09:00",
+                flow_id=cfg.flows[0].id, flow_name="F")]
+            cfg.save()
+            with open(config_mod.CONFIG_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            data["schedule_tasks"][0].pop("last_alert_date")
+            with open(config_mod.CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            cfg2 = AppConfig.load()
+            self.assertEqual(cfg2.schedule_tasks[0].last_alert_date, "")
+
     def test_missed_fires_default_when_missing(self):
         """旧配置没有 missed_fires 字段时默认为 0。"""
         with TempConfigPaths():
@@ -213,6 +244,28 @@ class TestConfigRoundtrip(unittest.TestCase):
                 json.dump(data, f, ensure_ascii=False)
             cfg2 = AppConfig.load()
             self.assertEqual(cfg2.schedule_tasks[0].missed_fires, 0)
+
+    def test_save_without_flows_does_not_touch_flows_dir(self):
+        """save(save_flows=False) 只写 config.json，不创建/改写 flows/ 目录。
+
+        定时任务页的所有保存都走 save_flows=False：秒级任务可能每秒触发一次，
+        不能让定时任务保存把 flows/ 下所有流程文件反复重写（用户要求 flows/ 不被改动）。
+        """
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            cfg.schedule_tasks = [ScheduleTask(
+                name="t", mode="day", at_time="08:00",
+                flow_id=cfg.flows[0].id, flow_name="F")]
+            cfg.save(save_flows=False)
+            self.assertFalse(os.path.isdir(config_mod.FLOWS_DIR),
+                             "save_flows=False 不应创建 flows/ 目录")
+            with open(config_mod.CONFIG_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertIn("schedule_tasks", data)
+            # 常规 save() 仍正常写 flows/
+            cfg.save()
+            self.assertTrue(os.path.isdir(config_mod.FLOWS_DIR))
 
 
 class TestScheduleTabLogic(unittest.TestCase):
@@ -338,6 +391,91 @@ class TestScheduleTabLogic(unittest.TestCase):
             cfg.flows = []
             tab.on_flows_changed()
             self.assertFalse(t.enabled, "流程删除后任务应停用")
+            self.assertEqual(t.next_run, "")
+
+    def test_alert_once_daily_limit(self):
+        """同一任务同一天最多告警一次：第二次触发不更新日期、不重复提示。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            t = ScheduleTask(name="t", mode="day", at_time="09:00",
+                             flow_id=cfg.flows[0].id, flow_name="F")
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            shown = []
+
+            class _SB:
+                def showMessage(self, *a, **k): shown.append(a)
+
+            class _Win:
+                def statusBar(self): return _SB()
+
+            tab.window = lambda: _Win()
+            tab._alert_once(t, "第一次告警")
+            self.assertEqual(t.last_alert_date, datetime.now().strftime("%Y-%m-%d"))
+            self.assertEqual(len(shown), 1, "首次应提示")
+            tab._alert_once(t, "第二次告警")
+            self.assertEqual(len(shown), 1, "同日第二次不应重复提示")
+            # 跨天恢复提示资格
+            t.last_alert_date = "2000-01-01"
+            tab._alert_once(t, "跨天告警")
+            self.assertEqual(len(shown), 2, "跨天应恢复提示资格")
+
+    def test_alert_once_no_statusbar_does_not_crash(self):
+        """无状态栏环境（测试/托盘最小化）下告警不崩溃，仍记录日期。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            t = ScheduleTask(name="t", mode="day", at_time="09:00",
+                             flow_id=cfg.flows[0].id, flow_name="F")
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            tab.window = lambda: None
+            tab._alert_once(t, "无状态栏告警")
+            self.assertEqual(t.last_alert_date, datetime.now().strftime("%Y-%m-%d"))
+
+    def test_fire_busy_alerts_once(self):
+        """循环任务因流程繁忙被跳过：告警一天一次，但 next_run 仍继续排期。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            t = ScheduleTask(name="t", mode="day", at_time="09:00",
+                             flow_id=cfg.flows[0].id, flow_name="F",
+                             last_run="2026-09-01 09:00:00")
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            shown = []
+
+            class _SB:
+                def showMessage(self, *a, **k): shown.append(a)
+
+            class _Win:
+                def statusBar(self): return _SB()
+
+            tab.window = lambda: _Win()
+            tab.flow_tab._next_return = False   # 流程繁忙
+            tab._fire(t)
+            self.assertEqual(t.last_alert_date, datetime.now().strftime("%Y-%m-%d"),
+                             "繁忙跳过应记录告警日期")
+            self.assertEqual(len(shown), 1)
+            self.assertNotEqual(t.next_run, "", "循环任务繁忙后仍应排期")
+            self.assertTrue(t.enabled)
+            # 同日第二次繁忙：不重复提示，日期不变
+            tab._fire(t)
+            self.assertEqual(len(shown), 1, "同日繁忙只告警一次")
+
+    def test_fire_missing_flow_alerts(self):
+        """流程缺失时触发：告警一次并自动停用。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            t = ScheduleTask(name="孤儿任务", mode="day", at_time="09:00",
+                             flow_id="nope", flow_name="不存在", enabled=True)
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            tab._fire(t)
+            self.assertFalse(t.enabled, "流程缺失应停用")
+            self.assertEqual(t.last_alert_date, datetime.now().strftime("%Y-%m-%d"),
+                             "流程缺失应告警")
             self.assertEqual(t.next_run, "")
 
     def test_clear_layout_no_leak(self):

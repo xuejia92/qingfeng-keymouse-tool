@@ -10,6 +10,7 @@ import copy
 import dataclasses
 import json
 import os
+import threading
 import uuid
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -1197,6 +1198,10 @@ class FlowTab(QWidget):
         self._reload_steps()
 
     def _on_state(self, flow_id: str, state: str, reason: str, ok: bool = True):
+        import logging
+        _fl = logging.getLogger("probe_flow")
+        _fl.info("流程状态回调: flow=%s state=%s reason=%r ok=%s 线程=%s",
+                 flow_id, state, reason, ok, threading.current_thread().name)
         flow = next((f for f in self._flows if f.id == flow_id), None)
         if state == "running":
             self._update_left_item(flow_id)
@@ -1211,6 +1216,7 @@ class FlowTab(QWidget):
                 pass
             elif failed and not silent:
                 # 手动运行失败：弹窗反馈；静默（定时任务）触发不弹窗打扰
+                _fl.info("流程状态回调: 即将弹「流程结束」框 flow=%s reason=%r", flow_id, reason)
                 QMessageBox.information(self, "流程结束", f"「{flow.name}」：{reason}")
             elif reason:
                 # 成功完成 / 静默运行失败：只做状态栏轻提示（步骤很快跑完也能看到结果）
