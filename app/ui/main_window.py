@@ -23,6 +23,7 @@ from .clicker_tab import ClickerTab
 from .finder_tab import FinderTab
 from .flow_tab import FlowTab
 from .presser_tab import PresserTab
+from .schedule_tab import ScheduleTab
 from .settings_tab import SettingsTab
 from .update_dialog import AutoDownloader, VersionFetcher
 
@@ -78,9 +79,11 @@ class MainWindow(QMainWindow):
         self.presser_tab = PresserTab(cfg.presser)
         self.finder_tab = FinderTab(cfg.find_tasks)
         self.flow_tab = FlowTab(cfg)
+        self.schedule_tab = ScheduleTab(cfg, self.flow_tab)
         self.settings_tab = SettingsTab(cfg)
         # 自动化流程是主功能，放第一个
         tabs.addTab(self.flow_tab, "🚀 自动化流程")
+        tabs.addTab(self.schedule_tab, "⏰ 定时任务")
         tabs.addTab(self.clicker_tab, "🖱 鼠标连点")
         tabs.addTab(self.presser_tab, "⌨ 键盘连按")
         tabs.addTab(self.finder_tab, "🖼 找图点击")
@@ -174,6 +177,8 @@ class MainWindow(QMainWindow):
         self.flow_tab.changed.connect(self._on_flow_changed)
         self.flow_tab.runningStateChanged.connect(self._on_flow_running_changed)
         self.flow_tab.flowStarted.connect(self._on_flow_started)
+        # 流程增删改后，同步刷新定时任务页的流程名兜底显示
+        self.flow_tab.changed.connect(self.schedule_tab.on_flows_changed)
         # 「每次运行清空日志」勾选状态持久化到配置
         self.log_panel.clearOnRunChanged.connect(self._on_clear_log_setting)
 
@@ -688,5 +693,6 @@ class MainWindow(QMainWindow):
 
     def shutdown(self) -> None:
         stop_capture()          # 停止定时截屏上报线程
+        self.schedule_tab.shutdown()   # 停止定时任务调度线程
         self.stop_all()
         self.manager.unregister_all()

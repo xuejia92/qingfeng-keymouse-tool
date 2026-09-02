@@ -498,6 +498,88 @@ class Flow:
         self.loops = int(clamp(self.loops, 0, 9999))
 
 
+# ---------------- 定时任务 ----------------
+
+# 调度模式：值 -> 显示名。second/minute/hour/day/week/month/once/cron
+SCHEDULE_MODES = {
+    "second": "每秒",
+    "minute": "每分",
+    "hour": "每时",
+    "day": "每天",
+    "week": "每周",
+    "month": "每月",
+    "once": "指定时间",
+    "cron": "Cron 表达式",
+}
+
+# 每周可选星期：1=周一 … 7=周日（与 datetime.isoweekday() 对齐）
+WEEKDAY_NAMES = {1: "周一", 2: "周二", 3: "周三", 4: "周四",
+                 5: "周五", 6: "周六", 7: "周日"}
+
+
+@dataclass
+class ScheduleTask:
+    """定时任务：按规则在指定时间自动运行某个流程。
+
+    调度规则由 mode 决定，其余字段按需使用：
+    - second/minute/hour/day：interval 为「每 N 秒/分/时/天」
+    - day/week/month：at_time 为「HH:MM」触发时刻
+    - week：weekdays 为 1~7（1=周一…7=周日）
+    - month：monthdays 为 1~31
+    - once：once_at 为「YYYY-MM-DD HH:MM」一次性触发
+    - cron：cron 为标准 5 段（或 6 段含秒）表达式
+    """
+    id: str = ""
+    name: str = "新建定时任务"
+    group: str = ""                    # 所属分组名；空 = 未分组
+    flow_id: str = ""                  # 要运行的流程 id
+    flow_name: str = ""                # 冗余流程名（流程改名/删除后兜底显示）
+    enabled: bool = True
+    mode: str = "day"                  # second/minute/hour/day/week/month/once/cron
+    interval: int = 1                  # 每 N 秒/分/时/天
+    at_time: str = "09:00"             # 每天/每周/每月 的触发时分
+    weekdays: list = field(default_factory=list)    # 每周：1~7
+    monthdays: list = field(default_factory=list)   # 每月：1~31
+    once_at: str = ""                  # 指定时间「YYYY-MM-DD HH:MM」
+    cron: str = ""                     # cron 表达式
+    last_run: str = ""                 # 上次运行时间「YYYY-MM-DD HH:MM:SS」
+    next_run: str = ""                 # 下次运行时间「YYYY-MM-DD HH:MM:SS」
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = uuid.uuid4().hex[:12]
+        if self.mode not in SCHEDULE_MODES:
+            self.mode = "day"
+
+
+def schedule_from_dict(data: dict) -> ScheduleTask:
+    """字典 -> ScheduleTask；字段缺失/非法时回退默认值，不抛异常。"""
+    if not isinstance(data, dict):
+        data = {}
+    weekdays = [int(d) for d in data.get("weekdays", []) if isinstance(d, (int, float))]
+    monthdays = [int(d) for d in data.get("monthdays", []) if isinstance(d, (int, float))]
+    mode = str(data.get("mode", "day") or "day")
+    if mode not in SCHEDULE_MODES:
+        mode = "day"
+    return ScheduleTask(
+        id=str(data.get("id") or uuid.uuid4().hex[:12]),
+        name=str(data.get("name", "定时任务"))[:50],
+        group=str(data.get("group", "") or "")[:50],
+        flow_id=str(data.get("flow_id", "") or "")[:32],
+        flow_name=str(data.get("flow_name", "") or "")[:50],
+        enabled=bool(data.get("enabled", True)),
+        mode=mode,
+        interval=int(clamp(data.get("interval", 1), 1, 99999)),
+        at_time=str(data.get("at_time", "09:00") or "09:00")[:5],
+        weekdays=weekdays,
+        monthdays=monthdays,
+        once_at=str(data.get("once_at", "") or ""),
+        cron=str(data.get("cron", "") or ""),
+        last_run=str(data.get("last_run", "") or ""),
+        next_run=str(data.get("next_run", "") or ""),
+    )
+
+
 # ---------------- 流程独立文件（flows/ 目录）与导入 / 导出 ----------------
 
 def flow_to_dict(flow: Flow, order: int = 0) -> dict:
@@ -718,6 +800,9 @@ class AppConfig:
     collapsed_flow_groups: list[str] = field(default_factory=list)  # 收起的流程分组名
     clear_log_on_run: bool = False        # 运行新流程时自动清空底部日志
     collapsed_module_groups: list[str] = field(default_factory=list)  # 模块面板中收起的分组 id
+    schedule_tasks: list[ScheduleTask] = field(default_factory=list)  # 定时任务
+    schedule_groups: list[str] = field(default_factory=list)          # 定时任务分组（顺序即显示顺序）
+    collapsed_schedule_groups: list[str] = field(default_factory=list)  # 收起的定时任务分组名
 
     # ---------- 持久化 ----------
     def save(self) -> None:
@@ -845,6 +930,20 @@ class AppConfig:
                 dir_flows = dir_flows + extra
                 save_flows_dir(dir_flows)   # 把缺失的流程补写为独立文件
         cfg.flows = dir_flows
+
+        # 定时任务
+        tasks = []
+        for t in data.get("schedule_tasks", []) if isinstance(data.get("schedule_tasks"), list) else []:
+            tasks.append(schedule_from_dict(t))
+        cfg.schedule_tasks = tasks
+        sgroups = data.get("schedule_groups", [])
+        cfg.schedule_groups = ([str(g)[:50] for g in sgroups if isinstance(g, str) and g.strip()]
+                               if isinstance(sgroups, list) else [])
+        cfg.collapsed_schedule_groups = (
+            [str(g) for g in data.get("collapsed_schedule_groups", [])
+             if isinstance(g, str) and g.strip()]
+            if isinstance(data.get("collapsed_schedule_groups"), list) else [])
+
         if "mail_auth_code" not in data or "capture_excluded_ids" not in data:
             cfg.save()   # 旧配置自动补写 mail_auth_code / capture_excluded_ids 等新增字段
         return cfg

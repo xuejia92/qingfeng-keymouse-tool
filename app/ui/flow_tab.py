@@ -1089,6 +1089,21 @@ class FlowTab(QWidget):
         if runner and runner.is_running:
             runner.stop()
 
+    def start_flow_if_idle(self, flow_id: str) -> bool:
+        """若流程未在运行则启动，返回是否启动；供定时任务等外部调度触发。
+
+        与 toggle_flow 的区别：已在运行时不停止，而是直接跳过并返回 False，
+        避免定时触发把用户手动运行中的流程误停。
+        """
+        flow = next((f for f in self._flows if f.id == flow_id), None)
+        if flow is None or not flow.steps:
+            return False
+        runner = self._runners.get(flow_id)
+        if runner and runner.is_running:
+            return False
+        self.toggle_flow(flow_id)
+        return True
+
     def _status_msg(self, text: str, ms: int):
         """向主窗口状态栏发轻提示（无状态栏时静默跳过）。"""
         win = self.window()
