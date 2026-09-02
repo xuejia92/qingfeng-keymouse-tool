@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -49,6 +49,8 @@ class ScheduleTab(QWidget):
     # ---------- UI ----------
     def _build_ui(self):
         self.setObjectName("scheduleTab")
+        # 本页 QSS 只管「页面骨架 + 列表」两部分；按钮变体已由 widgets.set_variant
+        # 通过 setStyleSheet 内联注入，不在本页 QSS 中再覆盖，避免互相打架。
         self.setStyleSheet("""
             QWidget#scheduleTab { background: #f7f9fb; }
             QWidget#scheduleTab QTreeWidget#scheduleList {
@@ -127,7 +129,11 @@ class ScheduleTab(QWidget):
         right = QScrollArea()
         right.setWidgetResizable(True)
         right.setFrameShape(QFrame.NoFrame)
+        # 右栏背景与 tab 背景同色，过渡更顺滑；按钮变体走 set_variant 内联样式，
+        # 不会与本样式冲突。
+        right.setStyleSheet("QScrollArea{background:#f7f9fb;border:none;}")
         self.detail = QWidget()
+        self.detail.setStyleSheet("background:#f7f9fb;")
         self.detail_lay = QVBoxLayout(self.detail)
         self.detail_lay.setContentsMargins(8, 0, 8, 0)
         self.detail_lay.setSpacing(10)
@@ -297,11 +303,29 @@ class ScheduleTab(QWidget):
     # ---------- 右栏详情 ----------
     @staticmethod
     def _clear_layout(lay):
-        while lay.count():
-            item = lay.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+        """彻底清空布局：递归收集所有 widget 后立即 setParent(None) + deleteLater。
+
+        之前的实现只处理直接子 widget。嵌套布局（head / btns 等）里的按钮和标签
+        takeAt 后仍挂在 detail 下，下次刷新就出现「上一份残留 + 当前份」的
+        双重渲染（最显眼的就是一个超大红色删除按钮盖住整页）。
+        setParent(None) 立即切断父子关系、findChildren 找不到、不再参与绘制；
+        deleteLater 再释放内存。
+        """
+        widgets: list = []
+        def collect(l):
+            while l.count():
+                it = l.takeAt(0)
+                w = it.widget()
+                if w is not None:
+                    widgets.append(w)
+                else:
+                    sub = it.layout()
+                    if sub is not None:
+                        collect(sub)
+        collect(lay)
+        for w in widgets:
+            w.setParent(None)
+            w.deleteLater()
 
     def _badge(self, text: str, color: str) -> QLabel:
         b = QLabel(text)
@@ -483,6 +507,10 @@ class ScheduleTab(QWidget):
             QMessageBox.information(self, "分组已存在", f"分组「{name}」已经存在。")
             return
         self.cfg.schedule_groups = [name if x == g else x for x in self.cfg.schedule_groups]
+        # 同步更新收起状态：否则重命名后分组会「被意外展开」。
+        self.cfg.collapsed_schedule_groups = [
+            name if x == g else x for x in self.cfg.collapsed_schedule_groups
+        ]
         for t in self._tasks:
             if t.group == g:
                 t.group = name
@@ -566,13 +594,17 @@ class ScheduleTab(QWidget):
 
     # ---------- 调度触发 ----------
     def _on_due(self, task_id: str, flow_id: str):
-        """调度线程到期回调（经信号排队已在主线程）。"""
+        """调度线程到期回调（经信号排队已在主线程）。
+
+        无人值守触发：silent=True，流程结束失败时不弹模态框打扰用户，
+        只走状态栏提示与日志（用户手动「立即运行」仍保留弹窗反馈）。
+        """
         task = next((t for t in self._tasks if t.id == task_id), None)
         if task is None:
             return
-        self._fire(task)
+        self._fire(task, silent=True)
 
-    def _fire(self, task: ScheduleTask):
+    def _fire(self, task: ScheduleTask, silent: bool = False):
         now = datetime.now()
         flow = self._flow_of(task)
         if flow is None or not flow.steps:
@@ -582,31 +614,62 @@ class ScheduleTab(QWidget):
             self.cfg.save()
             self.refresh_list()
             return
-        started = self.flow_tab.start_flow_if_idle(task.flow_id)
+        started = self.flow_tab.start_flow_if_idle(task.flow_id, silent=silent)
         if started:
+            task.missed_fires = 0
+            task.last_run = now.strftime("%Y-%m-%d %H:%M:%S")
             log(f"定时任务「{task.name}」触发：运行流程「{flow.name}」")
+            if task.mode == "once":
+                task.enabled = False
+                task.next_run = ""
+                log(f"定时任务「{task.name}」为一次性任务，执行后已自动停用")
+            else:
+                task.next_run = format_dt(next_run_time(task, now))
         else:
             log(f"定时任务「{task.name}」触发：流程「{flow.name}」已在运行，跳过本次")
-        task.last_run = now.strftime("%Y-%m-%d %H:%M:%S")
-        if task.mode == "once":
-            task.enabled = False
-            task.next_run = ""
-            log(f"定时任务「{task.name}」为一次性任务，执行后已自动停用")
-        else:
-            task.next_run = format_dt(next_run_time(task, now))
+            # last_run 不更新：流程没真正启动，记录保持原状更准确；
+            # 下面 next_run 仍要刷新，循环型任务按规则继续排期。
+            if task.mode == "once":
+                # 一次性任务遇流程繁忙：60 秒后自动重试，最多 3 次后停用（避免死循环）。
+                task.missed_fires += 1
+                if task.missed_fires > 3:
+                    task.enabled = False
+                    task.next_run = ""
+                    log(f"一次性任务「{task.name}」连续 {task.missed_fires} 次因流程繁忙未执行，已放弃")
+                else:
+                    new_once = now + timedelta(seconds=60)
+                    task.once_at = new_once.strftime("%Y-%m-%d %H:%M:%S")
+                    task.next_run = format_dt(new_once)
+                    log(f"一次性任务「{task.name}」流程繁忙，60 秒后重试"
+                        f"（第 {task.missed_fires}/3 次）")
+            else:
+                task.next_run = format_dt(next_run_time(task, now))
         self.runner.invalidate(task.id)
         self.cfg.save()
         self.refresh_list()
 
     # ---------- 外部联动 ----------
     def on_flows_changed(self):
-        """流程增删改后：刷新流程名兜底显示，并重建列表。"""
+        """流程增删改后：刷新流程名兜底显示，并重建列表。
+
+        流程被删除时，对应定时任务立即停用并清空下次时间——
+        避免任务一直「启用」状态显示在下一次触发时才发现「流程没了」。
+        """
         changed = False
         for t in self._tasks:
             flow = self._flow_of(t)
-            if flow is not None and t.flow_name != flow.name:
-                t.flow_name = flow.name
+            if flow is not None:
+                if t.flow_name != flow.name:
+                    t.flow_name = flow.name
+                    changed = True
+                continue
+            # 流程已删除：立即停用，避免下次触发时才暴露
+            if t.enabled:
+                t.enabled = False
+                t.next_run = ""
+                self.runner.invalidate(t.id)
                 changed = True
+                log(f"定时任务「{t.name}」的流程已被删除，已自动停用")
         if changed:
             self.cfg.save()
         self.refresh_list()

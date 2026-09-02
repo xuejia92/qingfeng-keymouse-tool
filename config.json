@@ -32,12 +32,7 @@
   "flow_groups": [],
   "collapsed_flow_groups": [],
   "clear_log_on_run": false,
-  "collapsed_module_groups": [
-    "app_web",
-    "input",
-    "logic",
-    "perceive"
-  ],
+  "collapsed_module_groups": [],
   "schedule_tasks": [],
   "schedule_groups": [],
   "collapsed_schedule_groups": []

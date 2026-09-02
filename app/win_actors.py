@@ -28,6 +28,12 @@ _kernel32 = ctypes.windll.kernel32
 _GWL_EXSTYLE = -20
 _WS_EX_TRANSPARENT = 0x00000020
 
+# subprocess 调用 taskkill 等控制台程序时隐藏黑框。程序打包成无控制台的
+# windowed exe 后，subprocess 默认会给子进程新建一个控制台窗口，导致每次
+# 执行「关闭应用」步骤都弹出一个 cmd 黑框一闪而逝（循环/多任务触发时就是
+# 一连串黑框）。加 CREATE_NO_WINDOW 后彻底不弹。
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # ---- Win32 消息常量 ----
 WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK = 0x0201, 0x0202, 0x0203
@@ -337,7 +343,8 @@ def launch_app(path: str) -> tuple[bool, str]:
         os.startfile(path)               # 关联默认程序打开（exe/快捷方式/文档都行）
     except OSError:
         try:
-            subprocess.Popen([path])     # startfile 失败（如无关联）时直接运行
+            subprocess.Popen([path],
+                             creationflags=_CREATE_NO_WINDOW)  # startfile 失败时兜底运行
         except OSError as e:
             return False, f"启动失败：{e}"
     return True, f"已启动 {os.path.basename(path)}"
@@ -489,7 +496,8 @@ def close_app(target: str) -> tuple[bool, str]:
         name += ".exe"
     try:
         r = subprocess.run(["taskkill", "/IM", name, "/F", "/T"],
-                           capture_output=True, timeout=10)
+                           capture_output=True, timeout=10,
+                           creationflags=_CREATE_NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as e:
         return False, f"关闭失败：{e}"
     if r.returncode == 0:

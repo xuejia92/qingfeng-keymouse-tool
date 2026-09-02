@@ -544,6 +544,7 @@ class ScheduleTask:
     cron: str = ""                     # cron 表达式
     last_run: str = ""                 # 上次运行时间「YYYY-MM-DD HH:MM:SS」
     next_run: str = ""                 # 下次运行时间「YYYY-MM-DD HH:MM:SS」
+    missed_fires: int = 0              # 连续因流程繁忙被跳过的次数（一次任务用，超 3 次放弃）
 
     def __post_init__(self):
         if not self.id:
@@ -577,6 +578,7 @@ def schedule_from_dict(data: dict) -> ScheduleTask:
         cron=str(data.get("cron", "") or ""),
         last_run=str(data.get("last_run", "") or ""),
         next_run=str(data.get("next_run", "") or ""),
+        missed_fires=int(clamp(data.get("missed_fires", 0), 0, 999)),
     )
 
 

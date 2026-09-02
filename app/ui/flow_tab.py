@@ -64,6 +64,9 @@ class FlowTab(QWidget):
         # 原来只增不减，删掉流程后条目还留着，反复增删会让它一直变大。
         self._runners: dict[str, FlowRunner] = {}
         self._single_rows: dict[str, int] = {}   # flow_id -> 单步执行中的真实步骤行号
+        # 静默触发的流程 id（定时任务等无人值守触发）：结束失败时不弹模态框，
+        # 只走状态栏提示 + 日志，避免自动任务反复打断用户。
+        self._silent: set[str] = set()
         self._capture_step_dlg = None
         self._ratio_applied = False
         self._build_ui()
@@ -1089,11 +1092,14 @@ class FlowTab(QWidget):
         if runner and runner.is_running:
             runner.stop()
 
-    def start_flow_if_idle(self, flow_id: str) -> bool:
+    def start_flow_if_idle(self, flow_id: str, silent: bool = False) -> bool:
         """若流程未在运行则启动，返回是否启动；供定时任务等外部调度触发。
 
         与 toggle_flow 的区别：已在运行时不停止，而是直接跳过并返回 False，
         避免定时触发把用户手动运行中的流程误停。
+
+        silent=True 表示「无人值守触发」（定时任务等）：本次运行结束失败时
+        不弹模态框打断用户，只走状态栏提示与日志；用户手动运行不受影响。
         """
         flow = next((f for f in self._flows if f.id == flow_id), None)
         if flow is None or not flow.steps:
@@ -1101,6 +1107,8 @@ class FlowTab(QWidget):
         runner = self._runners.get(flow_id)
         if runner and runner.is_running:
             return False
+        if silent:
+            self._silent.add(flow_id)
         self.toggle_flow(flow_id)
         return True
 
@@ -1193,15 +1201,19 @@ class FlowTab(QWidget):
         if state == "running":
             self._update_left_item(flow_id)
         else:
+            silent = flow_id in self._silent
+            if silent:
+                self._silent.discard(flow_id)   # 一次运行结束即摘除标记
             self._runners.pop(flow_id, None)   # 跑完就摘掉，别让字典越攒越大
             failed = bool(reason) and not ok and reason != "已手动停止"
             self._update_left_item(flow_id, failed=failed)
             if flow is None:
                 pass
-            elif failed:
+            elif failed and not silent:
+                # 手动运行失败：弹窗反馈；静默（定时任务）触发不弹窗打扰
                 QMessageBox.information(self, "流程结束", f"「{flow.name}」：{reason}")
             elif reason:
-                # 正常完成：底部状态栏轻提示（流程步骤很快跑完时也能看到结果）
+                # 成功完成 / 静默运行失败：只做状态栏轻提示（步骤很快跑完也能看到结果）
                 sb = self.window().statusBar()
                 if hasattr(sb, "showMessage"):
                     sb.showMessage(f"「{flow.name}」{reason}", 6000)

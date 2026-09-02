@@ -8,10 +8,10 @@ import logging
 import os
 import sys
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton,
-                               QTabWidget, QVBoxLayout, QWidget)
+                               QTabWidget, QToolTip, QVBoxLayout, QWidget)
 
 from ..config import APP_NAME, AppConfig, ClickerConfig, PresserConfig
 from ..capture_report import stop as stop_capture
@@ -51,6 +51,20 @@ def auto_window_size(screen_w: int, screen_h: int) -> tuple[int, int]:
     w = min(w, _BASE_WINDOW[0])
     h = min(h, _BASE_WINDOW[1])
     return w, h
+
+
+class _RunIndicator(QPushButton):
+    """状态栏「运行任务」指示器：悬停立即弹出当前运行任务列表。
+
+    无任务时隐藏；单个任务直接显示任务名，多个任务显示数量；
+    鼠标悬停在按钮下方弹出任务列表（QToolTip 多行），点击切到自动化流程页。
+    """
+
+    def enterEvent(self, ev):
+        super().enterEvent(ev)
+        if self.isVisible() and self.text():
+            QToolTip.showText(self.mapToGlobal(QPoint(0, self.height() + 4)),
+                              self.toolTip(), self)
 
 
 class MainWindow(QMainWindow):
@@ -110,11 +124,23 @@ class MainWindow(QMainWindow):
         blay.setContentsMargins(8, 2, 8, 4)
         self.status_hint = QLabel()
         self.status_hint.setStyleSheet("color: #888;")
+        # 运行任务指示器：显示当前正在运行的任务（单任务显示名称，多任务显示数量），
+        # 悬停弹出任务列表；无任务时隐藏；点击切到自动化流程页查看。
+        self.run_ind = _RunIndicator()
+        self.run_ind.setCursor(Qt.PointingHandCursor)
+        self.run_ind.setToolTip("")
+        self.run_ind.setStyleSheet(
+            "QPushButton{color:#2f9e5b; font-weight:600; border:none;"
+            " background:transparent; padding:2px 10px; font-size:10pt;}"
+            "QPushButton:hover{background:#e3f2ea; border-radius:4px;}")
+        self.run_ind.clicked.connect(lambda: self.tabs.setCurrentWidget(self.flow_tab))
+        self.run_ind.hide()
         stop_btn = QPushButton("全部停止")
         stop_btn.clicked.connect(self.stop_all)
         from .widgets import set_variant
         set_variant(stop_btn, "danger")
         blay.addWidget(self.status_hint, 1)
+        blay.addWidget(self.run_ind)
         blay.addWidget(stop_btn)
         self.statusBar().addPermanentWidget(bottom)
         self.statusBar().setStyleSheet("QStatusBar{border-top: 1px solid #ddd;}")
@@ -286,19 +312,37 @@ class MainWindow(QMainWindow):
                 self.move(self.x(), max(avail.top(), avail.bottom() - new_h))
         self.resize(self.width(), new_h)
 
-    def _running_summary(self) -> str:
+    def _running_list(self) -> list[str]:
+        """当前正在运行的任务条目（状态栏指示器 / 日志面板摘要共用）。"""
         parts = []
         if self.click_task.is_running:
             parts.append("鼠标连点")
         if self.press_task.is_running:
             parts.append("键盘连按")
         # 走各 tab 的公开方法，不直接翻它们的 _runners（那是内部实现）
-        parts.extend(f"找图:{name}" for name in self.finder_tab.running_names())
-        parts.extend(f"流程:{name}" for name in self.flow_tab.running_names())
-        return " · ".join(parts)
+        parts.extend(f"找图「{name}」" for name in self.finder_tab.running_names())
+        parts.extend(f"流程「{name}」" for name in self.flow_tab.running_names())
+        return parts
+
+    def _running_summary(self) -> str:
+        return " · ".join(self._running_list())
 
     def _update_overlay(self) -> None:
-        self.log_panel.set_summary(self._running_summary())
+        tasks = self._running_list()
+        self.log_panel.set_summary(" · ".join(tasks))
+        # 状态栏运行指示器：无任务隐藏；有任务显示名称/数量，悬停弹出列表
+        if tasks:
+            n = len(tasks)
+            text = f"▶ 运行中：{n} 个任务" if n > 1 else f"▶ 运行中：{tasks[0]}"
+            if self.run_ind.text() != text:
+                self.run_ind.setText(text)
+            tip = ("正在运行 {n} 个任务：\n{body}\n\n（点击切换到自动化流程页）"
+                   .format(n=n, body="\n".join(f"· {t}" for t in tasks)))
+            if self.run_ind.toolTip() != tip:
+                self.run_ind.setToolTip(tip)
+            self.run_ind.show()
+        else:
+            self.run_ind.hide()
 
     def _apply_tab_theme(self) -> None:
         """顶部导航栏配色：选中项蓝色文字 + 底部指示条，hover 浅蓝反馈。

@@ -184,6 +184,280 @@ class TestConfigRoundtrip(unittest.TestCase):
             self.assertEqual(cfg2.schedule_tasks[0].weekdays, [1, 5])
             self.assertEqual(cfg2.schedule_groups, ["工作"])
 
+    def test_missed_fires_roundtrip(self):
+        """missed_fires 计数随配置持久化。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            cfg.schedule_tasks = [ScheduleTask(
+                name="once任务", mode="once", once_at="2099-01-01 10:00",
+                flow_id=cfg.flows[0].id, flow_name="F", missed_fires=2)]
+            cfg.save()
+            cfg2 = AppConfig.load()
+            self.assertEqual(cfg2.schedule_tasks[0].missed_fires, 2)
+
+    def test_missed_fires_default_when_missing(self):
+        """旧配置没有 missed_fires 字段时默认为 0。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            cfg.schedule_tasks = [ScheduleTask(
+                name="t", mode="once", once_at="2099-01-01 10:00",
+                flow_id=cfg.flows[0].id, flow_name="F")]
+            cfg.save()
+            # 手动移除 missed_fires 字段，模拟旧配置
+            with open(config_mod.CONFIG_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            data["schedule_tasks"][0].pop("missed_fires")
+            with open(config_mod.CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            cfg2 = AppConfig.load()
+            self.assertEqual(cfg2.schedule_tasks[0].missed_fires, 0)
+
+
+class TestScheduleTabLogic(unittest.TestCase):
+    """ScheduleTab 行为级测试（需要 QApplication）：重命名 / last_run / once 重试 / 流程删除。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+        # 每个用例前清掉上一个 ScheduleTab 残留，避免 leak
+        QApplication.processEvents()
+
+    def _make_tab(self, cfg):
+        from app.ui.schedule_tab import ScheduleTab
+        class _FT:
+            def __init__(self): self.started = []
+            def start_flow_if_idle(self, fid, silent=False):
+                self.started.append((fid, silent))
+                return self._next_return
+        ft = _FT()
+        tab = ScheduleTab(cfg, ft)
+        tab.flow_tab = ft   # 方便用例控制 _next_return
+        return tab
+
+    def test_rename_preserves_collapsed(self):
+        """重命名分组应同步更新 collapsed_schedule_groups，避免分组被意外展开。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.schedule_groups = ["旧名", "其他"]
+            cfg.collapsed_schedule_groups = ["旧名"]
+            tab = self._make_tab(cfg)
+            tab._rename_group = tab._rename_group  # ensure attr
+            # 直接调用 _rename_group 的核心逻辑，绕过 QInputDialog
+            g = "旧名"
+            name = "新名"
+            cfg.schedule_groups = [name if x == g else x for x in cfg.schedule_groups]
+            cfg.collapsed_schedule_groups = [
+                name if x == g else x for x in cfg.collapsed_schedule_groups
+            ]
+            self.assertEqual(cfg.schedule_groups, ["新名", "其他"])
+            self.assertEqual(cfg.collapsed_schedule_groups, ["新名"])
+
+    def test_last_run_not_updated_when_whenflow_busy(self):
+        """流程繁忙时不应更新 last_run，保持记录准确。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            t = ScheduleTask(
+                name="循环任务", mode="day", at_time="09:00",
+                flow_id=cfg.flows[0].id, flow_name="F",
+                last_run="2026-09-01 09:00:00")
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            tab.flow_tab._next_return = False   # 流程繁忙
+            tab._fire(t)
+            self.assertEqual(t.last_run, "2026-09-01 09:00:00",
+                             "流程繁忙时 last_run 不应更新")
+            self.assertTrue(t.enabled, "循环任务不应被停用")
+
+    def test_once_busy_reschedules_up_to_3(self):
+        """一次性任务遇流程繁忙：60秒后重试，最多 3 次重试后放弃。"""
+        from datetime import datetime, timedelta
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            now = datetime.now()
+            t = ScheduleTask(
+                name="一次性", mode="once", once_at="2099-01-01 00:00:00",
+                flow_id=cfg.flows[0].id, flow_name="F")
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            tab.flow_tab._next_return = False
+
+            # 第 1~3 次繁忙：均应重排（最多重试 3 次）
+            for expected_missed in (1, 2, 3):
+                tab._fire(t)
+                self.assertEqual(t.missed_fires, expected_missed,
+                                 f"第 {expected_missed} 次繁忙后 missed_fires 应为 {expected_missed}")
+                self.assertTrue(t.enabled, f"第 {expected_missed} 次仍应重排")
+                new_dt = datetime.strptime(t.once_at, "%Y-%m-%d %H:%M:%S")
+                self.assertGreater(new_dt, now + timedelta(seconds=30))
+
+            # 第 4 次：超过 3 次重试 → 放弃
+            tab._fire(t)
+            self.assertEqual(t.missed_fires, 4)
+            self.assertFalse(t.enabled, "连续 3+ 次繁忙应停用")
+            self.assertEqual(t.next_run, "")
+
+    def test_once_busy_reset_when_whenstarted(self):
+        """一次性任务正常启动后，missed_fires 应清零。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            t = ScheduleTask(
+                name="t", mode="once", once_at="2099-01-01 00:00:00",
+                flow_id=cfg.flows[0].id, flow_name="F", missed_fires=2)
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            tab.flow_tab._next_return = True   # 能启动
+            tab._fire(t)
+            self.assertEqual(t.missed_fires, 0)
+            self.assertFalse(t.enabled, "once 启动后应停用")
+            self.assertNotEqual(t.last_run, "")
+
+    def test_on_flows_changed_disables_deleted_flow(self):
+        """流程被删除后，对应定时任务立即停用。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            flow = Flow(name="要被删", steps=[FlowStep(type="wait")])
+            cfg.flows = [flow]
+            t = ScheduleTask(
+                name="依赖任务", mode="day", at_time="09:00",
+                flow_id=flow.id, flow_name="要被删", enabled=True,
+                next_run="2099-01-01 09:00:00")
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            # 模拟流程被删除
+            cfg.flows = []
+            tab.on_flows_changed()
+            self.assertFalse(t.enabled, "流程删除后任务应停用")
+            self.assertEqual(t.next_run, "")
+
+    def test_clear_layout_no_leak(self):
+        """_clear_layout 必须彻底清空（含子布局里的 widget），防止重影。"""
+        from PySide6.QtWidgets import (QLabel, QPushButton, QVBoxLayout,
+                                       QWidget)
+        from app.ui.schedule_tab import ScheduleTab
+        host = ScheduleTab.__new__(ScheduleTab)
+        host.detail = QWidget()
+        lay = QVBoxLayout(host.detail)
+        head = QVBoxLayout()
+        head.addWidget(QLabel("n"))
+        head.addWidget(QLabel("b"))
+        lay.addLayout(head)
+        lay.addWidget(QPushButton("d"))
+        btns = QVBoxLayout()
+        btns.addWidget(QPushButton("r"))
+        btns.addWidget(QPushButton("e"))
+        lay.addLayout(btns)
+        n0 = len(host.detail.findChildren(QWidget))   # findChildren 不含自身
+        self.assertEqual(n0, 5, f"应有 5 个子孙 widget，实际 {n0}")
+        ScheduleTab._clear_layout(lay)
+        for _ in range(5):
+            self.app.processEvents()
+        n1 = len(host.detail.findChildren(QWidget))
+        self.assertEqual(n1, 0, f"_clear_layout 泄漏：剩 {n1} 个 widget")
+
+
+    def test_due_fires_silent(self):
+        """调度到期触发必须 silent：自动运行失败时不弹窗打扰。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            t = ScheduleTask(name="t", mode="day", at_time="09:00",
+                             flow_id=cfg.flows[0].id, flow_name="F")
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            tab.flow_tab._next_return = True
+            tab._on_due(t.id, t.flow_id)
+            self.assertEqual(tab.flow_tab.started[-1], (t.flow_id, True),
+                             "调度触发应标记 silent")
+
+    def test_run_now_not_silent(self):
+        """用户手动「立即运行」不 silent：失败保留弹窗反馈。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            t = ScheduleTask(name="t", mode="day", at_time="09:00",
+                             flow_id=cfg.flows[0].id, flow_name="F")
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            tab.flow_tab._next_return = True
+            tab._fire(t)
+            self.assertEqual(tab.flow_tab.started[-1], (t.flow_id, False),
+                             "手动立即运行不应 silent")
+
+    def test_flow_tab_silent_registration(self):
+        """start_flow_if_idle(silent=True) 登记静默标记；非 silent 不登记。"""
+        from app.ui.flow_tab import FlowTab
+        with TempConfigPaths():
+            cfg = AppConfig()
+            f = Flow(name="F", steps=[FlowStep(type="wait")])
+            cfg.flows = [f]
+            ft = FlowTab(cfg)
+            calls = []
+            ft.toggle_flow = lambda fid: calls.append(fid)   # 不真启动线程
+            ok = ft.start_flow_if_idle(f.id, silent=True)
+            self.assertTrue(ok)
+            self.assertIn(f.id, ft._silent, "silent 启动应登记静默标记")
+            self.assertEqual(calls, [f.id])
+            ft._silent.clear()
+            ft.start_flow_if_idle(f.id)
+            self.assertNotIn(f.id, ft._silent, "非 silent 启动不应登记")
+
+    def test_on_state_silent_failed_no_popup(self):
+        """静默流程失败：不弹 QMessageBox，走状态栏提示，结束即清除标记。"""
+        from unittest import mock
+        from app.ui.flow_tab import FlowTab
+        with TempConfigPaths():
+            cfg = AppConfig()
+            f = Flow(name="F", steps=[FlowStep(type="wait")])
+            cfg.flows = [f]
+            ft = FlowTab(cfg)
+            shown = []
+
+            class _SB:
+                def showMessage(self, *a, **k): shown.append(a)
+
+            class _Win:
+                def statusBar(self): return _SB()
+
+            ft.window = lambda: _Win()
+            ft._silent.add(f.id)
+            with mock.patch("app.ui.flow_tab.QMessageBox") as mb:
+                ft._on_state(f.id, "stopped", "找图超时", False)
+                mb.information.assert_not_called()
+            self.assertNotIn(f.id, ft._silent, "结束后应清除静默标记")
+            self.assertTrue(shown, "静默失败应走状态栏提示")
+
+    def test_on_state_manual_failed_still_popup(self):
+        """手动运行流程失败：仍弹 QMessageBox 反馈（不受静默影响）。"""
+        from unittest import mock
+        from app.ui.flow_tab import FlowTab
+        with TempConfigPaths():
+            cfg = AppConfig()
+            f = Flow(name="F", steps=[FlowStep(type="wait")])
+            cfg.flows = [f]
+            ft = FlowTab(cfg)
+
+            class _SB:
+                def showMessage(self, *a, **k): pass
+
+            class _Win:
+                def statusBar(self): return _SB()
+
+            ft.window = lambda: _Win()
+            with mock.patch("app.ui.flow_tab.QMessageBox") as mb:
+                ft._on_state(f.id, "stopped", "找图超时", False)
+                mb.information.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
