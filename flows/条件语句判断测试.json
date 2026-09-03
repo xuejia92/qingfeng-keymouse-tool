@@ -1,0 +1,142 @@
+{
+  "id": "10982d1ec144",
+  "name": "条件语句判断测试",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "当前时间",
+        "type": "string",
+        "default_value": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "date_format",
+        "type": "integer",
+        "default_value": "8"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "time_format",
+        "type": "string",
+        "default_value": "%H/%M----%S"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "if",
+      "name": "条件判断",
+      "params": {
+        "condition": "date_format > 10"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "date_format",
+        "text": "大于10的",
+        "raw": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "elseif",
+      "name": "否则如果",
+      "params": {
+        "condition": "date_format < 5"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "date_format",
+        "text": "小于5的",
+        "raw": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "elseif",
+      "name": "否则如果",
+      "params": {
+        "condition": "date_format >=5 && date_format <= 10"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "date_format",
+        "text": "中间位置成立",
+        "raw": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "else",
+      "name": "否则",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "date_format",
+        "text": "否则成立",
+        "raw": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "endif",
+      "name": "条件结束",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 1,
+  "order": 2
+}

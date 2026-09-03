@@ -1,12 +1,13 @@
 """后台任务线程与公共执行函数。
 
 run_click_step / run_press_step / run_find_step / run_var_step / run_log_step /
-run_ocr_step / run_clip_set_step / run_clip_get_step 是与 UI 无关的公共执行函数，
-单任务（BaseTask 子类）与自动化流程（FlowRunner）共用同一套实现。
+run_ocr_step / run_clip_set_step / run_clip_get_step / run_py_func_step 是与 UI
+无关的公共执行函数，单任务（BaseTask 子类）与自动化流程（FlowRunner）共用同一套实现。
 参数统一使用 dict（各字段与配置 dataclass 字段同名）。
 """
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from dataclasses import asdict
@@ -17,7 +18,7 @@ from PySide6.QtCore import QObject, Signal
 
 from . import finder, input_actors, web_actors, win_actors
 from .config import parse_region_str, resolve_template_path
-from .logbus import log
+from .logbus import log, log_print, log_print_raw
 
 # 找图循环两次抓屏之间的间隔（秒）。
 # 原来是固定 0.05（20 Hz），在 4K 屏上意味着每秒 20 次全屏 matchTemplate，
@@ -147,15 +148,17 @@ def run_var_step(p: dict, variables: dict, variable_types: dict | None = None) -
 
     variables: 运行时变量存储 dict；variable_types: 变量名 -> 类型。
     变量步骤相当于声明并赋值，遇到同名变量会覆盖。
+    默认值是表达式时会按当时已存在的变量求值：支持 $变量名 引用、
+    数学运算、字符串拼接、len()/int()/str() 等白名单函数（见 values.eval_var_default）。
     """
-    from .values import parse_value
+    from .values import eval_var_default
     name = (p.get("name") or "").strip()
     if not name:
         return False, "变量名为空"
     value_type = (p.get("type") or "string").strip().lower()
-    default = p.get("default_value", "")
+    default = str(p.get("default_value", "") or "")
     try:
-        value = parse_value(value_type, str(default or ""))
+        value = eval_var_default(value_type, default, variables)
     except ValueError as e:
         return False, str(e)
     variables[name] = value
@@ -164,50 +167,94 @@ def run_var_step(p: dict, variables: dict, variable_types: dict | None = None) -
     return True, f"已设置变量 {name}"
 
 
-def run_log_step(p: dict, variables: dict) -> tuple[bool, str]:
-    """执行「日志输出」步骤：把指定变量/全部变量输出到日志控制台。
+def _parse_log_var_item(item: str) -> tuple[str, str]:
+    """解析「打印变量」单项：返回 (变量表达式, 输出后缀)。
 
-    variables 参数指定要输出的变量名（逗号分隔）；空表示输出全部变量。
-    text 支持 $变量名 占位。
+    支持在变量表达式末尾加字面量 \\n（换行）或 \\b（空格）控制原始输出时的
+    分隔符；无后缀返回空串（原始输出默认直接拼接、不换行）。
     """
-    from .values import format_value, resolve_references
+    item = (item or "").strip()
+    for esc, sep in (("\\n", "\n"), ("\\b", " ")):
+        if item.endswith(esc):
+            return item[:-len(esc)].rstrip(), sep
+    return item, ""
+
+
+def _unescape_log_text(text: str) -> str:
+    """把「附加文本」里的字面量 \\n / \\b 转成换行 / 空格。
+
+    只作用于用户手打的文本，在 $变量名 引用替换之前执行，避免误转变量值里
+    本就含有的反斜杠序列。
+    """
+    return text.replace("\\n", "\n").replace("\\b", " ")
+
+
+def run_log_step(p: dict, variables: dict) -> tuple[bool, str]:
+    """执行「打印输出」步骤：把指定变量输出到日志控制台。
+
+    variables 参数指定要输出的变量名（逗号分隔，支持 aaa['a'] / arr[0] 等
+    Python 下标语法）；空（下拉选「无」）表示不打印任何变量。text 支持
+    $变量名 占位，也支持字面量 \\n（换行）/ \\b（空格）。
+    输出走「打印」通道，日志面板以蓝色字体区分。
+    勾选「原始输出」（raw=True）时：不加时间戳、不自动换行、不带「变量名 =」前缀，
+    多个变量默认直接拼接；变量表达式后加 \\n（换行）或 \\b（空格）控制分隔。
+    """
+    from .values import format_value, resolve_references, resolve_variable
+    raw = bool(p.get("raw"))
+    emit = log_print_raw if raw else log_print
     names = [x.strip() for x in (p.get("variables") or "").split(",") if x.strip()]
-    if not names and (p.get("text") or "").strip():
-        # 只填了 text：把它当作普通日志输出
-        text = resolve_references(str(p.get("text") or ""), variables)
-        log(text)
-        return True, "日志已输出"
+    raw_text = str(p.get("text") or "")
+    text_src = _unescape_log_text(raw_text)
+
     if not names:
-        names = list(variables.keys())
-    if not names:
-        return False, "没有可输出的变量"
+        # 没选变量（下拉「无」）：不打印任何变量；填了附加文本（哪怕只填 \n/\b 转义符）
+        # 则只打印文本——判断用「原始输入是否非空白」：\n→换行、\b→空格 后再 strip 会
+        # 误判成「没填」而把整条输出吞掉。
+        if raw_text.strip():
+            emit(resolve_references(text_src, variables))
+            return True, "打印已输出"
+        return True, "未打印任何内容"
+
+    text = resolve_references(text_src, variables)
+    if raw:
+        # 原始输出：只输出值本身，默认不换行拼接；\\n 换行、\\b 空格
+        parts = []
+        for name in names:
+            expr, sep = _parse_log_var_item(name)
+            ok, value, why = resolve_variable(expr, variables)
+            parts.append((format_value(value) if ok else f"<{why}>") + sep)
+        emit(text + "".join(parts) if text else "".join(parts))
+        return True, f"已打印 {len(names)} 个变量"
+
+    # 普通模式：name = value，每行一个（换行分隔）
     lines = []
     for name in names:
-        if name in variables:
-            lines.append(f"{name} = {format_value(variables[name])}")
+        ok, value, why = resolve_variable(name, variables)
+        if ok:
+            lines.append(f"{name} = {format_value(value)}")
         else:
-            lines.append(f"{name} = <未定义>")
-    text = resolve_references(str(p.get("text") or ""), variables)
+            lines.append(f"{name} = <{why}>")
     if text:
         lines.insert(0, text)
-    log("\n".join(lines))
-    return True, f"已输出 {len(names)} 个变量"
+    emit("\n".join(lines))
+    return True, f"已打印 {len(names)} 个变量"
 
 
 def run_clip_set_step(p: dict, variables: dict) -> tuple[bool, str]:
     """执行「赋值剪贴板」步骤：把变量值或自定义文本写入系统剪贴板。
 
     两种来源二选一（变量优先）：
-      - name 指定变量：取 format_value(变量值)；
+      - name 指定变量（支持 aaa['a'] / arr[0] 等 Python 下标语法）：取 format_value(变量值)；
       - 否则用 text 自定义文本，支持 $变量名 引用。
     """
-    from .values import format_value, resolve_references
+    from .values import format_value, resolve_references, resolve_variable
     name = (p.get("name") or "").strip()
     text = (p.get("text") or "").strip()
     if name:
-        if name not in variables:
-            return False, f"变量「{name}」未定义"
-        value = format_value(variables[name])
+        ok, val, why = resolve_variable(name, variables)
+        if not ok:
+            return False, why
+        value = format_value(val)
         source = f"变量 {name}"
     elif text:
         value = resolve_references(text, variables)
@@ -391,14 +438,172 @@ def run_find_image_step(p: dict, variables: dict,
     return True, f"找到目标（区域 {left},{top},{right},{bottom}，置信度 {score:.2f}）"
 
 
+def run_yolo_detect_step(p: dict, variables: dict,
+                         variable_types: dict | None = None,
+                         stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「目标检测」步骤：YOLOv5 在屏幕 / 指定区域检测目标。
+
+    结果写入结果变量：list[dict]，每项 {"class", "confidence", "region"}
+    （region = "左上x,左上y,右下x,右下y"），按置信度从高到低；未检测到写空列表 []。
+    步骤本身不因未检测到而失败（供后续步骤按变量值分支），
+    模型路径无效 / 缺依赖 / 设备不可用 / 区域越界才算失败。
+
+    附加动作（action != none）：对置信度最高的目标中心执行鼠标单击/右键/双击。
+    勾选「效果预览」且有检出时，画多框红框（左上类别、右上置信度）。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    var = (p.get("variable") or "").strip()
+    if not var:
+        return False, "未指定结果变量"
+    from . import yolo_actor
+    from .values import resolve_references
+    classes = resolve_references(str(p.get("classes") or ""), variables).strip()
+    try:
+        results = yolo_actor.detect(
+            model_path=str(p.get("model_path") or ""),
+            region=str(p.get("region") or ""),
+            classes=classes,
+            confidence=float(p.get("confidence", 0.5) or 0.5),
+            device=str(p.get("device") or "cuda"),
+        )
+    except yolo_actor.YoloError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, f"目标检测失败：{type(e).__name__}: {e}"
+    variables[var] = results
+    if variable_types is not None:
+        variable_types[var] = "list"
+    if not results:
+        return True, "未检测到目标"
+
+    # 附加动作：对置信度最高的目标中心执行鼠标操作
+    action = (p.get("action") or "none").strip()
+    if action != "none":
+        x1, y1, x2, y2 = (int(v) for v in results[0]["region"].split(","))
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        if action == "right":
+            input_actors.click("right", 1, cx, cy)
+        elif action == "double":
+            input_actors.click("left", 2, cx, cy)
+        else:
+            input_actors.click("left", 1, cx, cy)
+
+    if p.get("preview"):
+        try:
+            from .find_preview import show_boxes_highlight
+            boxes = []
+            for d in results:
+                bx1, by1, bx2, by2 = (int(v) for v in d["region"].split(","))
+                boxes.append(((bx1, by1, bx2, by2), d["class"],
+                              f"{d['confidence']:.2f}"))
+            show_boxes_highlight(boxes,
+                                 float(p.get("preview_duration", 1.0) or 1.0))
+        except Exception:
+            pass    # 预览失败不影响检测本身（如无 Qt 环境）
+    return True, f"检测到 {len(results)} 个目标 → {var}（最高置信度 {results[0]['confidence']:.2f}）"
+
+
+def _py_err_text(prefix: str, e: Exception) -> str:
+    """把异常格式化成简短可读的错误文本（含异常类型与信息，去掉长堆栈）。"""
+    import traceback
+    try:
+        lines = traceback.format_exception_only(type(e), e)
+        detail = "".join(lines).strip()
+    except Exception:
+        detail = str(e)
+    return f"{prefix}: {detail}"
+
+
+def run_py_func_step(p: dict, variables: dict,
+                     stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「python函数」步骤：运行用户代码并调用指定函数，返回值写入指定变量。
+
+    代码环境：
+      - 提供标准 __builtins__，代码里可直接 import 常用库（datetime 等）；
+      - params 中 variables 列表声明的流程变量以同名注入代码全局命名空间，
+        供代码与函数体直接读取（如流程变量 x=5，代码写 def f(): return x+1 即可）。
+    调用规则（func_name 必填）：
+      - 代码执行完后调用该函数，取返回值作为结果；
+      - 勾选变量中**与函数形参同名**的，自动以关键字实参传入——形参即取到变量值，
+        例如流程变量 date_format、time_format 勾选后调用
+        print_current_time(date_format=值, time_format=值)；
+      - 与形参不同名的勾选变量仍注入全局环境，函数体内可直接读取；
+      - 无默认值的必填形参若没有同名变量可传，返回明确缺失提示。
+    结果写入 result_var 指定的流程变量（任意 Python 类型）。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    code = (p.get("code") or "").strip()
+    result_var = (p.get("result_var") or "").strip()
+    if not code:
+        return False, "代码为空"
+    if not result_var:
+        return False, "未指定结果变量"
+    func_name = (p.get("func_name") or "").strip()
+    if not func_name:
+        return False, "未填写调用函数名（python函数步骤固定调用一个函数并取返回值）"
+
+    # 收集要注入的变量名（去重、保持声明顺序）；未定义的变量直接报错便于排查
+    names: list[str] = []
+    for n in p.get("variables") or []:
+        n = str(n or "").strip()
+        if n and n not in names:
+            names.append(n)
+    env: dict = {}
+    for n in names:
+        if n not in variables:
+            return False, f"变量「{n}」未定义"
+        env[n] = variables[n]
+
+    try:
+        exec(compile(code, "<python函数>", "exec"), env)
+    except SyntaxError as e:
+        return False, _py_err_text("代码语法错误", e)
+    except Exception as e:
+        return False, _py_err_text("代码执行出错", e)
+    try:
+        fn = env.get(func_name)
+        if not callable(fn):
+            return False, f"未找到函数「{func_name}」"
+        # 同名形参自动传参：勾选变量里与函数形参同名的作关键字实参；其余仍注入环境
+        kwargs: dict = {}
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            sig = None
+        if sig is not None:
+            for pname, param in sig.parameters.items():
+                if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                  inspect.Parameter.KEYWORD_ONLY) and pname in env:
+                    kwargs[pname] = env[pname]
+            missing = [pname for pname, param in sig.parameters.items()
+                       if param.default is inspect.Parameter.empty
+                       and pname not in kwargs
+                       and param.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                                          inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                          inspect.Parameter.KEYWORD_ONLY)]
+            if missing:
+                return False, (f"调用 {func_name} 缺少必填参数：{', '.join(missing)}；"
+                               "请在变量列表勾选同名流程变量，或给形参设置默认值")
+        result = fn(**kwargs)
+    except Exception as e:
+        return False, _py_err_text(f"函数 {func_name} 执行出错", e)
+
+    variables[result_var] = result
+    return True, f"结果已保存到变量 {result_var}"
+
+
 def _coord_from_var(expr: str, variables: dict | None, default: int) -> int:
-    """解析坐标轴的变量引用：expr 为变量名时取其整数值，未定义/非数字回退默认值。"""
+    """解析坐标轴的变量引用：expr 为变量名（或下标表达式）时取其整数值，
+    未定义/非数字回退默认值。"""
     name = (expr or "").strip()
     if not name:
         return int(default)
-    value = (variables or {}).get(name)
-    if value is None:
-        log(f"坐标变量「{name}」未定义，使用固定坐标 {int(default)}")
+    from .values import resolve_variable
+    ok, value, why = resolve_variable(name, variables or {})
+    if not ok:
+        log(f"坐标变量「{name}」{why}，使用固定坐标 {int(default)}")
         return int(default)
     try:
         return int(float(value))
@@ -415,13 +620,15 @@ def _coord_from_pos_var(expr: str, variables: dict | None,
       - 坐标 "x,y"（如 "64,63"）→ 直接用该点；
       - 矩形区域 "x1,y1,x2,y2"（左上角+右下角，找图模块结果）→ 取区域中心点。
     也容忍列表/元组 [x, y] 或 [x1, y1, x2, y2]。未定义、格式不对时回退固定坐标。
+    expr 支持 aaa['a'] / arr[0] 等 Python 下标语法。
     """
     name = (expr or "").strip()
     if not name:
         return int(default_x), int(default_y)
-    value = (variables or {}).get(name)
-    if value is None:
-        log(f"坐标变量「{name}」未定义，使用固定坐标 ({int(default_x)},{int(default_y)})")
+    from .values import resolve_variable
+    ok, value, why = resolve_variable(name, variables or {})
+    if not ok:
+        log(f"坐标变量「{name}」{why}，使用固定坐标 ({int(default_x)},{int(default_y)})")
         return int(default_x), int(default_y)
     try:
         if isinstance(value, (list, tuple)):

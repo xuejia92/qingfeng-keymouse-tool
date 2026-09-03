@@ -207,6 +207,8 @@ class MainWindow(QMainWindow):
         self.flow_tab.changed.connect(self.schedule_tab.on_flows_changed)
         # 「每次运行清空日志」勾选状态持久化到配置
         self.log_panel.clearOnRunChanged.connect(self._on_clear_log_setting)
+        # 「只显示打印输出」勾选状态持久化到配置
+        self.log_panel.printOnlyChanged.connect(self._on_print_only_setting)
 
         self.settings_tab.changed.connect(self._on_settings_changed)
         manager.triggered.connect(self._dispatch_hotkey)
@@ -223,6 +225,7 @@ class MainWindow(QMainWindow):
         self._save_timer.setInterval(400)
         self._save_timer.timeout.connect(self.cfg.save)
         self.log_panel.clear_on_run = cfg.clear_log_on_run
+        self.log_panel.print_only = cfg.log_print_only
 
         self._register_hotkeys()
 
@@ -352,23 +355,21 @@ class MainWindow(QMainWindow):
         """
         tabs = """\
             QTabWidget::pane {
-                border: none; border-top: 1px solid #d8dee4;
+                border: none; border-top: 1px solid #e6eaef;
                 background: #f7f9fb; top: -1px;
             }
             QTabBar { background: #ffffff; border: none; }
             QTabBar::tab {
                 background: transparent; color: #57606a;
-                border: none; padding: 8px 20px; margin-right: 2px;
-                font-size: 11pt; font-weight: 500;
-                border-bottom: 3px solid transparent;
+                border: none; border-radius: 6px;
+                padding: 4px 16px; margin: 5px 2px;
+                font-size: 10pt; font-weight: 500;
             }
             QTabBar::tab:hover {
-                color: #1668a8; background: #f3f8fd;
-                border-bottom: 3px solid #a8cfeb;
+                color: #1668a8; background: #eef5fb;
             }
             QTabBar::tab:selected {
-                color: #1668a8; font-weight: 600; background: #eaf3fb;
-                border-bottom: 3px solid #1668a8;
+                color: #ffffff; background: #1668a8; font-weight: 600;
             }
         """
         self.setStyleSheet(self.styleSheet() + tabs)
@@ -437,6 +438,11 @@ class MainWindow(QMainWindow):
     def _on_clear_log_setting(self, checked: bool) -> None:
         """「每次运行清空日志」勾选状态变化：持久化到配置。"""
         self.cfg.clear_log_on_run = bool(checked)
+        self._save_timer.start()
+
+    def _on_print_only_setting(self, checked: bool) -> None:
+        """「只显示打印输出」勾选状态变化：持久化到配置。"""
+        self.cfg.log_print_only = bool(checked)
         self._save_timer.start()
 
     def _refresh_status_hint(self) -> None:

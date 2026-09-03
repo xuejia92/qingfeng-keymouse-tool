@@ -9,24 +9,30 @@ import os
 import subprocess
 
 from PySide6.QtCore import Qt, QPoint, QRect, Signal, QMimeData
-from PySide6.QtGui import QColor, QDrag, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QDrag, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-                               QPushButton, QRadioButton, QSpinBox, QStyle, QStyledItemDelegate,
-                               QStyleOptionViewItem, QToolTip, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QPushButton, QRadioButton, QSpinBox,
+                               QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+                               QToolTip, QVBoxLayout, QWidget)
 
 from ..config import VARIABLE_TYPES, WEB_ACTIONS, Flow, FlowStep
+from ..conditions import check_condition_variables
 from ..web_actors import LAUNCH_MODES, TAB_SCOPES
 from .hotkey_edit import HotkeyEdit
 
 MIME_TYPE = "application/x-qf-flow-type"
 
 _TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "text_find": "🔍",
-               "screenshot": "📷", "find_image": "🎯",
+               "screenshot": "📷", "find_image": "🎯", "yolo_detect": "🧠",
                "click": "🖱", "press": "⌨", "find": "🖼",
                "wait": "⏱", "web": "🌐", "app": "🚀", "close_app": "⏹",
-               "clip_set": "📤", "clip_get": "📥"}
+               "clip_set": "📤", "clip_get": "📥", "py_func": "🐍",
+               "if": "🔀", "elseif": "🔁", "else": "↩️", "endif": "🏁",
+               "foreach": "🔄", "while": "♻️",
+               "endForeach": "🏁", "endWhile": "🏁",
+               "break": "🛑", "continue": "⏭️", "exit": "🔚"}
 
 
 class ModuleButton(QPushButton):
@@ -441,12 +447,81 @@ class StepParamsDialog(QDialog):
                 QMessageBox.warning(self, "请设置结果变量",
                                     "请选择接收找图坐标的结果变量。")
                 return
+        # 目标检测步骤：模型路径必填且文件必须存在；必须选择结果变量
+        if self._step.type == "yolo_detect" and getattr(self, "model_path_edit", None) is not None:
+            path = self.model_path_edit.text().strip()
+            if not path:
+                QMessageBox.warning(self, "请设置模型路径",
+                                    "请输入 YOLOv5 模型文件路径，或点击「浏览…」选择模型文件。")
+                return
+            if not os.path.isfile(path):
+                QMessageBox.warning(self, "模型路径无效",
+                                    f"模型文件不存在：\n{path}\n\n请检查路径是否正确。")
+                return
+            if not self._combo_value(self.yolo_var):
+                QMessageBox.warning(self, "请设置结果变量",
+                                    "请选择接收检测结果列表的结果变量。")
+                return
+        # python函数：函数名必填；运行结果必须保存到指定变量
+        if self._step.type == "py_func" and getattr(self, "py_result_var", None) is not None:
+            if not self.func_edit.text().strip():
+                QMessageBox.warning(self, "请填写调用函数名",
+                                    "python函数步骤固定调用一个函数并取返回值，"
+                                    "请填写代码中定义的函数名。")
+                return
+            if not self._combo_value(self.py_result_var):
+                QMessageBox.warning(self, "请设置结果变量",
+                                    "请选择接收函数运行结果的流程变量。")
+                return
+        # if / elseif / while：条件必填，且引用的变量必须已在此分支之前定义
+        if self._step.type in ("if", "elseif", "while") and getattr(self, "cond_edit", None) is not None:
+            cond = self.cond_edit.text().strip()
+            if not cond:
+                QMessageBox.warning(self, "请填写条件表达式",
+                                    "请输入条件表达式，例如：x >= 1 && y <= 10")
+                return
+            flow, idx = self._flow_context()
+            if flow is not None and idx >= 0:
+                ok, missing = check_condition_variables(
+                    flow.steps, flow.variables, idx, cond)
+                if not ok:
+                    names = "、".join(missing)
+                    QMessageBox.warning(
+                        self, "变量未定义",
+                        f"第 {idx + 1} 步条件引用了尚未定义的变量：{names}\n\n"
+                        "请确保这些变量已在此分支之前通过「变量」步骤或其它输出步骤定义，"
+                        "或修正条件表达式。")
+                    return
+        # foreach：必须选择要遍历的数据源变量
+        if self._step.type == "foreach" and getattr(self, "foreach_items", None) is not None:
+            if not self._combo_value(self.foreach_items):
+                QMessageBox.warning(self, "请选择数据源",
+                                    "请选择要遍历的数据源变量（其值须为列表/字典/字符串）。")
+                return
         super().accept()
+
+    def _flow_context(self):
+        """返回 (当前流程, 本步骤在 flow.steps 中的索引)；获取不到返回 (None, -1)。
+
+        供条件分支变量校验使用：需要知道本步骤位于流程中的位置，才能判断
+        「此分支之前」已定义了哪些变量。
+        """
+        try:
+            tab = self.parent()
+            flow = tab._selected_flow() if tab is not None else None
+            if flow is None:
+                return None, -1
+            for i, s in enumerate(flow.steps):
+                if s is self._step:
+                    return flow, i
+            return flow, -1
+        except Exception:
+            return None, -1
 
     def _flow_var_names(self) -> list[str]:
         """当前流程中已声明的变量名（按 var 步骤出现顺序去重）。
 
-        供日志输出/文字识别的变量下拉、变量步骤的重名校验使用。
+        供打印输出/文字识别的变量下拉、变量步骤的重名校验使用。
         获取不到流程（无 parent 或非 FlowTab）时返回空列表。
         """
         try:
@@ -467,22 +542,27 @@ class StepParamsDialog(QDialog):
             return []
 
     def _var_combo(self, placeholder: str = "") -> QComboBox:
-        """构建非可编辑的变量下拉：只列流程中已声明的变量（「变量」步骤声明）。
+        """构建可编辑的变量下拉/输入框：既列流程中已声明的变量（「变量」步骤声明），
+        也支持手动输入。
 
-        首项为空占位；旧配置里保存的变量名不在列表时，由 _set_combo_value
-        动态补项保留，避免回填丢失。
+        首项为空占位；旧配置里保存的变量名/表达式不在列表时，由 _set_combo_value
+        动态补项保留，避免回填丢失。可编辑：既能下拉选已声明变量，也能直接输入
+        任意变量名或 Python 下标表达式（如 aaa['a']、arr[0]）。
         """
         combo = QComboBox()
+        combo.setEditable(True)
         combo.addItem(placeholder, "")
         for name in self._flow_var_names():
             combo.addItem(name, name)
+        combo.lineEdit().setPlaceholderText(placeholder or "变量名或下标表达式")
         return combo
 
     def _var_combo_hint(self, form: QFormLayout) -> None:
         """流程中还没有任何变量时，在表单里补一行引导提示。"""
         if self._flow_var_names():
             return
-        hint = QLabel("流程中暂无变量：先添加「变量」步骤声明，再回来选择。")
+        hint = QLabel("流程中暂无变量：可直接输入变量名（读取需变量已由前面的步骤产生，"
+                      "或先添加「变量」步骤声明）。")
         hint.setStyleSheet("color: #8a939c; font-size: 9pt;")
         hint.setWordWrap(True)
         form.addRow("", hint)
@@ -515,26 +595,157 @@ class StepParamsDialog(QDialog):
                 self.var_type.addItem(label, vt)
             form.addRow("变量类型", self.var_type)
             self.var_default = QLineEdit()
-            self.var_default.setPlaceholderText("按类型填写：字符串 / 数字 / true / false / [..] / {..}")
+            self.var_default.setPlaceholderText("值或表达式：$a + 1、$a + \"!\"、len($s)、[1, 2]")
+            self.var_default.setToolTip(
+                "默认值支持：\n"
+                "· 普通字面量：字符串 / 数字 / true·false / [..] / {..} / 任意文本\n"
+                "· 表达式：$变量名 引用、数学运算（+ - * / %）、字符串拼接（+）、\n"
+                "  下标（arr[0]）、比较（$n > 2）、len()/int()/str()/abs() 等白名单函数\n"
+                "示例：$count + 1、$name + \"先生\"、len($text)")
             form.addRow("默认值", self.var_default)
-            hint = QLabel("变量步骤会声明/覆盖一个运行时变量；后续日志输出、文字识别等步骤可用。")
+            hint = QLabel("变量步骤会声明/覆盖一个运行时变量；默认值可用 $变量名 引用前面的变量，\n"
+                          "也支持数学运算、字符串拼接与 len() 等基本函数。")
             hint.setStyleSheet("color: #8a939c;")
             hint.setWordWrap(True)
             form.addRow("", hint)
             # 变量名重复实时提示：失焦或输入时检查流程里是否已有同名变量
             self.var_name.editingFinished.connect(self._check_var_name)
 
+        elif t in ("if", "elseif"):
+            self.cond_edit = QLineEdit()
+            self.cond_edit.setPlaceholderText("例如：x >= 1 && y <= 10（支持 && || ! 与比较运算）")
+            self.cond_edit.setToolTip("支持：&& 与、|| 或、! 非、==/!=/</<=/>/>= 比较、"
+                                      "数字/字符串字面量、len() 等少量内置函数。"
+                                      "引用变量需已在此分支之前定义。")
+            form.addRow("条件表达式", self.cond_edit)
+            if t == "if":
+                hint = QLabel("「if」是条件块的起点，成对生成「endif 条件结束」。\n"
+                              "条件成立则执行 if 与 endif 之间的步骤；不成立则跳到"
+                              "下一个「否则如果 / 否则」，都没有则跳过整块。")
+            else:
+                hint = QLabel("「否则如果」在上一条件不成立时继续判断；可多次添加，"
+                              "须位于「否则」之前。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "else":
+            hint = QLabel("「否则」表示上方所有条件都不成立时执行的分支，无需配置。\n"
+                          "同一 if 块只能有一个「否则」，且必须位于 endif 之前。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "endif":
+            hint = QLabel("「条件结束」是随 if 自动生成的结构标记，与 if 成对出现，"
+                          "无需配置；删除 if 时会同步删除。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "foreach":
+            self.foreach_items = self._var_combo("变量或表达式")
+            self.foreach_items.setToolTip(
+                "数据源支持表达式：\n"
+                "· 变量/下标：arr、data['nums']、arr[0]\n"
+                "· $变量引用：$arr、$i + 1\n"
+                "· 函数与字面量：range(0, 3)、sorted($arr)、slice(0, $k)、\n"
+                "  $arr[slice(0, $k)]、len($s)、[1, 2, 3]\n"
+                "结果须可遍历（列表/字典/字符串/range 等）")
+            form.addRow("数据源", self.foreach_items)
+            self._var_combo_hint(form)
+            self.foreach_item_var = QLineEdit("item")
+            self.foreach_item_var.setToolTip("每轮把当前元素写入该变量（字典=值，列表/字符串=元素；"
+                                             "循环结束保留最后值）")
+            form.addRow("元素变量名", self.foreach_item_var)
+            self.foreach_index_var = QLineEdit("index")
+            self.foreach_index_var.setToolTip("每轮把下标写入该变量（字典=键，列表/字符串=数字下标）")
+            form.addRow("下标变量名", self.foreach_index_var)
+            hint = QLabel("「Foreach 循环」遍历数据源的每个元素，每轮把元素与下标写入上面两个变量，\n"
+                          "再执行 foreach 与「Foreach 循环结束」之间的步骤。数据源为列表/字符串按元素\n"
+                          "遍历、字典按「值→元素、键→下标」遍历；空数据直接跳过整块。\n"
+                          "数据源也支持直接填表达式：range(0, 3)、sorted($arr)、$arr[slice(0, $k)] 等。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "while":
+            self.cond_edit = QLineEdit()
+            self.cond_edit.setPlaceholderText("例如：i < 3；直接填 true 可无限循环")
+            self.cond_edit.setToolTip("支持：&& 与、|| 或、! 非、==/!=/</<=/>/>= 比较、"
+                                      "数字/字符串字面量、len() 等白名单函数；"
+                                      "小写 true / false 表示恒真/恒假。\n"
+                                      "直接填 true 构成无限循环，需在循环体内用 "
+                                      "break 中断或手动停止（无 break 时达上限自动终止）。\n"
+                                      "引用变量需已在此循环之前定义。")
+            form.addRow("循环条件", self.cond_edit)
+            hint = QLabel("「while 循环」在条件成立时反复执行 while 与「while 循环结束」之间的步骤，\n"
+                          "直到条件不成立。循环体内可用 break 中断；请在体内修改条件引用的变量，\n"
+                          "否则会一直循环（达到上限会自动终止）。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "endForeach":
+            hint = QLabel("「Foreach 循环结束」是随 foreach 自动生成的结构标记，与 foreach 成对出现，"
+                          "无需配置；删除 foreach 时会同步删除。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "endWhile":
+            hint = QLabel("「while 循环结束」是随 while 自动生成的结构标记，与 while 成对出现，"
+                          "无需配置；删除 while 时会同步删除。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "break":
+            hint = QLabel("「break 中断循环」立即跳出最内层的 Foreach/while 循环，继续执行该循环"
+                          "结束标记之后的步骤。无需配置，且只能放在循环体内部。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "continue":
+            hint = QLabel("「continue 继续循环」跳过本次循环体的剩余步骤，直接进入下一次迭代。"
+                          "无需配置，且只能放在循环体内部。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "exit":
+            self.exit_var = self._var_combo("（不打印变量）")
+            self.exit_var.setToolTip("可选：退出流程前在日志中打印该变量的值，便于定位退出时状态")
+            form.addRow("退出前打印变量（可选）", self.exit_var)
+            self._var_combo_hint(form)
+            hint = QLabel("「退出流程」执行到这一步时立即终止整个流程，后续步骤不再执行。\n"
+                          "可选在上方选择一个变量：退出前会先把它的值打印到日志。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
         elif t == "log":
             self.log_vars = QComboBox()
-            self.log_vars.addItem("全部变量", "")
+            self.log_vars.setEditable(True)   # 可编辑：既能下拉选已声明变量，也能手动输入（多个用逗号分隔）
+            self.log_vars.addItem("无", "")
             for name in self._flow_var_names():
                 self.log_vars.addItem(name, name)
-            self.log_vars.setToolTip("下拉选择要输出的变量；选「全部变量」输出全部")
-            form.addRow("输出变量", self.log_vars)
+            self.log_vars.setToolTip("下拉选择或直接输入要打印的变量名；多个用逗号分隔；"
+                                     "选「无」（留空）则不打印任何变量。\n"
+                                     "原始输出模式下，变量后加 \\n 换行、加 \\b 空格，"
+                                     "否则多个变量直接拼接（不换行）")
+            self.log_vars.lineEdit().setPlaceholderText("变量名，多个用逗号分隔（空=不打印；原始输出可加 \\n/\\b 控制分隔）")
+            form.addRow("打印变量", self.log_vars)
             self.log_text = QLineEdit()
-            self.log_text.setPlaceholderText("附加文本，可用 $变量名 引用（可选）")
+            self.log_text.setPlaceholderText("附加文本，可用 $变量名 引用；\\n 换行、\\b 空格（可选）")
+            self.log_text.setToolTip("附加文本支持 $变量名 引用；字面量 \\n 会转成换行、\\b 转成空格")
             form.addRow("附加文本", self.log_text)
-            hint = QLabel("运行时会输出到底部日志/悬浮日志控制台，便于调试流程。")
+            self.raw_check = QCheckBox("原始输出")
+            self.raw_check.setToolTip("勾选后，输出内容原样写入日志：不加时间戳、不自动换行（适合拼接连续内容）")
+            form.addRow("原始输出", self.raw_check)
+            hint = QLabel("运行时会打印到底部日志（蓝色字体显示），便于调试流程。\n"
+                          "勾选「原始输出」后不加时间戳、不自动换行，内容原样显示。")
             hint.setStyleSheet("color: #8a939c;")
             form.addRow("", hint)
 
@@ -775,6 +986,110 @@ class StepParamsDialog(QDialog):
             hint.setWordWrap(True)
             form.addRow("", hint)
 
+        elif t == "yolo_detect":
+            # 模型路径：手动输入或文件浏览（浏览选取后也可再改）
+            model_row = QHBoxLayout()
+            self.model_path_edit = QLineEdit()
+            self.model_path_edit.setPlaceholderText("YOLOv5 模型文件路径（.pt），可手动输入或点击「浏览…」")
+            self.model_path_edit.setToolTip("YOLOv5 训练得到的 .pt 模型文件；路径不存在时保存会被拦截提示")
+            self.model_path_edit.editingFinished.connect(self._check_model_path)
+            browse_btn = QPushButton("📁 浏览…")
+            browse_btn.setToolTip("从本地选择 YOLOv5 模型文件")
+            browse_btn.clicked.connect(self._pick_model_file)
+            model_row.addWidget(self.model_path_edit, 1)
+            model_row.addWidget(browse_btn)
+            form.addRow("模型路径", model_row)
+
+            # 检测范围：空=全屏；可框选或手动输入左上/右下角坐标（与找图一致）
+            region_row = QHBoxLayout()
+            self.region_edit = QLineEdit()
+            self.region_edit.setReadOnly(True)
+            self.region_edit.setToolTip("左上角 x,y 与宽高；空=全屏（整个虚拟桌面）")
+            pick_region = QPushButton("框选区域…")
+            pick_region.clicked.connect(self._request_region)
+            pick_region.setToolTip("隐藏本窗口后框选检测区域（与找图/文字识别区域一致）")
+            clear_region = QPushButton("恢复全屏")
+            clear_region.clicked.connect(lambda: self._set_region_text(None))
+            region_row.addWidget(self.region_edit, 1)
+            region_row.addWidget(pick_region)
+            region_row.addWidget(clear_region)
+            form.addRow("检测范围", region_row)
+
+            manual_row = QHBoxLayout()
+            self.manual_edit = QLineEdit()
+            self.manual_edit.setPlaceholderText("左上x,左上y,右下x,右下y（如 100,200,400,500）")
+            self.manual_edit.setToolTip("直接输入矩形区域左上角与右下角坐标，4 个数字逗号分隔")
+            apply_btn = QPushButton("应用")
+            apply_btn.setToolTip("解析输入坐标并设为检测范围")
+            apply_btn.clicked.connect(self._apply_manual_region)
+            manual_row.addWidget(self.manual_edit, 1)
+            manual_row.addWidget(apply_btn)
+            form.addRow("坐标输入", manual_row)
+
+            # 检测类别：留空=全部；逗号分隔多个类别名；支持 $变量名 引用
+            self.classes_edit = QLineEdit()
+            self.classes_edit.setPlaceholderText("留空=检测全部类别；多个用逗号分隔，如 person,car；支持 $变量名")
+            self.classes_edit.setToolTip("只返回此处列出的类别（名称需与模型类别名一致）；留空则返回全部检测到的类别")
+            form.addRow("检测类别", self.classes_edit)
+
+            # 置信度阈值：默认 0.5（自训练模型建议 0.2~0.5，设太高会什么都检不出）
+            self.confidence = QDoubleSpinBox()
+            self.confidence.setRange(0.05, 0.99)
+            self.confidence.setDecimals(2)
+            self.confidence.setSingleStep(0.01)
+            self.confidence.setValue(0.5)
+            self.confidence.setToolTip("只保留置信度不低于该值的检测结果；自训练模型建议 0.2~0.5，过高会检不出")
+            form.addRow("置信度阈值", self.confidence)
+
+            # 推理设备：默认 cuda
+            self.device_combo = QComboBox()
+            self.device_combo.addItem("cuda（显卡加速）", "cuda")
+            self.device_combo.addItem("cpu", "cpu")
+            self.device_combo.setToolTip("默认 cuda；无 NVIDIA 显卡 / CUDA 不可用时请选 cpu")
+            form.addRow("推理设备", self.device_combo)
+
+            # 附加动作：检测成功（有目标）后对最高置信度目标中心执行鼠标操作
+            self.action_combo = QComboBox()
+            for k, v in (("无操作", "none"), ("左键单击", "left"),
+                         ("右键单击", "right"), ("左键双击", "double")):
+                self.action_combo.addItem(k, v)
+            self.action_combo.setToolTip("检测到目标后，对置信度最高的目标中心执行所选鼠标操作")
+            form.addRow("附加动作", self.action_combo)
+
+            # 结果变量：list[dict]，每项含 class / confidence / region
+            self.yolo_var = self._var_combo("（选择变量）")
+            self.yolo_var.setToolTip(
+                "检测结果列表写入该变量：每项为字典，含 class（类别）、confidence（置信度）、\n"
+                "region（\"左上x,左上y,右下x,右下y\"）；未检测到目标时写入空列表 []")
+            form.addRow("结果变量", self.yolo_var)
+            self._var_combo_hint(form)
+
+            # 效果预览：红框标注检测目标（左上类别、右上置信度），可设持续时间
+            preview_row = QHBoxLayout()
+            self.preview_check = QCheckBox("检测到目标后红框高亮")
+            self.preview_check.setToolTip("勾选后，检测到的目标用红框标出：左上角显示类别，右上角显示置信度")
+            self.preview_spin = QDoubleSpinBox()
+            self.preview_spin.setRange(0.1, 10.0)
+            self.preview_spin.setDecimals(1)
+            self.preview_spin.setSingleStep(0.1)
+            self.preview_spin.setValue(1.0)
+            self.preview_spin.setSuffix(" 秒")
+            self.preview_spin.setEnabled(False)
+            self.preview_check.toggled.connect(self.preview_spin.setEnabled)
+            preview_row.addWidget(self.preview_check)
+            preview_row.addWidget(self.preview_spin)
+            preview_row.addStretch(1)
+            form.addRow("效果预览", preview_row)
+
+            hint = QLabel("用 YOLOv5 模型在屏幕 / 指定区域做目标检测：结果以列表写入结果变量（按置信度从高到低），\n"
+                          "未检测到写入空列表 []（步骤不会因未检测到而失败，可据此分支）。\n"
+                          "置信度阈值建议 0.2~0.5：自训练模型置信度普遍偏低，阈值设太高会什么都检不出。\n"
+                          "模型支持 .pt 与 .onnx：.pt 需 pip install torch ultralytics（旧版 v5~v7 模型会自动改用\n"
+                          "yolov5 仓库加载，本地仓库免联网）；.onnx 仅需 pip install onnxruntime，最轻量且完全离线。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
         elif t == "click":
             self.btn_combo = QComboBox()
             for k, v in (("鼠标左键", "left"), ("鼠标右键", "right"), ("鼠标中键", "middle")):
@@ -1009,6 +1324,73 @@ class StepParamsDialog(QDialog):
             self.web_action.currentIndexChanged.connect(self._sync_web_rows)
             self.tab_scope_combo.currentIndexChanged.connect(self._sync_web_rows)
 
+        elif t == "py_func":
+            # 代码编辑框：等宽字体，placeholder 给出常用示例
+            self.code_edit = QPlainTextEdit()
+            code_font = QFont("Consolas")
+            code_font.setPointSize(10)
+            self.code_edit.setFont(code_font)
+            self.code_edit.setPlaceholderText(
+                "把 def 函数定义或任意 Python 代码粘贴到这里，例如：\n"
+                "import datetime\n"
+                "def print_current_time(date_format=\"%Y-%m-%d\", "
+                "time_format=\"%H:%M:%S\"):\n"
+                "    now = datetime.datetime.now()\n"
+                "    date_part = now.strftime(date_format)\n"
+                "    time_part = now.strftime(time_format)\n"
+                "    return f\"{date_part} {time_part}\"")
+            self.code_edit.setMinimumHeight(210)
+            form.addRow("Python 代码", self.code_edit)
+
+            self.func_edit = QLineEdit()
+            self.func_edit.setPlaceholderText("如 print_current_time —— 代码中定义的函数名（必填）")
+            form.addRow("调用函数名", self.func_edit)
+
+            # 可引用变量：动态增删的流程变量列表（与形参同名则自动传入，其余注入环境）
+            self._py_var_combos: list[QComboBox] = []
+            self._py_var_rows: list[QWidget] = []
+            var_widget = QWidget()
+            var_outer = QVBoxLayout(var_widget)
+            var_outer.setContentsMargins(0, 0, 0, 0)
+            var_outer.setSpacing(4)
+            self._py_var_box = QVBoxLayout()
+            self._py_var_box.setContentsMargins(0, 0, 0, 0)
+            self._py_var_box.setSpacing(4)
+            var_outer.addLayout(self._py_var_box)
+            self._py_add_btn = QPushButton("➕ 添加变量")
+            self._py_add_btn.setCursor(Qt.PointingHandCursor)
+            self._py_add_btn.setToolTip(
+                "把流程中声明的变量加进来：与函数形参同名的会自动作为参数传入函数，"
+                "其余注入代码环境供内部读取")
+            self._py_add_btn.clicked.connect(lambda: self._add_py_var_row())
+            var_outer.addWidget(self._py_add_btn, 0, Qt.AlignLeft)
+            self._py_no_var_hint = QLabel("流程中暂无变量：先添加「变量」步骤声明，"
+                                          "即可在这里勾选供代码使用。")
+            self._py_no_var_hint.setStyleSheet("color: #8a939c; font-size: 9pt;")
+            self._py_no_var_hint.setWordWrap(True)
+            var_outer.addWidget(self._py_no_var_hint)
+            form.addRow("参数传入变量", var_widget)
+
+            # 结果变量：函数返回值保存到这里
+            self.py_result_var = self._var_combo("（选择变量）")
+            self.py_result_var.setToolTip(
+                "函数返回值将写入该流程变量，供后续步骤使用")
+            form.addRow("结果保存到", self.py_result_var)
+            self._var_combo_hint(form)
+
+            hint = QLabel("运行逻辑：\n"
+                          "· 先执行上方代码，再调用「调用函数名」指定的函数，把返回值作为结果；\n"
+                          "· 「参数传入变量」勾选的变量：与函数形参**同名**的会自动作为参数传入"
+                          "（如变量 date_format、time_format 勾选后 → "
+                          "print_current_time(date_format=值, time_format=值)），"
+                          "不同名的仍注入代码环境，函数体内可直接读取；\n"
+                          "· 函数必填形参若无同名变量可传且无默认值，运行时会明确报错；\n"
+                          "· 结果会保存到上方选择的流程变量，供后续步骤使用。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+            self._refresh_py_var_state()
+
         root.addLayout(form)
 
         if t in ("find", "web"):
@@ -1121,6 +1503,66 @@ class StepParamsDialog(QDialog):
                 self.target_edit.setToolTip(
                     f"实际按进程名 {self._close_app_name} 关闭（含同名子进程）")
 
+    # ---------- python函数步骤：代码可引用变量（动态增删） ----------
+    def _add_py_var_row(self, name: str = ""):
+        """追加一行「流程变量」下拉；旧配置残留的名字经 _set_combo_value 补项保留。"""
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        combo = self._var_combo("（选择流程变量）")
+        combo.setToolTip("与函数形参同名时会自动作为参数传入；不同名的注入代码环境供函数内部读取")
+        self._set_combo_value(combo, name)
+        lay.addWidget(combo, 1)
+        rm = QPushButton("🗑")
+        rm.setFixedSize(36, 28)
+        rm.setCursor(Qt.PointingHandCursor)
+        rm.setToolTip("移除该变量")
+        rm.setStyleSheet(
+            "QPushButton { border: 1px solid #e1e4e8; border-radius: 4px;"
+            " background: #ffffff; color: #c0392b; font-weight: 600; }"
+            "QPushButton:hover { background: #fdeeee; border-color: #e0a0a0; }")
+        rm.clicked.connect(lambda _, c=combo: self._remove_py_var_row(c))
+        lay.addWidget(rm)
+        self._py_var_box.addWidget(row)
+        self._py_var_rows.append(row)
+        self._py_var_combos.append(combo)
+        self.adjustSize()
+
+    def _remove_py_var_row(self, combo: QComboBox):
+        """移除某变量行。摘除父级的三步顺序见 _clear_py_var_rows 注释。"""
+        row = combo.parentWidget()
+        if row is None:
+            return
+        self._py_var_box.removeWidget(row)
+        if combo in self._py_var_combos:
+            self._py_var_combos.remove(combo)
+        if row in self._py_var_rows:
+            self._py_var_rows.remove(row)
+        row.hide()
+        row.setParent(None)
+        row.deleteLater()
+        self.adjustSize()
+
+    def _clear_py_var_rows(self):
+        """清空全部变量行。动态子控件必须 hide → setParent(None) → deleteLater 三步，
+        否则可见控件脱离父级的瞬间会闪成顶层窗口（见项目沉淀的 _clear_layout 教训）。"""
+        for combo in self._py_var_combos:
+            row = combo.parentWidget()
+            if row is not None:
+                self._py_var_box.removeWidget(row)
+                row.hide()
+                row.setParent(None)
+                row.deleteLater()
+        self._py_var_combos.clear()
+        self._py_var_rows.clear()
+
+    def _refresh_py_var_state(self):
+        """流程有变量才显示「添加变量」按钮；没有则显示引导提示。"""
+        has = bool(self._flow_var_names())
+        self._py_add_btn.setVisible(has)
+        self._py_no_var_hint.setVisible(not has)
+
     # ---------- 网页步骤：按操作类型显隐参数行 ----------
     def _web_row(self, form: QFormLayout, key: str, label: str, field) -> None:
         """登记一行（key 决定它在哪种操作下显示）。"""
@@ -1166,7 +1608,7 @@ class StepParamsDialog(QDialog):
     @staticmethod
     def _set_combo_value(combo: QComboBox, value: str):
         """回填变量下拉：值在列表里就选中该项；不在列表（旧配置残留）时补项选中，
-        保证再次保存不丢失；空值选第一项（占位/全部变量）。"""
+        保证再次保存不丢失；空值选第一项（占位项）。"""
         value = (value or "").strip()
         if not value:
             combo.setCurrentIndex(0)
@@ -1182,7 +1624,7 @@ class StepParamsDialog(QDialog):
 
     @staticmethod
     def _combo_value(combo: QComboBox) -> str:
-        """读取可编辑下拉的值：当前显示文本与选中项一致时用 data（如「全部变量」→空），
+        """读取可编辑下拉的值：当前显示文本与选中项一致时用 data（如「无」→空），
         否则用用户手动输入的文本（如 'a,b'）。"""
         text = combo.currentText().strip()
         idx = combo.currentIndex()
@@ -1200,9 +1642,18 @@ class StepParamsDialog(QDialog):
             self.var_name.setText(p.get("name", "") or "")
             self.var_type.setCurrentIndex(max(0, self.var_type.findData(p.get("type", "string"))))
             self.var_default.setText(str(p.get("default_value", "") or ""))
+        elif t in ("if", "elseif", "while"):
+            self.cond_edit.setText(p.get("condition", "") or "")
+        elif t == "foreach":
+            self._set_combo_value(self.foreach_items, p.get("items", "") or "")
+            self.foreach_item_var.setText(p.get("item_var", "item") or "")
+            self.foreach_index_var.setText(p.get("index_var", "index") or "")
+        elif t == "exit":
+            self._set_combo_value(self.exit_var, p.get("variable", "") or "")
         elif t == "log":
             self._set_combo_value(self.log_vars, p.get("variables", "") or "")
             self.log_text.setText(p.get("text", "") or "")
+            self.raw_check.setChecked(bool(p.get("raw")))
         elif t == "clip_set":
             self._set_combo_value(self.clip_name, p.get("name", "") or "")
             self.clip_text.setText(p.get("text", "") or "")
@@ -1236,6 +1687,19 @@ class StepParamsDialog(QDialog):
             self.confidence.setValue(float(p.get("confidence", 0.85)))
             self._set_region_text(p.get("region", "") or "")
             self._set_combo_value(self.find_var, p.get("variable", "") or "")
+            self.preview_check.setChecked(bool(p.get("preview")))
+            self.preview_spin.setValue(float(p.get("preview_duration", 1.0) or 1.0))
+            self.preview_spin.setEnabled(self.preview_check.isChecked())
+        elif t == "yolo_detect":
+            self.model_path_edit.setText(p.get("model_path", "") or "")
+            self._set_region_text(p.get("region", "") or "")
+            self.classes_edit.setText(p.get("classes", "") or "")
+            self.confidence.setValue(float(p.get("confidence", 0.5)))
+            self.device_combo.setCurrentIndex(
+                max(0, self.device_combo.findData(p.get("device", "cuda"))))
+            self.action_combo.setCurrentIndex(
+                max(0, self.action_combo.findData(p.get("action", "none"))))
+            self._set_combo_value(self.yolo_var, p.get("variable", "") or "")
             self.preview_check.setChecked(bool(p.get("preview")))
             self.preview_spin.setValue(float(p.get("preview_duration", 1.0) or 1.0))
             self.preview_spin.setEnabled(self.preview_check.isChecked())
@@ -1297,6 +1761,16 @@ class StepParamsDialog(QDialog):
             self.match_edit.setText(p.get("match_text", "") or "")
             self.continue_box.setChecked(step.continue_on_fail)
             self._sync_web_rows()
+        elif t == "py_func":
+            self.code_edit.setPlainText(p.get("code", "") or "")
+            self.func_edit.setText(p.get("func_name", "") or "")
+            self._clear_py_var_rows()
+            for n in p.get("variables") or []:
+                n = (str(n) or "").strip()
+                if n:
+                    self._add_py_var_row(n)
+            self._set_combo_value(self.py_result_var, p.get("result_var", "") or "")
+            self._refresh_py_var_state()
 
     def _fill_background(self, p: dict) -> None:
         """回填后台操作/窗口绑定字段（click/press）。"""
@@ -1312,10 +1786,21 @@ class StepParamsDialog(QDialog):
                 "type": self.var_type.currentData(),
                 "default_value": self.var_default.text(),
             })
+        elif t in ("if", "elseif", "while"):
+            step.params.update({"condition": self.cond_edit.text().strip()})
+        elif t == "foreach":
+            step.params.update({
+                "items": self._combo_value(self.foreach_items),
+                "item_var": self.foreach_item_var.text().strip() or "item",
+                "index_var": self.foreach_index_var.text().strip() or "index",
+            })
+        elif t == "exit":
+            step.params.update({"variable": self._combo_value(self.exit_var)})
         elif t == "log":
             step.params.update({
                 "variables": self._combo_value(self.log_vars),
                 "text": self.log_text.text(),
+                "raw": self.raw_check.isChecked(),
             })
         elif t == "clip_set":
             step.params.update({
@@ -1354,6 +1839,18 @@ class StepParamsDialog(QDialog):
                 "confidence": round(self.confidence.value(), 2),
                 "region": getattr(self, "_region", step.params.get("region", "")) or "",
                 "variable": self._combo_value(self.find_var),
+                "preview": self.preview_check.isChecked(),
+                "preview_duration": self.preview_spin.value(),
+            })
+        elif t == "yolo_detect":
+            step.params.update({
+                "model_path": self.model_path_edit.text().strip(),
+                "region": getattr(self, "_region", step.params.get("region", "")) or "",
+                "classes": self.classes_edit.text().strip(),
+                "confidence": round(self.confidence.value(), 2),
+                "device": self.device_combo.currentData(),
+                "action": self.action_combo.currentData(),
+                "variable": self._combo_value(self.yolo_var),
                 "preview": self.preview_check.isChecked(),
                 "preview_duration": self.preview_spin.value(),
             })
@@ -1420,6 +1917,18 @@ class StepParamsDialog(QDialog):
                 "match_text": self.match_edit.text().strip(),
             })
             step.continue_on_fail = self.continue_box.isChecked()
+        elif t == "py_func":
+            used: list[str] = []
+            for combo in self._py_var_combos:
+                n = self._combo_value(combo)
+                if n and n not in used:
+                    used.append(n)
+            step.params.update({
+                "code": self.code_edit.toPlainText(),
+                "func_name": self.func_edit.text().strip(),
+                "variables": used,
+                "result_var": self._combo_value(self.py_result_var),
+            })
 
     def _apply_background(self, step: FlowStep) -> None:
         """把后台操作/窗口绑定字段写回步骤参数（click/press）。"""
@@ -1467,6 +1976,24 @@ class StepParamsDialog(QDialog):
             self.show()
             self.raise_()
             self.activateWindow()
+
+    # ---------- 目标检测：模型文件 ----------
+    def _pick_model_file(self):
+        """浏览选择 YOLOv5 模型文件（选完仍可手动改路径）。"""
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 YOLOv5 模型文件", os.path.expanduser("~"),
+            "模型文件 (*.pt *.onnx *.engine);;所有文件 (*)")
+        if path:
+            self.model_path_edit.setText(path)
+
+    def _check_model_path(self):
+        """手动输入模型路径失焦时即时校验：非空但文件不存在则提示（不拦截继续编辑）。"""
+        path = self.model_path_edit.text().strip()
+        if path and not os.path.isfile(path):
+            QMessageBox.warning(self, "模型路径无效",
+                                f"模型文件不存在：\n{path}\n\n请检查路径是否正确。")
+
 
     def _update_preview(self):
         """显示模板实际图片（等比缩放到预览框）；缺失时显示占位文字。"""

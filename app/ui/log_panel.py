@@ -7,27 +7,32 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QPlainTextEdit,
                                QPushButton, QVBoxLayout, QWidget)
 
 _MAX_BLOCKS = 400          # 最多保留的日志行数
 _TEXT_HEIGHT = 180         # 日志文本区展开后的高度
+_PRINT_COLOR = "#1668a8"   # 打印输出模块输出的文字颜色（蓝）
+_NORMAL_COLOR = "#24292f"  # 普通日志文字颜色
 
 
 class LogPanel(QWidget):
     """内嵌日志面板：折叠头 + 可显隐的日志文本区。
 
-    折叠头右侧带「每次运行清空日志」复选框和「清空日志」按钮。
+    折叠头右侧带「只显示打印输出模块的输出」「每次运行清空日志」复选框
+    和「清空日志」按钮。打印输出模块的输出以蓝色字体显示。
     """
 
     expandedChanged = Signal(bool)       # 展开状态变化（供主窗口调整窗口高度）
     clearOnRunChanged = Signal(bool)     # 「每次运行清空」勾选状态变化（供主窗口持久化）
+    printOnlyChanged = Signal(bool)      # 「只显示打印输出」勾选状态变化（供主窗口持久化）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._expanded = False
         self._summary = ""
+        self._entries: list[tuple[str, str]] = []   # [(文本, 种类)]，用于过滤切换时重渲染
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -60,9 +65,20 @@ class LogPanel(QWidget):
         """)
         head_row.addWidget(self._header, 1)
 
+        self.print_only_box = QCheckBox("只显示打印输出模块的输出")
+        self.print_only_box.setToolTip(
+            "勾选后，底部日志只显示「打印输出」模块的输出（蓝色）；"
+            "取消勾选则同时显示系统/流程等普通日志")
+        self.print_only_box.setChecked(True)   # 默认勾选
+        self.print_only_box.setStyleSheet(
+            "QCheckBox { font-size: 9pt; color: #57606a; }")
+        self.print_only_box.toggled.connect(self._on_print_only_toggled)
+        head_row.addWidget(self.print_only_box)
+
         self.clear_on_run_box = QCheckBox("每次运行清空日志")
         self.clear_on_run_box.setToolTip(
             "勾选后，每次启动流程（含单步执行）时自动清空全部运行日志")
+        self.clear_on_run_box.setChecked(True)   # 默认勾选
         self.clear_on_run_box.setStyleSheet(
             "QCheckBox { font-size: 9pt; color: #57606a; }")
         self.clear_on_run_box.toggled.connect(self.clearOnRunChanged.emit)
@@ -125,12 +141,37 @@ class LogPanel(QWidget):
             self._header.setChecked(expanded)   # 触发 _on_toggle
 
     # ---------- 日志与摘要 ----------
-    def append(self, text: str) -> None:
-        self._text.appendPlainText(text)
+    def append(self, text: str, kind: str = "log") -> None:
+        """追加一条日志。kind="print" 用蓝色显示，其余用默认色。
+
+        只缓存文本 + 种类，渲染交给 _rerender：这样切换「只显示打印输出」时
+        普通日志能即时隐藏/恢复，而不是丢弃后无法找回。
+        """
+        self._entries.append((text, kind))
+        if len(self._entries) > _MAX_BLOCKS:
+            del self._entries[:len(self._entries) - _MAX_BLOCKS]
+        self._rerender()
+
+    def _rerender(self) -> None:
+        print_fmt = QTextCharFormat()
+        print_fmt.setForeground(QColor(_PRINT_COLOR))
+        normal_fmt = QTextCharFormat()
+        normal_fmt.setForeground(QColor(_NORMAL_COLOR))
+
+        self._text.clear()
+        cursor = self._text.textCursor()
+        for text, kind in self._entries:
+            if self.print_only and kind not in ("print", "print_raw"):
+                continue
+            cursor.movePosition(QTextCursor.End)
+            fmt = print_fmt if kind in ("print", "print_raw") else normal_fmt
+            suffix = "" if kind == "print_raw" else "\n"   # 原始输出不自动换行
+            cursor.insertText(text + suffix, fmt)
         self._text.moveCursor(QTextCursor.End)
 
     def clear(self) -> None:
-        """清空全部运行日志。"""
+        """清空全部运行日志（含缓存）。"""
+        self._entries.clear()
         self._text.clear()
 
     @property
@@ -141,6 +182,19 @@ class LogPanel(QWidget):
     @clear_on_run.setter
     def clear_on_run(self, value: bool) -> None:
         self.clear_on_run_box.setChecked(bool(value))
+
+    @property
+    def print_only(self) -> bool:
+        """是否只显示「打印输出」模块的输出。"""
+        return self.print_only_box.isChecked()
+
+    @print_only.setter
+    def print_only(self, value: bool) -> None:
+        self.print_only_box.setChecked(bool(value))
+
+    def _on_print_only_toggled(self, checked: bool) -> None:
+        self.printOnlyChanged.emit(checked)
+        self._rerender()
 
     def set_summary(self, text: str) -> None:
         """运行摘要显示在折叠头（如「鼠标连点 · 找图:登录」）。"""

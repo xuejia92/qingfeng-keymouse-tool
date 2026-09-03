@@ -10,16 +10,18 @@ import copy
 import dataclasses
 import json
 import os
-import threading
 import uuid
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QFileDialog, QFrame, QGroupBox, QHBoxLayout, QInputDialog,
-                               QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-                               QPushButton, QScrollArea, QSizePolicy, QSplitter,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+                               QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from ..conditions import (BLOCK_CLOSE_TYPES, BLOCK_OPEN_TYPES, BLOCK_PAIRS,
+                          block_indent_levels, block_indices, enclosing_if,
+                          enclosing_loop, match_endif, validate_block_structure)
 from ..config import (AppConfig, BASE_DIR, FLOW_STEP_TYPES, FLOWS_DIR, Flow,
                       FlowStep, default_step_params, flow_from_file, flow_to_dict,
                       repair_web_pairs, safe_filename, web_action)
@@ -33,12 +35,31 @@ from .widgets import set_variant
 
 # 模块面板分组：组 id -> (分组标题, 模块类型列表)。顺序即面板显示顺序，
 # 组 id 同时用于持久化收起状态（config.json 的 collapsed_module_groups）。
+# 注意：endif 是随 if 自动生成的结构标记（见 config.AUTO_STEP_TYPES），不出现在面板。
 MODULE_GROUPS = [
     ("input",    "键鼠操作",   ["click", "press", "find"]),
-    ("perceive", "目标识别",   ["ocr", "text_find", "screenshot", "find_image"]),
+    ("perceive", "目标识别",   ["ocr", "text_find", "screenshot", "find_image", "yolo_detect"]),
     ("app_web",  "应用与网页", ["app", "close_app", "web"]),
-    ("logic",    "变量与日志", ["var", "wait", "log", "clip_set", "clip_get"]),
+    ("logic",    "常用",       ["var", "wait", "log", "clip_set", "clip_get", "exit"]),
+    ("condition", "条件分支",  ["if", "elseif", "else", "foreach", "while", "break", "continue"]),
+    ("python",   "python",     ["py_func"]),
 ]
+
+# 步骤列表里条件块内每深一层的缩进前缀（2 个全角空格：宽度稳定、一眼可辨层级）。
+INDENT_UNIT = "　　"
+
+# 分支头类型：可单独删除，删除只影响该分支头本身，不牵连同块的 if / endif
+# 与其它分支（删除 if / endif 仍按整块删除，见 FlowTab._del_step）。
+BRANCH_TYPES = ("elseif", "else")
+
+# 结束标记 -> 起始块反向映射；以及整块删除时按起始块类型展示的块名 / 提示文案。
+_CLOSE_TO_OPEN = {v: k for k, v in BLOCK_PAIRS.items()}
+_BLOCK_KIND = {"if": "条件块", "foreach": "Foreach 循环块", "while": "while 循环块"}
+_BLOCK_DEL_MSG = {
+    "if": "已删除整个 if 条件块（含 endif 与分支）",
+    "foreach": "已删除整个 Foreach 循环块（含结束标记与循环体内步骤）",
+    "while": "已删除整个 while 循环块（含结束标记与循环体内步骤）",
+}
 
 
 def _clone_flow(flow: Flow) -> Flow:
@@ -70,6 +91,7 @@ class FlowTab(QWidget):
         self._silent: set[str] = set()
         self._capture_step_dlg = None
         self._ratio_applied = False
+        self._searching = False        # 模块面板搜索中：此时收起/展开分组不落盘
         self._build_ui()
         self.refresh_list()
 
@@ -162,6 +184,21 @@ class FlowTab(QWidget):
             }
             QWidget#flowTab QScrollArea#moduleScroll {
                 background: transparent; border: none;
+            }
+            /* 模块搜索输入框与清空按钮（面板底部）。清空按钮选择器必须带上
+               modulePanel 前缀 + id，否则被上方更具体的 QGroupBox#modulePanel QPushButton 压过。 */
+            QWidget#flowTab QLineEdit#moduleSearch {
+                border: 1px solid #d8dee4; border-radius: 6px;
+                padding: 5px 8px; font-size: 10pt; background: white; color: #24292f;
+            }
+            QWidget#flowTab QLineEdit#moduleSearch:focus { border-color: #1668a8; }
+            QWidget#flowTab QGroupBox#modulePanel QPushButton#moduleSearchClear {
+                text-align: center; padding: 4px 10px;
+                font-size: 10pt; border: 1px solid #d8dee4;
+                border-radius: 6px; background: white; color: #1668a8;
+            }
+            QWidget#flowTab QGroupBox#modulePanel QPushButton#moduleSearchClear:hover {
+                border-color: #1668a8; background: #f3f8fd;
             }
         """)
 
@@ -274,10 +311,11 @@ class FlowTab(QWidget):
         scroll_lay.setSpacing(2)
 
         self._module_btns = []                       # 全部模块按钮（锁定/解锁统一遍历）
+        self._module_btn_by_type: dict[str, ModuleButton] = {}   # 步骤类型 -> 模块按钮
         self._group_headers: dict[str, QPushButton] = {}   # gid -> 分组标题按钮
         self._group_wrappers: dict[str, QWidget] = {}      # gid -> 模块按钮容器
         self._group_titles = {gid: title for gid, title, _ in MODULE_GROUPS}
-        collapsed = set(self.cfg.collapsed_module_groups)
+        collapsed = self._module_collapsed_set()
         for gid, title, types in MODULE_GROUPS:
             header = QPushButton(f"▾ {title}" if gid not in collapsed else f"▸ {title}")
             header.setProperty("groupHeader", True)
@@ -300,22 +338,51 @@ class FlowTab(QWidget):
                 btn = ModuleButton(t, label)
                 btn.setMinimumHeight(32)
                 self._module_btns.append(btn)
+                self._module_btn_by_type[t] = btn
                 wrap_lay.addWidget(btn)
             wrapper.setVisible(gid not in collapsed)
             self._group_wrappers[gid] = wrapper
             scroll_lay.addWidget(wrapper)
 
+        # 无结果提示：搜索不到模块时显示，平时隐藏
+        self._no_result_label = QLabel("未找到匹配模块")
+        self._no_result_label.setObjectName("moduleNoResult")
+        self._no_result_label.setAlignment(Qt.AlignCenter)
+        self._no_result_label.setStyleSheet("color: #8899aa; padding: 14px 4px;")
+        self._no_result_label.setVisible(False)
+        scroll_lay.addWidget(self._no_result_label)
+
         scroll_lay.addStretch(1)   # 多余空间收到底部：全收起时标题紧凑，全展开时按钮顶对齐
+        self._update_panel_title()   # 初始全收起时标题符号为 v（可点击展开全部）
         scroll.setWidget(scroll_box)
         panel.addWidget(scroll, 1)
+
+        # 底部搜索框 + 清空按钮：实时按关键词过滤模块并展开命中分组
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 6, 0, 0)
+        search_row.setSpacing(6)
+        self.search_edit = QLineEdit()
+        self.search_edit.setObjectName("moduleSearch")
+        self.search_edit.setPlaceholderText("搜索模块…")
+        self.search_edit.setClearButtonEnabled(False)
+        self.search_edit.textChanged.connect(self._on_module_search_changed)
+        search_row.addWidget(self.search_edit, 1)
+        self.search_clear_btn = QPushButton("清空")
+        self.search_clear_btn.setObjectName("moduleSearchClear")
+        self.search_clear_btn.setCursor(Qt.PointingHandCursor)
+        self.search_clear_btn.setToolTip("清空搜索并恢复显示所有模块")
+        self.search_clear_btn.clicked.connect(self._clear_module_search)
+        search_row.addWidget(self.search_clear_btn)
+        panel.addLayout(search_row)
+
         rlay.addWidget(self.panel_box, 1)
-        right.setMinimumWidth(150)
+        right.setMinimumWidth(180)
         splitter.addWidget(right)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([210, 600, 150])
+        splitter.setSizes([210, 600, 180])
         self._splitter = splitter
         root.addWidget(splitter, 1)
 
@@ -490,6 +557,8 @@ class FlowTab(QWidget):
 
     def _toggle_collapse_all(self):
         """点击面板标题：一键收起/展开全部模块分组（状态经 toggled 信号持久化）。"""
+        if self._searching:   # 搜索中不响应一键收起/展开，避免污染过滤态
+            return
         all_collapsed = all(not h.isChecked() for h in self._group_headers.values())
         for header in self._group_headers.values():
             header.setChecked(all_collapsed)   # 全收起 -> 展开全部；否则收起全部
@@ -502,12 +571,20 @@ class FlowTab(QWidget):
 
     def _on_group_toggled(self, gid: str, expanded: bool):
         """分组标题点击：切换模块按钮区显示/隐藏，并把状态持久化到 config。"""
+        if self._searching:   # 搜索中分组头由过滤逻辑接管，不持久化
+            return
         header = self._group_headers.get(gid)
         wrapper = self._group_wrappers.get(gid)
         if header is None or wrapper is None:
             return
         header.setText(("▾ " if expanded else "▸ ") + self._group_titles[gid])
         wrapper.setVisible(expanded)
+        if not self.cfg.module_groups_explicit:
+            # 首次手动调整：先把当前渲染态固化为记忆起点（未展开的组视为收起），
+            # 之后再往下走 collapsed_module_groups 的常规增删，保证状态完整。
+            self.cfg.module_groups_explicit = True
+            self.cfg.collapsed_module_groups = sorted(
+                g for g, h in self._group_headers.items() if not h.isChecked())
         collapsed = set(self.cfg.collapsed_module_groups)
         if expanded:
             collapsed.discard(gid)
@@ -516,6 +593,76 @@ class FlowTab(QWidget):
         self.cfg.collapsed_module_groups = sorted(collapsed)
         self.cfg.save()
         self._update_panel_title()   # 单独展开/收起分组后同步刷新标题符号
+
+    # ---------- 模块面板搜索 ----------
+    def _module_collapsed_set(self) -> set[str]:
+        """按配置计算当前应处于收起状态的分组集合（未手动调整过则默认全收起）。"""
+        collapsed = set(self.cfg.collapsed_module_groups)
+        if not self.cfg.module_groups_explicit:
+            collapsed = {gid for gid, _, _ in MODULE_GROUPS}
+        return collapsed
+
+    @staticmethod
+    def _module_matches(step_type: str, kw: str) -> bool:
+        """模块是否命中关键词：匹配模块类型名（英文）或显示名（中文）。"""
+        label = FLOW_STEP_TYPES.get(step_type, "")
+        return kw in step_type.lower() or kw in label.lower()
+
+    def _apply_module_search(self, kw: str):
+        """按关键词过滤模块：仅显示命中模块，自动展开含命中模块的分组，隐藏空分组。"""
+        matched_any = False
+        for gid, title, types in MODULE_GROUPS:
+            matched = [t for t in types if self._module_matches(t, kw)]
+            header = self._group_headers[gid]
+            wrapper = self._group_wrappers[gid]
+            for t in types:
+                self._module_btn_by_type[t].setVisible(t in matched)
+            has_match = bool(matched)
+            header.blockSignals(True)
+            header.setText(("▾ " if has_match else "▸ ") + title)
+            header.setChecked(has_match)
+            header.setVisible(has_match)          # 空分组整体隐藏
+            header.blockSignals(False)
+            wrapper.setVisible(has_match)
+            matched_any = matched_any or has_match
+        self._no_result_label.setVisible(not matched_any)
+
+    def _restore_module_panel(self):
+        """退出搜索：恢复所有分组/模块的原始展开收起状态，隐藏无结果提示。"""
+        collapsed = self._module_collapsed_set()
+        for gid, title, types in MODULE_GROUPS:
+            header = self._group_headers[gid]
+            wrapper = self._group_wrappers[gid]
+            expanded = gid not in collapsed
+            header.blockSignals(True)
+            header.setText(("▾ " if expanded else "▸ ") + title)
+            header.setChecked(expanded)
+            header.setVisible(True)
+            header.blockSignals(False)
+            wrapper.setVisible(expanded)
+            for t in types:
+                self._module_btn_by_type[t].setVisible(True)
+        self._no_result_label.setVisible(False)
+        self._update_panel_title()
+
+    def _on_module_search_changed(self, text: str):
+        """搜索框内容变化：实时过滤；空则恢复全部显示。"""
+        self._searching = True
+        try:
+            kw = (text or "").strip().lower()
+            if not kw:
+                self._restore_module_panel()
+            else:
+                self._apply_module_search(kw)
+        finally:
+            self._searching = False
+
+    def _clear_module_search(self):
+        """清空搜索框并恢复所有模块与分组。"""
+        if self.search_edit.text():
+            self.search_edit.clear()   # 触发 textChanged("") -> _restore_module_panel
+        else:
+            self._restore_module_panel()
 
     def _reload_steps(self):
         flow = self._selected_flow()
@@ -569,16 +716,27 @@ class FlowTab(QWidget):
         else:
             self.right_title.setText(f"「{flow.name}」要执行的模块"
                                      f"（{len(flow.steps)} 步 · {self._loops_text(flow)}）{hk}")
+        # 块（if/foreach/while）内的步骤按层级缩进（块骨架与结束标记对齐不缩进，
+        # 体内步骤缩进一级，嵌套逐层叠加）
+        levels = block_indent_levels(flow.steps)
         for i, s in enumerate(flow.steps):
             mark = "（失败继续）" if s.continue_on_fail else ""
             pair = " 🔗成对" if s.pair_id else ""
-            item = QListWidgetItem(f"{i + 1}. {_TYPE_ICONS.get(s.type, '')} {s.name} · "
-                                   f"{s.summary()}{mark}{pair}")
+            running = running_idx is not None and i == running_idx
+            # ▶ 标记放在缩进之后、序号之前：缩进量不受运行状态影响，层级始终对齐
+            head = "▶ " if running else ""
+            commented = bool(getattr(s, "commented", False))
+            comment_tag = "// " if commented else ""
+            text = (f"{INDENT_UNIT * levels[i]}{head}{i + 1}. "
+                    f"{comment_tag}{_TYPE_ICONS.get(s.type, '')} {s.name} · "
+                    f"{s.summary()}{mark}{pair}")
+            item = QListWidgetItem(text)
             item.setData(Qt.UserRole, i)
-            if running_idx is not None and i == running_idx:
+            if running:
                 item.setBackground(QColor("#dcf5e7"))
                 item.setForeground(QColor("#177a45"))
-                item.setText(f"▶ {item.text()}")
+            elif commented:
+                item.setForeground(QColor("#a7afb8"))
             self.step_list.addItem(item)
         if not flow.steps:
             empty = QListWidgetItem("（流程为空：把上方模块拖进来）")
@@ -613,6 +771,14 @@ class FlowTab(QWidget):
             flow.steps.insert(row, open_step)
             flow.steps.insert(row + 1, close_step)
             self._status_msg("已生成「打开网址 + 关闭浏览器」一对（删除时同步删除）", 4000)
+        elif step_type in BLOCK_PAIRS:
+            # if / foreach / while：起始块 + 结束标记成对出现（结束标记为自动结构标记，
+            # 不在面板展示），删除起始块或结束标记时按整块同步删除。
+            self._insert_block_pair(flow, step_type, row)
+        elif step_type in ("elseif", "else"):
+            self._insert_condition_branch(flow, step_type, row)
+        elif step_type in ("break", "continue"):
+            self._insert_break_continue(flow, step_type, row)
         else:
             step = FlowStep(type=step_type,
                             params=default_step_params(step_type, self.cfg.clicker,
@@ -620,6 +786,81 @@ class FlowTab(QWidget):
             flow.steps.insert(row, step)
         self._reload_steps()
         self.changed.emit()
+
+    def _insert_block_pair(self, flow: Flow, open_type: str, row: int):
+        """把起始块（if/foreach/while）与其结束标记成对插入到 row 位置。
+
+        结束标记（endif/endForeach/endWhile）是自动结构标记，不在模块面板展示，
+        由这里随起始块一起创建；删除起始块或结束标记时按整块同步删除。
+        """
+        end_type = BLOCK_PAIRS[open_type]
+        open_step = FlowStep(type=open_type, params=dict(
+            default_step_params(open_type, self.cfg.clicker, self.cfg.presser)))
+        end_step = FlowStep(type=end_type, params=dict(
+            default_step_params(end_type, self.cfg.clicker, self.cfg.presser)))
+        flow.steps.insert(row, open_step)
+        flow.steps.insert(row + 1, end_step)
+        self._status_msg(f"已生成「{FLOW_STEP_TYPES[open_type]} + "
+                         f"{FLOW_STEP_TYPES[end_type]}」一对（删除时同步删除）", 4000)
+
+    def _insert_condition_branch(self, flow: Flow, step_type: str, row: int):
+        """把 elseif/else 插入到正确位置的条件块内。
+
+        elseif 插到 else 之前（无 else 则 endif 之前），多个 elseif 依次堆叠；
+        else 插到 endif 之前，且同一 if 块至多一个。若 drop 位置不在任何 if 块内
+        则拒绝并提示（状态栏 + 消息框），不产生脏数据。
+        """
+        steps = flow.steps
+        probe = min(row, len(steps) - 1) if steps else -1
+        if_idx = enclosing_if(steps, probe) if probe >= 0 else None
+        if if_idx is None:
+            self._status_msg("「否则如果 / 否则」必须拖到 if 条件块内部", 5000)
+            QMessageBox.information(
+                self, "无法添加分支",
+                "「否则如果 / 否则」必须位于某个 if 条件块内部。\n"
+                "请先把它们拖到 if 与 endif 之间的步骤行上。")
+            return
+        end_idx = match_endif(steps, if_idx)
+        if end_idx is None:
+            self._status_msg("if 缺少配对的 endif，无法添加分支", 5000)
+            return
+        if step_type == "else":
+            if any(s.type == "else" for s in steps[if_idx:end_idx]):
+                self._status_msg("该 if 条件块已存在「否则」，不能再添加", 5000)
+                QMessageBox.information(self, "无法添加「否则」",
+                                        "同一 if 条件块只能有一个「否则」。")
+                return
+            insert_at = end_idx                     # else 恒插到 endif 之前
+        else:                                       # elseif
+            insert_at = end_idx                     # 默认插到 endif 之前
+            for i in range(end_idx - 1, if_idx, -1):
+                if steps[i].type == "else":
+                    insert_at = i                   # 有 else 则插到 else 之前
+                    break
+        new_step = FlowStep(type=step_type, params=dict(
+            default_step_params(step_type, self.cfg.clicker, self.cfg.presser)))
+        steps.insert(insert_at, new_step)
+        self._status_msg(f"已添加「{FLOW_STEP_TYPES[step_type]}」到 if 条件块", 4000)
+
+    def _insert_break_continue(self, flow: Flow, step_type: str, row: int):
+        """把 break/continue 插入到 row 位置，但仅当该位置落在 foreach/while 循环体内。
+
+        先插入再用 enclosing_loop 校验插入后的位置是否在循环内；不在则回滚并提示，
+        保证不产生「落在非循环流程里的 break/continue」脏数据。
+        """
+        step = FlowStep(type=step_type, params=dict(
+            default_step_params(step_type, self.cfg.clicker, self.cfg.presser)))
+        flow.steps.insert(row, step)
+        if enclosing_loop(flow.steps, row) is None:
+            del flow.steps[row]
+            label = FLOW_STEP_TYPES[step_type]
+            self._status_msg(f"「{label}」只能放在 Foreach/while 循环体内", 6000)
+            QMessageBox.information(
+                self, "无法添加",
+                f"「{label}」只能放在 Foreach 循环或 while 循环的循环体内部。\n"
+                "请先拖入循环模块，再把该步骤拖到循环体（起始块与结束标记之间）内。")
+            return
+        self._status_msg(f"已添加「{FLOW_STEP_TYPES[step_type]}」", 4000)
 
     def _on_order_changed(self):
         flow = self._selected_flow()
@@ -632,9 +873,19 @@ class FlowTab(QWidget):
                 idx = self.step_list.item(i).data(Qt.UserRole)
                 if idx is not None and 0 <= idx < len(flow.steps):
                     order.append(flow.steps[idx])
-            if len(order) == len(flow.steps):
-                flow.steps[:] = order
-                self._fix_pair_order(flow)
+            if len(order) != len(flow.steps):
+                self._reload_steps()          # 顺序未完整读出，重建回到当前 steps
+                return
+            original = list(flow.steps)       # 快照：结构非法时回滚到拖拽前
+            flow.steps[:] = order
+            self._fix_pair_order(flow)
+            errors = validate_block_structure(flow.steps)
+            if errors:
+                # 拖拽破坏了 if/foreach/while 的闭合边界（如把结束标记拖出块）：
+                # 回滚并提示，保证块结构始终完整，不落盘脏数据。
+                flow.steps[:] = original
+                self._status_msg("不能把步骤拖出循环/条件块边界：" + errors[0], 6000)
+            else:
                 self.changed.emit()
             self._reload_steps()
         QTimer.singleShot(0, apply)
@@ -692,16 +943,104 @@ class FlowTab(QWidget):
         if flow is None or self._selected_running():
             return
         row = self.step_list.currentRow()
-        if 0 <= row < len(flow.steps):
-            step = flow.steps[row]
-            if step.pair_id:
-                # 成对步骤：删除当前步骤时同步删除配对的另一个
-                flow.steps[:] = [s for s in flow.steps if s.pair_id != step.pair_id]
-                self._status_msg("已删除网页步骤及其配对的「打开网址/关闭浏览器」", 4000)
+        if not (0 <= row < len(flow.steps)):
+            return
+        if not self._confirm_del_step(flow, row):
+            return
+        step = flow.steps[row]
+        if step.pair_id:
+            # 成对步骤：删除当前步骤时同步删除配对的另一个
+            flow.steps[:] = [s for s in flow.steps if s.pair_id != step.pair_id]
+            self._status_msg("已删除网页步骤及其配对的「打开网址/关闭浏览器」", 4000)
+        elif step.type in BRANCH_TYPES:
+            # 「否则 / 否则如果」只删分支头本身：条件判断、条件结束与其它分支
+            # 全部保留（原来删任意条件步骤都会连带整块，等于没法只摘掉一个分支）。
+            # 该分支下原有的步骤不删除，会并入上一分支，提示里说清去向。
+            inner = self._branch_body_count(flow.steps, row)
+            del flow.steps[row]
+            label = FLOW_STEP_TYPES[step.type]
+            if inner:
+                self._status_msg(f"已删除「{label}」；其下 {inner} 个步骤"
+                                 f"已并入上一分支", 6000)
+            else:
+                self._status_msg(f"已删除「{label}」（条件判断与其它分支保留）", 4000)
+        elif step.type in BLOCK_OPEN_TYPES or step.type in BLOCK_CLOSE_TYPES:
+            # 块结构（if/endif、foreach/endForeach、while/endWhile）：删除起始块
+            # 或结束标记都会删除整个块（含结束标记、分支与块内全部步骤）。
+            block = block_indices(flow.steps, row)
+            if block:
+                keep = set(block)
+                flow.steps[:] = [s for i, s in enumerate(flow.steps) if i not in keep]
+                open_type = (step.type if step.type in BLOCK_PAIRS
+                             else _CLOSE_TO_OPEN[step.type])
+                self._status_msg(_BLOCK_DEL_MSG.get(
+                    open_type, "已删除整个块"), 4000)
             else:
                 del flow.steps[row]
-            self._reload_steps()
-            self.changed.emit()
+        else:
+            del flow.steps[row]
+        self._reload_steps()
+        self.changed.emit()
+
+    def _confirm_del_step(self, flow, row) -> bool:
+        """删除步骤前的确认弹窗。
+
+        不同步骤的删除范围不同（成对网页步骤、条件块整块、只删分支头），弹窗里
+        必须写清连带影响再让用户决定。默认按钮是「取消」，按回车/Esc 都不会误删。
+        """
+        step = flow.steps[row]
+        extra = ""
+        if step.pair_id:
+            extra = "\n\n将同时删除配对的另一个网页步骤（同一 pair_id 成对的步骤）。"
+        elif step.type in BRANCH_TYPES:
+            label = FLOW_STEP_TYPES[step.type]
+            inner = self._branch_body_count(flow.steps, row)
+            tail = f"\n\n其下 {inner} 个步骤将并入上一分支。" if inner else ""
+            extra = (f"\n\n只删除「{label}」这个分支头，条件判断、条件结束"
+                     f"与其它分支都保留。{tail}")
+        elif step.type in BLOCK_OPEN_TYPES or step.type in BLOCK_CLOSE_TYPES:
+            n = len(block_indices(flow.steps, row))
+            if n > 1:
+                open_type = (step.type if step.type in BLOCK_PAIRS
+                             else _CLOSE_TO_OPEN[step.type])
+                if open_type == "if":
+                    extra = (f"\n\n同时删除整个条件块的 {n} 个步骤"
+                             f"（含分支与条件结束）。")
+                else:
+                    kind = _BLOCK_KIND.get(open_type, "块")
+                    extra = (f"\n\n同时删除整个 {kind} 的 {n} 个步骤"
+                             f"（含结束标记与循环体内步骤）。")
+        name = FLOW_STEP_TYPES.get(step.type, step.type)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("删除步骤")
+        box.setText(f"确定删除第 {row + 1} 步「{name}」吗？\n\n{step.summary()}{extra}")
+        btn_del = box.addButton("删除", QMessageBox.ButtonRole.YesRole)
+        btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.NoRole)
+        box.setDefaultButton(btn_cancel)      # 默认落在「取消」：回车也不会误删
+        box.exec()
+        return box.clickedButton() is btn_del
+
+    @staticmethod
+    def _branch_body_count(steps, idx: int) -> int:
+        """分支头 idx 之下、下一个同级分支头（elseif/else/endif）之前的步骤数。
+
+        嵌套 if 整块算作一个步骤计入；用于删除分支头后提示"多少步骤并入上一分支"。
+        """
+        depth = 0
+        count = 0
+        for i in range(idx + 1, len(steps)):
+            t = getattr(steps[i], "type", "")
+            if t == "if":
+                depth += 1
+            elif t == "endif":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif depth == 0 and t in BRANCH_TYPES:
+                break
+            count += 1
+        return count
 
     def _step_context_menu(self, pos):
         """步骤列表右键菜单：编辑参数 / 删除步骤（复用底部按钮的逻辑）。"""
@@ -712,6 +1051,8 @@ class FlowTab(QWidget):
         if flow is None or self._selected_running():
             return
         self.step_list.setCurrentItem(item)                  # 右键即选中该步骤
+        row = item.data(Qt.UserRole)
+        step = flow.steps[row] if isinstance(row, int) and 0 <= row < len(flow.steps) else None
         menu = QMenu(self)
         # 显示效果：文字靠左、行高更大、字号更大，悬停/预选蓝色高亮
         menu.setStyleSheet("""
@@ -738,12 +1079,30 @@ class FlowTab(QWidget):
             }
         """)
         edit_act = menu.addAction("✎ 编辑参数")
+        comment_act = None
+        if step is not None:
+            comment_act = menu.addAction("✅ 取消注释" if step.commented else "🚫 注释")
         del_act = menu.addAction("🗑 删除步骤")
         act = menu.exec(self.step_list.viewport().mapToGlobal(pos))
         if act == edit_act:
             self._edit_step_param()
+        elif comment_act is not None and act == comment_act:
+            self._toggle_comment_step()
         elif act == del_act:
             self._del_step()
+
+    def _toggle_comment_step(self):
+        """切换选中步骤的注释状态：注释后运行期跳过、列表灰显，实时写回并保存。"""
+        flow = self._selected_flow()
+        if flow is None or self._selected_running():
+            return
+        row = self.step_list.currentRow()
+        if not (0 <= row < len(flow.steps)):
+            return
+        step = flow.steps[row]
+        step.commented = not step.commented
+        self._reload_steps()
+        self.changed.emit()
 
     # ---------- 区域框选链（步骤参数对话框 -> 主窗口隐藏 -> 遮罩 -> 回写） ----------
     def _capture_region_for_step(self, dlg: StepParamsDialog):
@@ -854,8 +1213,13 @@ class FlowTab(QWidget):
             done()
 
     # ---------- 流程元信息（新建/编辑） ----------
+    def _next_flow_seq(self) -> int:
+        """下一个流程创建序号：现有最大序号 + 1，保证新增流程按创建顺序递增。"""
+        return max((f.created_seq for f in self._flows), default=0) + 1
+
     def _new_flow(self, group: str = ""):
         flow = Flow(name=f"流程 {len(self._flows) + 1}", group=group)
+        flow.created_seq = self._next_flow_seq()   # 新增流程排在末尾（append），创建序号递增
         dlg = FlowMetaDialog(flow, create=True, parent=self, groups=self.cfg.flow_groups)
         if dlg.exec() == FlowMetaDialog.Accepted:
             dlg.apply_to(flow)
@@ -898,6 +1262,7 @@ class FlowTab(QWidget):
             QMessageBox.information(self, "分组已存在", f"分组「{name}」已经存在。")
             return
         self.cfg.flow_groups.append(name)
+        self.cfg.flow_group_seqs[name] = max(self.cfg.flow_group_seqs.values(), default=0) + 1
         self.cfg.save()
         self.refresh_list()
         self.changed.emit()
@@ -911,6 +1276,8 @@ class FlowTab(QWidget):
             QMessageBox.information(self, "分组已存在", f"分组「{name}」已经存在。")
             return
         self.cfg.flow_groups = [name if x == g else x for x in self.cfg.flow_groups]
+        if g in self.cfg.flow_group_seqs:   # 分组改名：迁移创建序号，保证排序顺序不变
+            self.cfg.flow_group_seqs[name] = self.cfg.flow_group_seqs.pop(g)
         for f in self._flows:
             if f.group == g:
                 f.group = name
@@ -924,6 +1291,7 @@ class FlowTab(QWidget):
                                 ) != QMessageBox.Yes:
             return
         self.cfg.flow_groups = [x for x in self.cfg.flow_groups if x != g]
+        self.cfg.flow_group_seqs.pop(g, None)   # 删除分组：清掉它的创建序号
         self.cfg.collapsed_flow_groups = [x for x in self.cfg.collapsed_flow_groups if x != g]
         for f in self._flows:
             if f.group == g:
@@ -932,9 +1300,57 @@ class FlowTab(QWidget):
         self.refresh_list()
         self.changed.emit()
 
+    # ---------- 排序与置顶 ----------
+    def _pin_flow(self, flow_id: str):
+        """置顶流程：把该流程移到其所属分组内最前（同组其余流程保持相对顺序）。"""
+        flow = next((f for f in self._flows if f.id == flow_id), None)
+        if flow is None:
+            return
+        group = flow.group
+        rest = [f for f in self._flows if f.id != flow_id]
+        # 插到 rest 里第一个同组流程之前：渲染时按分组分桶，组内顺序即 _flows 里的相对顺序
+        insert_at = next((i for i, f in enumerate(rest) if f.group == group), len(rest))
+        rest.insert(insert_at, flow)
+        self._flows[:] = rest
+        self.cfg.save()
+        self.refresh_list()
+        self._select_flow_item(flow.id)
+        self.changed.emit()
+        self._status_msg(f"已置顶「{flow.name}」", 4000)
+
+    def _sort_flows_in_group(self, group: str):
+        """把某分组内的流程按创建顺序（created_seq）升序重排，其余分组不受影响。"""
+        group_flows = sorted([f for f in self._flows if f.group == group],
+                             key=lambda f: f.created_seq)
+        it = iter(group_flows)
+        self._flows[:] = [next(it) if f.group == group else f for f in self._flows]
+        self.cfg.save()
+        self.refresh_list()
+        self.changed.emit()
+        self._status_msg(f"已按创建顺序排序「{group or '未分组'}」内的流程", 4000)
+
+    def _pin_group(self, g: str):
+        """置顶分组：把该分组移到分组列表最前（「未分组」恒在末尾，不参与）。"""
+        if g not in self.cfg.flow_groups:
+            return
+        self.cfg.flow_groups = [g] + [x for x in self.cfg.flow_groups if x != g]
+        self.cfg.save()
+        self.refresh_list()
+        self.changed.emit()
+        self._status_msg(f"已置顶分组「{g}」", 4000)
+
+    def _sort_groups(self):
+        """按分组创建顺序（flow_group_seqs）重排分组列表。"""
+        seqs = self.cfg.flow_group_seqs
+        self.cfg.flow_groups.sort(key=lambda g: seqs.get(g, 0))
+        self.cfg.save()
+        self.refresh_list()
+        self.changed.emit()
+        self._status_msg("已按创建顺序排序分组", 4000)
+
     # ---------- 左栏右键菜单 ----------
     def _flow_context_menu(self, pos):
-        """流程列表右键：流程项 = 编辑/删除/导出；分组头 = 分组管理。"""
+        """流程列表右键：流程项 = 置顶/排序/编辑/删除/导出；分组头 = 分组管理。"""
         item = self.list.itemAt(pos)
         if item is None:
             return
@@ -950,12 +1366,19 @@ class FlowTab(QWidget):
         self.list.setCurrentItem(item)               # 右键即选中该流程
         menu = QMenu(self)
         self._style_menu(menu)
+        pin_act = menu.addAction("↥ 置顶")
+        sort_act = menu.addAction("↕ 按创建顺序排序")
+        menu.addSeparator()
         edit_act = menu.addAction("✎ 编辑流程")
         del_act = menu.addAction("🗑 删除流程")
         menu.addSeparator()
         export_act = menu.addAction("📤 导出流程")
         act = menu.exec(self.list.viewport().mapToGlobal(pos))
-        if act == edit_act:
+        if act == pin_act:
+            self._pin_flow(flow.id)
+        elif act == sort_act:
+            self._sort_flows_in_group(flow.group)
+        elif act == edit_act:
             self._edit_flow()
         elif act == del_act:
             self._del_flow()
@@ -963,15 +1386,22 @@ class FlowTab(QWidget):
             self._export_flow()
 
     def _group_context_menu(self, g: str, pos):
-        """分组头右键：重命名/删除分组（「未分组」不可操作）。"""
+        """分组头右键：置顶/排序/重命名/删除分组（「未分组」不可操作）。"""
         if not g:
             return
         menu = QMenu(self)
         self._style_menu(menu)
+        pin_act = menu.addAction("↥ 置顶")
+        sort_act = menu.addAction("↕ 按创建顺序排序")
+        menu.addSeparator()
         rename_act = menu.addAction("✎ 重命名分组")
         del_act = menu.addAction("🗑 删除分组")
         act = menu.exec(pos)
-        if act == rename_act:
+        if act == pin_act:
+            self._pin_group(g)
+        elif act == sort_act:
+            self._sort_groups()
+        elif act == rename_act:
             self._rename_group(g)
         elif act == del_act:
             self._del_group(g)
@@ -1031,6 +1461,7 @@ class FlowTab(QWidget):
                                 "所选文件不是有效的流程文件（版本不兼容或内容已损坏）。")
             return False
         flow.id = uuid.uuid4().hex[:12]   # 分配新 id，避免与现有流程/流程文件冲突
+        flow.created_seq = self._next_flow_seq()   # 导入的流程同样按创建顺序排到末尾
         self._flows.append(flow)
         self.refresh_list()
         self._select_flow_item(flow.id)
@@ -1198,10 +1629,6 @@ class FlowTab(QWidget):
         self._reload_steps()
 
     def _on_state(self, flow_id: str, state: str, reason: str, ok: bool = True):
-        import logging
-        _fl = logging.getLogger("probe_flow")
-        _fl.info("流程状态回调: flow=%s state=%s reason=%r ok=%s 线程=%s",
-                 flow_id, state, reason, ok, threading.current_thread().name)
         flow = next((f for f in self._flows if f.id == flow_id), None)
         if state == "running":
             self._update_left_item(flow_id)
@@ -1216,7 +1643,6 @@ class FlowTab(QWidget):
                 pass
             elif failed and not silent:
                 # 手动运行失败：弹窗反馈；静默（定时任务）触发不弹窗打扰
-                _fl.info("流程状态回调: 即将弹「流程结束」框 flow=%s reason=%r", flow_id, reason)
                 QMessageBox.information(self, "流程结束", f"「{flow.name}」：{reason}")
             elif reason:
                 # 成功完成 / 静默运行失败：只做状态栏轻提示（步骤很快跑完也能看到结果）

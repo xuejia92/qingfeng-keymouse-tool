@@ -191,6 +191,7 @@ class TestLogPanel(unittest.TestCase):
     def test_append_and_summary(self):
         from app.ui.log_panel import LogPanel
         panel = LogPanel()
+        panel.print_only = False   # 关闭「只显示打印输出」，让普通日志可见
         panel.append("第一条日志")
         panel.append("第二条日志")
         self.assertIn("第一条日志", panel._text.toPlainText())
@@ -203,6 +204,7 @@ class TestLogPanel(unittest.TestCase):
         from app.ui.log_panel import LogPanel
         panel = LogPanel()
         self.assertEqual(panel.clear_btn.text(), "🗑 清空日志")
+        panel.print_only = False
         panel.append("要清掉的日志")
         panel.clear()
         self.assertEqual(panel._text.toPlainText(), "")
@@ -212,16 +214,87 @@ class TestLogPanel(unittest.TestCase):
         panel = LogPanel()
         states = []
         panel.clearOnRunChanged.connect(states.append)
-        self.assertFalse(panel.clear_on_run)
-
-        panel.clear_on_run = True
-        self.assertTrue(panel.clear_on_run)
-        self.assertTrue(panel.clear_on_run_box.isChecked())
-        self.assertEqual(states, [True])
+        self.assertTrue(panel.clear_on_run)   # 默认勾选
 
         panel.clear_on_run = False
         self.assertFalse(panel.clear_on_run)
-        self.assertEqual(states, [True, False])
+        self.assertFalse(panel.clear_on_run_box.isChecked())
+        self.assertEqual(states, [False])
+
+        panel.clear_on_run = True
+        self.assertTrue(panel.clear_on_run)
+        self.assertEqual(states, [False, True])
+
+    def test_print_only_property_and_signal(self):
+        from app.ui.log_panel import LogPanel
+        panel = LogPanel()
+        states = []
+        panel.printOnlyChanged.connect(states.append)
+        self.assertTrue(panel.print_only)   # 默认只显示打印输出
+
+        panel.print_only = False
+        self.assertFalse(panel.print_only)
+        self.assertEqual(states, [False])
+
+        panel.print_only = True
+        self.assertTrue(panel.print_only)
+        self.assertEqual(states, [False, True])
+
+    def test_print_only_filter_hides_normal_logs(self):
+        from app.ui.log_panel import LogPanel
+        panel = LogPanel()
+        self.assertTrue(panel.print_only)
+
+        panel.append("系统日志", kind="log")
+        panel.append("打印内容", kind="print")
+        text = panel._text.toPlainText()
+        self.assertNotIn("系统日志", text)
+        self.assertIn("打印内容", text)
+
+        panel.print_only = False
+        text = panel._text.toPlainText()
+        self.assertIn("系统日志", text)
+        self.assertIn("打印内容", text)
+
+    def test_print_output_rendered_blue(self):
+        from app.ui.log_panel import LogPanel
+        from PySide6.QtGui import QTextCursor
+        panel = LogPanel()
+        panel.print_only = False   # 关闭过滤，让普通日志也渲染出来
+        panel.append("普通日志", kind="log")
+        panel.append("打印的值", kind="print")
+
+        # 逐字符收集颜色：普通日志默认色，打印输出蓝色
+        colors = {}
+        doc = panel._text.document()
+        cursor = panel._text.textCursor()
+        cursor.movePosition(QTextCursor.Start)
+        while True:
+            ch = doc.characterAt(cursor.position())
+            if ch and ch != "\u2029":
+                colors.setdefault(ch, cursor.charFormat().foreground().color().name())
+            if not cursor.movePosition(QTextCursor.NextCharacter):
+                break
+        self.assertEqual(colors["普"], "#24292f")
+        self.assertEqual(colors["打"], "#1668a8")
+
+    def test_print_raw_rendered_without_newline_and_blue(self):
+        """「原始输出」：不自动换行、蓝色显示、不被「只显示打印输出」过滤。"""
+        from app.ui.log_panel import LogPanel
+        from PySide6.QtGui import QTextCursor
+        panel = LogPanel()
+        self.assertTrue(panel.print_only)
+        panel.append("A", kind="print_raw")
+        panel.append("B", kind="print_raw")
+        panel.append("系统日志", kind="log")
+
+        text = panel._text.toPlainText()
+        self.assertEqual(text, "AB")            # 连续原始输出拼接，不换行
+        self.assertNotIn("系统日志", text)      # print_only 仍过滤普通日志
+
+        cursor = panel._text.textCursor()
+        cursor.movePosition(QTextCursor.Start)
+        self.assertEqual(cursor.charFormat().foreground().color().name(), "#1668a8")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,8 @@ from app.config import (
     FlowStep,
     _atomic_write_json,
     _is_flow_id,
+    assign_missing_flow_seqs,
+    assign_missing_group_seqs,
     clamp,
     flow_from_dict,
     flow_to_dict,
@@ -109,6 +111,14 @@ class TestFlowFromDict(unittest.TestCase):
     def test_loops_clamped(self):
         self.assertEqual(flow_from_dict(self._flow_dict(loops=-3)).loops, 0)
         self.assertEqual(flow_from_dict(self._flow_dict(loops=99999)).loops, 9999)
+
+    def test_created_seq_roundtrip_and_default(self):
+        """created_seq 随流程文件存下来；旧文件缺字段时回退 0（后续由迁移补发）。"""
+        self.assertEqual(flow_from_dict(self._flow_dict(created_seq=7)).created_seq, 7)
+        self.assertEqual(flow_from_dict(self._flow_dict()).created_seq, 0)
+        self.assertEqual(flow_from_dict(self._flow_dict(created_seq=-5)).created_seq, 0)
+        back = flow_from_dict(flow_to_dict(Flow(name="F", created_seq=9)))
+        self.assertEqual(back.created_seq, 9)
 
     def test_unknown_step_type_raises(self):
         with self.assertRaises(ValueError):
@@ -329,6 +339,48 @@ class TestAppConfigMigration(unittest.TestCase):
                 data = json.load(f)
             self.assertNotIn("flows", data)
             self.assertEqual(os.listdir(config.FLOWS_DIR), ["F.json"])
+
+
+class TestCreationSeq(unittest.TestCase):
+    """流程/分组创建序号的补发与迁移。"""
+
+    def test_assign_missing_flow_seqs(self):
+        flows = [Flow(name="A"), Flow(name="B"), Flow(name="C")]
+        self.assertTrue(assign_missing_flow_seqs(flows))
+        self.assertEqual([f.created_seq for f in flows], [1, 2, 3])
+
+    def test_assign_flow_seqs_keeps_existing(self):
+        flows = [Flow(name="A", created_seq=5), Flow(name="B", created_seq=2)]
+        self.assertFalse(assign_missing_flow_seqs(flows))
+        self.assertEqual([f.created_seq for f in flows], [5, 2])
+
+    def test_assign_missing_flow_seqs_mixed(self):
+        """已有部分序号时，缺失者从当前最大序号之后接续补发。"""
+        flows = [Flow(name="A"), Flow(name="B", created_seq=5), Flow(name="C")]
+        assign_missing_flow_seqs(flows)
+        self.assertEqual([f.created_seq for f in flows], [6, 5, 7])
+
+    def test_assign_missing_group_seqs(self):
+        seqs = {"办公": 3}
+        self.assertTrue(assign_missing_group_seqs(["办公", "游戏", "学习"], seqs))
+        self.assertEqual(seqs, {"办公": 3, "游戏": 4, "学习": 5})
+
+    def test_assign_group_seqs_noop_when_all_set(self):
+        seqs = {"办公": 1, "游戏": 2}
+        self.assertFalse(assign_missing_group_seqs(["办公", "游戏"], seqs))
+
+    def test_load_assigns_group_seqs_for_legacy_config(self):
+        with TempConfigPaths():
+            write_json(config.CONFIG_PATH, {"flow_groups": ["办公", "游戏"]})
+            cfg = AppConfig.load()
+            self.assertEqual(cfg.flow_group_seqs, {"办公": 1, "游戏": 2})
+
+    def test_load_assigns_flow_created_seqs(self):
+        with TempConfigPaths():
+            os.makedirs(config.FLOWS_DIR, exist_ok=True)
+            save_flows_dir([Flow(name="A"), Flow(name="B")])   # created_seq=0 落盘
+            cfg = AppConfig.load()
+            self.assertEqual([f.created_seq for f in cfg.flows], [1, 2])
 
 
 class TestFindTask(unittest.TestCase):

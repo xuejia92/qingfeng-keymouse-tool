@@ -1,0 +1,92 @@
+{
+  "id": "05a8f9e4252d",
+  "name": "while测试用",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "i",
+        "type": "integer",
+        "default_value": "1"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "while",
+      "name": "while 循环",
+      "params": {
+        "condition": "true"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "i",
+        "type": "integer",
+        "default_value": "$i+1"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "if",
+      "name": "条件判断",
+      "params": {
+        "condition": "i>20"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "i",
+        "text": "最后的i值",
+        "raw": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "break",
+      "name": "break 中断循环",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "endif",
+      "name": "条件结束",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "endWhile",
+      "name": "while 循环结束",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 5,
+  "order": 0
+}

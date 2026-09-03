@@ -372,14 +372,42 @@ class TestTextFindDialog(unittest.TestCase):
         self.assertTrue(dlg._fixed_pos_widget.isHidden())
         self.assertTrue(dlg._var_pos_widget.isHidden())
 
-    def test_all_var_combos_readonly(self):
-        """所有变量编辑下拉均不可编辑，只能下拉选择。"""
-        for st, attr in (("log", "log_vars"), ("clip_set", "clip_name"),
+    def test_all_var_combos_editable(self):
+        """所有变量下拉均可编辑：既能下拉选已声明变量，也能手动输入任意变量名/
+        下标表达式（如 aaa['a']）。"""
+        for st, attr in (("clip_set", "clip_name"),
                          ("clip_get", "clip_variable"), ("ocr", "ocr_variable"),
-                         ("text_find", "tf_variable"), ("click", "pos_var")):
+                         ("text_find", "tf_variable"), ("click", "pos_var"),
+                         ("foreach", "foreach_items"), ("exit", "exit_var")):
             dlg = self._open(st, {})
             combo = getattr(dlg, attr)
-            self.assertFalse(combo.isEditable(), f"{st}.{attr} 应不可编辑")
+            self.assertTrue(combo.isEditable(), f"{st}.{attr} 应可编辑")
+
+    def test_var_combo_accepts_typed_expression(self):
+        """变量下拉可直接输入下标表达式并原样回传（供运行期 Python 语法解析）。"""
+        dlg = self._open("clip_set", {"name": "aaa['a']"})
+        self.assertEqual(dlg._combo_value(dlg.clip_name), "aaa['a']")
+        step = FlowStep(type="clip_set")
+        dlg.apply_to(step)
+        self.assertEqual(step.params["name"], "aaa['a']")
+
+    def test_log_vars_editable(self):
+        """打印输出模块的变量下拉可编辑：可手动输入任意变量名。"""
+        dlg = self._open("log", {})
+        self.assertTrue(dlg.log_vars.isEditable(), "log_vars 应可编辑")
+        # 手动输入多个变量名（逗号分隔）后 apply_to 应原样保留
+        dlg.log_vars.setEditText("a, b")
+        step = FlowStep(type="log")
+        dlg.apply_to(step)
+        self.assertEqual(step.params["variables"], "a, b")
+
+    def test_log_vars_empty_means_all(self):
+        """打印输出变量留空/选「无」时，收集结果为不打印任何变量（variables 为空）。"""
+        dlg = self._open("log", {})
+        dlg.log_vars.setCurrentIndex(0)   # 「无」项 data 为空
+        step = FlowStep(type="log")
+        dlg.apply_to(step)
+        self.assertEqual(step.params["variables"], "")
 
 
 if __name__ == "__main__":

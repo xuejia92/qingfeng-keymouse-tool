@@ -29,27 +29,42 @@
     "hotkey": "f7"
   },
   "find_tasks": [],
-  "flow_groups": [],
-  "collapsed_flow_groups": [],
-  "clear_log_on_run": false,
-  "collapsed_module_groups": [],
+  "flow_groups": [
+    "测试使用",
+    "222"
+  ],
+  "flow_group_seqs": {
+    "222": 2,
+    "测试使用": 1
+  },
+  "collapsed_flow_groups": [
+    "111"
+  ],
+  "clear_log_on_run": true,
+  "log_print_only": true,
+  "collapsed_module_groups": [
+    "app_web",
+    "input",
+    "perceive"
+  ],
+  "module_groups_explicit": true,
   "schedule_tasks": [
     {
-      "id": "221320e78f8f",
+      "id": "a71cbf5a9910",
       "name": "新建定时任务",
       "group": "",
-      "flow_id": "bac05f0d9ea7",
-      "flow_name": "流程X",
+      "flow_id": "10982d1ec144",
+      "flow_name": "条件语句判断测试",
       "enabled": false,
       "mode": "second",
       "interval": 1,
       "at_time": "09:00",
       "weekdays": [],
       "monthdays": [],
-      "once_at": "2026-09-02 13:52",
+      "once_at": "2026-09-02 15:03",
       "cron": "",
-      "last_run": "2026-09-02 13:34:51",
-      "next_run": "2026-09-02 13:34:52",
+      "last_run": "2026-09-02 17:13:57",
+      "next_run": "",
       "missed_fires": 0,
       "last_alert_date": ""
     }

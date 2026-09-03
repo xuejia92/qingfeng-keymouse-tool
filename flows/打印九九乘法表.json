@@ -1,0 +1,126 @@
+{
+  "id": "f3b3da16ecc3",
+  "name": "打印九九乘法表",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "i",
+        "type": "list",
+        "default_value": "list(range(1, 10))"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "j",
+        "type": "list",
+        "default_value": "list(range(1, 10))"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "foreach",
+      "name": "Foreach 循环",
+      "params": {
+        "items": "i",
+        "item_var": "item_i",
+        "index_var": "index_i"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "foreach",
+      "name": "Foreach 循环",
+      "params": {
+        "items": "j",
+        "item_var": "item_j",
+        "index_var": "index_j"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "item_i*item_j \\b",
+        "text": "$item_i x $item_j =",
+        "raw": true
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "if",
+      "name": "条件判断",
+      "params": {
+        "condition": "item_j>=item_i"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "break",
+      "name": "break 中断循环",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "endif",
+      "name": "条件结束",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "endForeach",
+      "name": "Foreach 循环结束",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "",
+        "text": "\\n",
+        "raw": true
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "endForeach",
+      "name": "Foreach 循环结束",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 3,
+  "order": 1
+}

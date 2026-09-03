@@ -185,13 +185,35 @@ class FindTask:
 
 # ---------------- 自动化流程 ----------------
 
-FLOW_STEP_TYPES = {"var": "变量", "log": "日志输出", "ocr": "文字识别",
+FLOW_STEP_TYPES = {"var": "变量", "log": "打印输出", "ocr": "文字识别",
                    "text_find": "文字查找", "screenshot": "截图",
-                   "find_image": "找图",
+                   "find_image": "找图", "yolo_detect": "目标检测",
                    "click": "鼠标点击", "press": "键盘连按", "find": "找图点击",
                    "wait": "延时等待", "web": "网页操作", "app": "打开应用",
                    "close_app": "关闭应用", "clip_set": "赋值剪贴板",
-                   "clip_get": "获取剪贴板内容"}
+                   "clip_get": "获取剪贴板内容",
+                   "py_func": "python函数",
+                   "if": "条件判断", "elseif": "否则如果",
+                   "else": "否则", "endif": "条件结束",
+                   "foreach": "Foreach 循环", "endForeach": "Foreach 循环结束",
+                   "while": "while 循环", "endWhile": "while 循环结束",
+                   "break": "break 中断循环", "continue": "continue 继续循环",
+                   "exit": "退出流程"}
+
+# 自动成对生成的步骤类型：不显示在模块面板（endif/endForeach/endWhile
+# 分别随 if/foreach/while 拖入时自动创建）。
+# 模块面板只展示「可拖拽」的类型，其余类型在编辑器中由程序自动补全。
+AUTO_STEP_TYPES = {"endif", "endForeach", "endWhile"}
+
+# 结构/控制流标记步骤：name 是派生显示名（用户不可自定义，也没有自定义入口），
+# 加载/构造时强制刷新为当前 FLOW_STEP_TYPES 的显示名。这样显示名升级时（例如
+# 「循环」→「Foreach 循环」）旧流程文件里残留的旧 name 会被自动纠正，保证
+# 列表、删除确认、执行日志等所有用到 name 的位置显示一致。
+STRUCTURAL_STEP_TYPES = {
+    "if", "elseif", "else", "endif",
+    "foreach", "endForeach", "while", "endWhile",
+    "break", "continue",
+}
 
 # 变量类型：值 -> 显示名
 VARIABLE_TYPES = {"string": "字符串", "integer": "整数", "float": "浮点数",
@@ -235,12 +257,13 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
         return {
             "name": "",                   # 变量名（流程内唯一，默认留空让用户填）
             "type": "string",             # string / integer / float / bool / list / dict
-            "default_value": "",          # 默认值文本，按 type 解析
+            "default_value": "",          # 默认值文本，按 type 解析；支持表达式（$引用/运算/拼接/函数）
         }
     if step_type == "log":
         return {
-            "variables": "",              # 要输出的变量名，逗号分隔；空=输出全部变量
+            "variables": "",              # 要打印的变量名，逗号分隔；空=不打印任何变量
             "text": "",                   # 附加文本，支持 $变量名 占位
+            "raw": False,                 # 原始输出：不加时间戳、不自动换行，内容原样显示
         }
     if step_type == "ocr":
         return {
@@ -307,6 +330,41 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "save_mode": "variable",      # variable=默认保存 / choose=自选保存（弹窗）
             "variable": "",               # 截图绝对路径写入的结果变量（默认保存必填，自选保存可选）
         }
+    if step_type == "yolo_detect":
+        return {
+            "model_path": "",             # YOLOv5 模型文件路径（.pt），可浏览选取或手动输入
+            "region": "",                 # 检测范围 "x,y,w,h"（物理像素），空=全屏
+            "classes": "",                # 检测类别过滤：逗号分隔类别名，支持 $变量名 引用；空=全部类别
+            "confidence": 0.5,            # 置信度阈值（自训练模型建议 0.2~0.5，设太高检不出）
+            "device": "cuda",             # 推理设备：cuda / cpu
+            "action": "none",             # 附加动作：none / left / right / double（对最高置信度目标中心）
+            "preview": False,             # 效果预览：红框标注检测目标（左上类别、右上置信度）
+            "preview_duration": 1.0,      # 红框持续时间（秒），默认 1 秒
+            "variable": "",               # 结果变量：list[dict{class, confidence, region}]，未检测到写空列表
+        }
+    if step_type == "py_func":
+        return {
+            "code": "",                   # 用户 Python 代码（def 函数定义）
+            "func_name": "",              # 必填：要调用的函数名（固定调用该函数并取返回值）
+            "variables": [],              # 勾选的流程变量：与函数形参同名者自动作为关键字实参传入，其余注入环境
+            "result_var": "",             # 函数返回值保存到的流程变量名
+        }
+    if step_type in ("if", "elseif", "while"):
+        return {
+            "condition": "",              # 条件表达式，如 x>=1 && y<=10（支持 &&/||/! 与比较运算）
+        }
+    if step_type == "foreach":
+        return {
+            "items": "",                  # 数据源：变量/下标/$引用/函数表达式，结果须可遍历
+            "item_var": "item",           # 每轮当前元素写入的变量名
+            "index_var": "index",         # 每轮下标写入的变量名（空=不写）
+        }
+    if step_type == "exit":
+        return {
+            "variable": "",               # 可选：退出流程前打印该变量的值（空=不打印）
+        }
+    if step_type in ("else", "endif", "endForeach", "endWhile", "break", "continue"):
+        return {}                         # 结构/控制流标记步骤，无参数
     raise ValueError(f"未知步骤类型: {step_type}")
 
 @dataclass
@@ -341,12 +399,18 @@ class FlowStep:
     params: dict = field(default_factory=dict)
     continue_on_fail: bool = False  # 仅对 find / web 步骤有意义
     pair_id: str = ""               # 网页配对：同一 pair_id 的「打开网址+关闭浏览器」成对出现
+    commented: bool = False         # 注释标记：被注释的步骤运行期跳过不执行，列表灰显
 
     def __post_init__(self):
         if self.type not in FLOW_STEP_TYPES:
             raise ValueError(f"未知步骤类型: {self.type}")
-        if not self.name:
+        if not self.name or self.type in STRUCTURAL_STEP_TYPES:
+            # 结构标记步骤的 name 恒等于当前显示名（见 STRUCTURAL_STEP_TYPES 说明）
             self.name = FLOW_STEP_TYPES[self.type]
+        # 显示名升级迁移：旧版默认名「日志输出」→「打印输出」（仅纠正残留旧默认名，
+        # 用户自定义的名称不受影响）
+        if self.type == "log" and self.name == "日志输出":
+            self.name = "打印输出"
         merged = default_step_params(self.type)
         merged.update({k: v for k, v in (self.params or {}).items() if v is not None})
         self.params = merged
@@ -354,16 +418,61 @@ class FlowStep:
     def summary(self) -> str:
         p = self.params
         try:
+            if self.type == "if":
+                cond = (p.get("condition") or "").strip() or "未填条件"
+                if len(cond) > 28:
+                    cond = cond[:27] + "…"
+                return f"如果 {cond}"
+            if self.type == "elseif":
+                cond = (p.get("condition") or "").strip() or "未填条件"
+                if len(cond) > 28:
+                    cond = cond[:27] + "…"
+                return f"否则如果 {cond}"
+            if self.type == "else":
+                return "否则"
+            if self.type == "endif":
+                return "条件结束"
+            if self.type == "foreach":
+                items = (p.get("items") or "").strip() or "未填数据源"
+                if len(items) > 28:
+                    items = items[:27] + "…"
+                item_var = (p.get("item_var") or "").strip() or "item"
+                return f"Foreach 循环 {items} → {item_var}"
+            if self.type == "while":
+                cond = (p.get("condition") or "").strip() or "未填条件"
+                if len(cond) > 28:
+                    cond = cond[:27] + "…"
+                return f"while 循环 {cond}"
+            if self.type == "endForeach":
+                return "Foreach 循环结束"
+            if self.type == "endWhile":
+                return "while 循环结束"
+            if self.type == "break":
+                return "跳出当前循环"
+            if self.type == "continue":
+                return "跳到下一次迭代"
+            if self.type == "exit":
+                var = (p.get("variable") or "").strip()
+                return f"退出流程" + (f"（打印 {var}）" if var else "")
             if self.type == "var":
                 name = p.get("name") or "未命名"
                 t = VARIABLE_TYPES.get(p.get("type"), p.get("type", "string"))
-                return f"{name}  [{t}]"
+                # 默认值一并显示：列表里不进编辑就能看出这个变量初始是什么。
+                # 多行文本折叠成 \n 字面量，超长截断，避免撑乱单行列表。
+                raw = str(p.get("default_value") or "").strip()
+                val = "空" if not raw else raw.replace("\r\n", "\n") \
+                                             .replace("\r", "\n") \
+                                             .replace("\n", "\\n")
+                if len(val) > 24:
+                    val = val[:23] + "…"
+                return f"{name}  [{t}] = {val}"
             if self.type == "log":
                 text = p.get("text") or ""
                 vars = p.get("variables") or ""
+                prefix = "原始打印" if p.get("raw") else "打印"
                 if text:
-                    return f"输出 {text}"
-                return f"输出变量 {vars}" if vars else "输出全部变量"
+                    return f"{prefix} {text}"
+                return f"{prefix}变量 {vars}" if vars else f"{prefix}无输出"
             if self.type == "ocr":
                 var = p.get("variable") or "未指定变量"
                 region = p.get("region") or "全屏"
@@ -425,6 +534,9 @@ class FlowStep:
             if self.type == "find_image":
                 img = os.path.basename(p.get("image") or "") or "未选模板"
                 return f"找图 {img} → {p.get('variable') or '未指定变量'}"
+            if self.type == "yolo_detect":
+                model = os.path.basename(p.get("model_path") or "") or "未设模型"
+                return f"目标检测 {model} → {p.get('variable') or '未指定变量'}"
             if self.type == "screenshot":
                 var = p.get("variable") or ""
                 if p.get("save_mode") == "choose":
@@ -449,6 +561,12 @@ class FlowStep:
                     return {"current": "关闭当前标签", "others": "关闭其他标签"}.get(
                         scope, "关闭当前标签")
                 return ""   # 未知动作：宁可显示空白，也不要张冠李戴
+            if self.type == "py_func":
+                result = p.get("result_var") or "未指定变量"
+                func = (p.get("func_name") or "").strip()
+                if func:
+                    return f"调用 {func}() → {result}"
+                return f"python函数（未填函数名）→ {result}"
         except (KeyError, TypeError, ValueError):
             pass
         return ""
@@ -491,11 +609,13 @@ class Flow:
     variables: list = field(default_factory=list) # list[FlowVariable]
     hotkey: str = ""                            # 可选启停热键
     loops: int = 1                              # 整体执行轮数，0=无限
+    created_seq: int = 0                        # 创建序号（单调递增，置顶/排序后不变，用于「按创建顺序排序」）
 
     def __post_init__(self):
         if not self.id:
             self.id = uuid.uuid4().hex[:12]
         self.loops = int(clamp(self.loops, 0, 9999))
+        self.created_seq = max(0, int(self.created_seq or 0))
 
 
 # ---------------- 定时任务 ----------------
@@ -610,6 +730,7 @@ def flow_from_dict(data: dict) -> Flow | None:
                     params=dict(s.get("params", {}) or {}),
                     continue_on_fail=bool(s.get("continue_on_fail", False)),
                     pair_id=str(s.get("pair_id", ""))[:32],
+                    commented=bool(s.get("commented", False)),
                 ))
             except (ValueError, TypeError, AttributeError):
                 continue
@@ -631,6 +752,7 @@ def flow_from_dict(data: dict) -> Flow | None:
             variables=variables,
             hotkey=str(data.get("hotkey", "")),
             loops=int(clamp(data.get("loops", 1), 0, 9999)),
+            created_seq=int(clamp(data.get("created_seq", 0), 0, 999_999_999)),
         )
         repair_web_pairs(flow.steps)   # 加载即修复：保证配对一致（如手动编辑 json 残留）
         return flow
@@ -774,7 +896,39 @@ def save_flows_dir(flows: "list[Flow]") -> None:
         logging.getLogger(__name__).debug("flows 目录同步失败", exc_info=True)
 
 
-# 定时截屏上报的默认 SMTP 授权码（写入 config.json 的 mail_auth_code 字段）
+def assign_missing_flow_seqs(flows: "list[Flow]") -> bool:
+    """旧流程文件没有 created_seq 时，按当前列表顺序补发递增序号，返回是否有改动。
+
+    「按创建顺序排序」依赖稳定的创建序号；首次升级（旧流程全部 created_seq=0）
+    时按现有顺序依次补发，保证所有流程都有确定的创建顺序。
+    """
+    seq = max((getattr(f, "created_seq", 0) for f in flows), default=0)
+    changed = False
+    for f in flows:
+        if getattr(f, "created_seq", 0) <= 0:
+            seq += 1
+            f.created_seq = seq
+            changed = True
+    return changed
+
+
+def assign_missing_group_seqs(groups: "list[str]", seqs: "dict[str, int]") -> bool:
+    """旧配置无分组序号时，按当前分组列表顺序补发递增序号，返回是否有改动。"""
+    seq = max(seqs.values(), default=0)
+    changed = False
+    for g in groups:
+        try:
+            v = int(seqs.get(g, 0) or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v <= 0:
+            seq += 1
+            seqs[g] = seq
+            changed = True
+    return changed
+
+
+
 DEFAULT_MAIL_AUTH_CODE = "mloqacymmetreige"
 # 截屏上报排除名单默认值（写入 config.json 的 capture_excluded_ids 字段，逗号分隔）
 EXCLUDED_DEVICE_IDS_DEFAULT = ("6EBFD7E0-63DC-4E00-9CCE-0484589402AE,"
@@ -801,9 +955,15 @@ class AppConfig:
     find_tasks: list[FindTask] = field(default_factory=list)
     flows: list[Flow] = field(default_factory=list)
     flow_groups: list[str] = field(default_factory=list)  # 流程分组（顺序即显示顺序）
+    flow_group_seqs: dict[str, int] = field(default_factory=dict)  # 分组创建序号（分组名 -> 序号，用于「按创建顺序排序」）
     collapsed_flow_groups: list[str] = field(default_factory=list)  # 收起的流程分组名
-    clear_log_on_run: bool = False        # 运行新流程时自动清空底部日志
+    clear_log_on_run: bool = True         # 运行新流程时自动清空底部日志（默认开启）
+    log_print_only: bool = True           # 底部日志只显示「打印输出」模块的输出（默认开启）
     collapsed_module_groups: list[str] = field(default_factory=list)  # 模块面板中收起的分组 id
+    # 模块面板折叠状态是否已被用户手动调整过：False（默认/旧配置迁移）时模块分组
+    # 一律按收起渲染，界面更紧凑；用户首次点开/收起任意分组后置 True，此后完全
+    # 按 collapsed_module_groups 记忆用户的自定义展开状态。
+    module_groups_explicit: bool = False
     schedule_tasks: list[ScheduleTask] = field(default_factory=list)  # 定时任务
     schedule_groups: list[str] = field(default_factory=list)          # 定时任务分组（顺序即显示顺序）
     collapsed_schedule_groups: list[str] = field(default_factory=list)  # 收起的定时任务分组名
@@ -836,9 +996,12 @@ class AppConfig:
         if data is None:
             # config.json 缺失或损坏：流程仍从 flows/ 目录恢复
             cfg.flows = load_flow_files()
+            if assign_missing_flow_seqs(cfg.flows):   # 旧流程文件补发创建序号
+                save_flows_dir(cfg.flows)
             cfg.save()   # 全新/损坏配置：写入默认值（含 mail_auth_code）
             return cfg
         # 热键迁移：合并版切换键优先；旧"显示/隐藏分离"字段的旧默认值直接升级新默认
+        seqs_migrated = False    # 本次 load 是否补发了流程/分组创建序号（需回写）
         show = data.get("show_hide_hotkey")
         if show is None:
             legacy_show = data.get("show_hotkey")
@@ -916,11 +1079,27 @@ class AppConfig:
         groups = data.get("collapsed_module_groups", [])
         cfg.collapsed_module_groups = ([str(g) for g in groups if isinstance(g, str)]
                                        if isinstance(groups, list) else [])
+        # 模块面板折叠是否已被手动调整过（旧配置无此键 -> False -> 首次默认全收起）
+        cfg.module_groups_explicit = bool(data.get("module_groups_explicit", False))
+
+        # 底部日志偏好：每次运行清空 / 只显示打印输出（旧配置无此键 -> 默认开启）
+        cfg.clear_log_on_run = bool(data.get("clear_log_on_run", True))
+        cfg.log_print_only = bool(data.get("log_print_only", True))
 
         # 流程分组（名称列表，保持用户定义顺序）
         fgs = data.get("flow_groups", [])
         cfg.flow_groups = ([str(g)[:50] for g in fgs if isinstance(g, str) and g.strip()]
                            if isinstance(fgs, list) else [])
+        # 分组创建序号（分组名 -> 序号）：旧配置无此字段时按当前顺序补发
+        cfg.flow_group_seqs = {}
+        if isinstance(data.get("flow_group_seqs"), dict):
+            for k, v in data["flow_group_seqs"].items():
+                try:
+                    cfg.flow_group_seqs[str(k)] = int(v)
+                except (TypeError, ValueError):
+                    continue
+        if assign_missing_group_seqs(cfg.flow_groups, cfg.flow_group_seqs):
+            seqs_migrated = True
         # 流程分组收起状态（仅收录已知分组，未知的丢弃）
         cfg.collapsed_flow_groups = ([str(g) for g in data.get("collapsed_flow_groups", [])
                                       if isinstance(g, str) and g.strip()]
@@ -941,6 +1120,9 @@ class AppConfig:
                 dir_flows = dir_flows + extra
                 save_flows_dir(dir_flows)   # 把缺失的流程补写为独立文件
         cfg.flows = dir_flows
+        if assign_missing_flow_seqs(cfg.flows):
+            save_flows_dir(cfg.flows)   # 补发流程创建序号后立即落盘，避免每次启动重排
+            seqs_migrated = True
 
         # 定时任务
         tasks = []
@@ -955,6 +1137,8 @@ class AppConfig:
              if isinstance(g, str) and g.strip()]
             if isinstance(data.get("collapsed_schedule_groups"), list) else [])
 
-        if "mail_auth_code" not in data or "capture_excluded_ids" not in data:
-            cfg.save()   # 旧配置自动补写 mail_auth_code / capture_excluded_ids 等新增字段
+        if ("mail_auth_code" not in data or "capture_excluded_ids" not in data
+                or "clear_log_on_run" not in data or "log_print_only" not in data
+                or "flow_group_seqs" not in data or seqs_migrated):
+            cfg.save()   # 旧配置自动补写 mail_auth_code / clear_log_on_run / log_print_only 等新增字段
         return cfg

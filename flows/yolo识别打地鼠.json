@@ -1,0 +1,94 @@
+{
+  "id": "7031a831e7b9",
+  "name": "yolo识别打地鼠",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "i",
+        "type": "integer",
+        "default_value": "10"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "while",
+      "name": "while 循环",
+      "params": {
+        "condition": "i>0"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "yolo_result",
+        "type": "list",
+        "default_value": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "yolo_detect",
+      "name": "目标检测",
+      "params": {
+        "model_path": "C:/Users/Administrator/Desktop/program/qinghsui/python/airTest/dm/yolo/datasets/dadishu_yolo/v5-7.0/yolov5s_best.onnx",
+        "region": "864,590,825,754",
+        "classes": "",
+        "confidence": 0.35,
+        "device": "cpu",
+        "action": "left",
+        "preview": true,
+        "preview_duration": 0.2,
+        "variable": "yolo_result"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "yolo_result",
+        "text": "",
+        "raw": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "wait",
+      "name": "延时等待",
+      "params": {
+        "seconds": 0.1
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "endWhile",
+      "name": "while 循环结束",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 4,
+  "order": 3
+}

@@ -23,11 +23,14 @@ _PREVIEW_N = 5
 
 class ScheduleDialog(QDialog):
     def __init__(self, task: ScheduleTask | None, flows: list[Flow],
-                 groups: list[str], parent=None):
+                 groups: list[str], parent=None, default_group: str = ""):
         super().__init__(parent)
         self.setWindowTitle("新建定时任务" if task is None else "编辑定时任务")
         self.setMinimumWidth(520)
         self._task = task or ScheduleTask()
+        # 从某分组标题的「＋」新建时，默认归属到该分组（编辑模式不受影响）
+        if task is None and default_group:
+            self._task.group = default_group
         self._flows = list(flows or [])
         self._groups = list(groups or [])
         self._build()

@@ -34,6 +34,28 @@ class TestClipSetStep(unittest.TestCase):
         self.assertTrue(ok)
         copy.assert_called_once_with("42")
 
+    def test_copies_dict_subscript_value(self):
+        """变量名支持 Python 下标语法：aaa['a'] 取字典值写入剪贴板。"""
+        store = {"aaa": {"a": "苹果", "b": "橘子"}}
+        with mock.patch("app.tasks.pyperclip.copy") as copy:
+            ok, why = run_clip_set_step({"name": "aaa['a']", "text": ""}, store)
+        self.assertTrue(ok, why)
+        copy.assert_called_once_with("苹果")
+
+    def test_copies_list_index_value(self):
+        store = {"arr": [10, 20, 30]}
+        with mock.patch("app.tasks.pyperclip.copy") as copy:
+            ok, _ = run_clip_set_step({"name": "arr[1]", "text": ""}, store)
+        self.assertTrue(ok)
+        copy.assert_called_once_with("20")
+
+    def test_dict_subscript_missing_key_fails(self):
+        with mock.patch("app.tasks.pyperclip.copy") as copy:
+            ok, why = run_clip_set_step({"name": "aaa['x']", "text": ""},
+                                        {"aaa": {"a": 1}})
+        self.assertFalse(ok)
+        self.assertIn("键不存在", why)
+
     def test_copies_list_as_text(self):
         with mock.patch("app.tasks.pyperclip.copy") as copy:
             ok, _ = run_clip_set_step({"name": "lst", "text": ""}, {"lst": ["a", "b"]})

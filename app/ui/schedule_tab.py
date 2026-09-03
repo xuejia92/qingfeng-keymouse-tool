@@ -41,7 +41,6 @@ class ScheduleTab(QWidget):
         self.flow_tab = flow_tab
         self._tasks = cfg.schedule_tasks
         self.runner = ScheduleRunner(lambda: self._tasks)
-        self._probe = None   # 临时窗口探针引用（定位一闪而逝弹窗用）
         self.runner.due.connect(self._on_due)
         self._build_ui()
         self.refresh_list()
@@ -438,7 +437,10 @@ class ScheduleTab(QWidget):
 
     # ---------- 任务操作 ----------
     def _new_task(self, group: str = ""):
-        dlg = ScheduleDialog(None, self.cfg.flows, self.cfg.schedule_groups, self)
+        """新建定时任务。从分组标题的「＋」进入时，group 为该分组名，
+        对话框内「所属分组」默认选中它；从顶部「＋ 新建定时任务」进入则默认未分组。"""
+        dlg = ScheduleDialog(None, self.cfg.flows, self.cfg.schedule_groups, self,
+                             default_group=group)
         if dlg.exec() == ScheduleDialog.Accepted:
             self._tasks.append(dlg._task)
             self._after_task_change(dlg._task, select=True)
@@ -628,7 +630,6 @@ class ScheduleTab(QWidget):
         task = next((t for t in self._tasks if t.id == task_id), None)
         if task is None:
             return
-        self._start_probe()
         self._fire(task, silent=True)
 
     def _fire(self, task: ScheduleTask, silent: bool = False):
