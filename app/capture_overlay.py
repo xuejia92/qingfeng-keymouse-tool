@@ -602,3 +602,313 @@ def run_window_picker(on_picked, on_cancelled) -> None:
         ov.raise_()
         ov.activateWindow()
         ov.setFocus()
+
+
+# ---------------------------------------------------------------------------
+# 屏幕取色遮罩
+# ---------------------------------------------------------------------------
+
+_COLOR_GRID = 15        # 放大像素网格边长（奇数：中心像素 = 鼠标所指）
+_COLOR_CELL = 14        # 每个取色像素放大后的边长（逻辑像素）
+_COLOR_ZOOM = _COLOR_GRID * _COLOR_CELL
+_MAG_GAP = 18           # 放大镜与光标的间距（逻辑像素），避免遮挡取色目标
+
+
+class ColorPickerOverlay(QWidget):
+    """屏幕取色遮罩：鼠标旁实时放大屏幕像素，单击取中心颜色。
+
+    与窗口识别遮罩一致走「不冻结屏幕」路线：遮罩窗口全透明（WA_TranslucentBackground），
+    用 QTimer 定时抓取鼠标周围一小块物理像素（mss 复用单实例），放大绘制在光标附近
+    （右上优先、靠边自动翻转，不遮挡目标像素）。透明背景保证抓屏结果是真实屏幕内容——
+    遮罩不掺色，取色才准。
+
+    单击确认返回鼠标所指物理像素的 RGB；右键 / Esc 取消。
+    """
+
+    colorPicked = Signal(int, int, int)   # r, g, b
+    cancelled = Signal()
+
+    def __init__(self, screen, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CrossCursor)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        geo = screen.geometry()
+        self.setGeometry(geo)
+        self._phys_origin_x, self._phys_origin_y, self._phys_w, self._phys_h = \
+            _physical_geometry(screen)
+        self._logic_w = max(geo.width(), 1)
+        self._logic_h = max(geo.height(), 1)
+        self._half = (_COLOR_GRID - 1) // 2      # 取色区域中心到边缘的像素数
+
+        self._cursor = (0, 0)      # 当前鼠标物理坐标
+        self._in_me = False        # 鼠标是否在本屏
+        self._bgr = None           # 最新抓到的取色区 (grid, grid, 3) BGR
+        self._rgb = (0, 0, 0)      # 中心像素颜色（同步跟随 _bgr）
+        self._box_top = (0, 0)     # 放大板左上逻辑坐标（上一帧计算，供信息条跟随）
+        self._mss = None           # mss 抓屏实例（惰性创建 + 复用，避免每帧枚举显示器）
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(30)          # 约 33fps，抓 15x15 像素开销可忽略
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start()
+
+    # ---------- 坐标换算 ----------
+    def _to_logic(self, px: int, py: int) -> tuple[int, int]:
+        x = (px - self._phys_origin_x) * self._logic_w / self._phys_w
+        y = (py - self._phys_origin_y) * self._logic_h / self._phys_h
+        return int(round(x)), int(round(y))
+
+    # ---------- 刷新与抓屏 ----------
+    def _track(self):
+        """只更新光标位置与「是否在本屏」，不做抓屏（廉价，供鼠标移动即时刷新）。"""
+        from . import win_actors
+        x, y = win_actors.cursor_pos()
+        self._cursor = (x, y)
+        self._in_me = (self._phys_origin_x <= x < self._phys_origin_x + self._phys_w and
+                       self._phys_origin_y <= y < self._phys_origin_y + self._phys_h)
+
+    def _refresh(self):
+        """定时器驱动的完整刷新：更新光标 -> 抓取放大区 -> 重绘。"""
+        self._track()
+        if not self._in_me:
+            self._bgr = None
+            self.update()
+            return
+        try:
+            self._bgr = self._grab_around(*self._cursor)
+        except Exception:
+            self._bgr = None
+        if self._bgr is not None:
+            b, g, r = (int(v) for v in self._bgr[self._half, self._half])
+            self._rgb = (r, g, b)
+        self.update()
+
+    def _get_mss(self):
+        """复用单个 mss 实例：mss.mss() 每次创建都会重新枚举显示器，开销不小。"""
+        import mss
+        if self._mss is None:
+            self._mss = mss.mss()
+        return self._mss
+
+    def _grab_around(self, px: int, py: int):
+        """抓取光标周围 grid x grid 物理像素；越出本屏的部分补黑。
+
+        抓取矩形先钳制到本屏物理范围内，再把结果按正确偏移放回 canvas，
+        保证中心像素（index=half）恒等于光标所在像素——即使光标贴近屏幕边缘，
+        也不会因为 mss 返回缩水图而整体错位（旧实现按「居中补黑」会错位）。
+        """
+        half = self._half
+        left = px - half
+        top = py - half
+        x0 = max(left, self._phys_origin_x)
+        y0 = max(top, self._phys_origin_y)
+        x1 = min(left + _COLOR_GRID, self._phys_origin_x + self._phys_w)
+        y1 = min(top + _COLOR_GRID, self._phys_origin_y + self._phys_h)
+        canvas = np.zeros((_COLOR_GRID, _COLOR_GRID, 3), dtype=np.uint8)
+        if x0 < x1 and y0 < y1:
+            shot = np.asarray(self._get_mss().grab({
+                "left": x0, "top": y0, "width": x1 - x0, "height": y1 - y0,
+            }))
+            img = np.ascontiguousarray(shot[:, :, :3])
+            dx = x0 - left
+            dy = y0 - top
+            canvas[dy:dy + img.shape[0], dx:dx + img.shape[1]] = img
+        return canvas
+
+    def _place_box(self, cx: int, cy: int) -> tuple[int, int]:
+        """确定放大板左上逻辑坐标：默认放光标右上方（不遮挡取色目标），
+        上方/右侧放不下时自动翻转到其它象限，尽量保持完整可见。"""
+        zw = zh = _COLOR_ZOOM
+        w, h = self.width(), self.height()
+        left = cx + _MAG_GAP
+        top = cy - zh - _MAG_GAP
+        if top < 4:                       # 上方放不下 -> 放下方
+            top = cy + _MAG_GAP
+        if left + zw > w - 4:             # 右侧放不下 -> 放左侧
+            left = cx - zw - _MAG_GAP
+        left = max(4, min(left, w - zw - 4))
+        top = max(4, min(top, h - zh - 4))
+        return left, top
+
+    # ---------- 绘制 ----------
+    def paintEvent(self, event):
+        p = QPainter(self)
+        # 全屏铺一层几乎透明的底色（alpha=1）：让透明遮罩整窗都能命中鼠标/键盘。
+        # 否则纯透明区（alpha=0）会被 Windows 做 hit-test 穿透，导致十字光标不显示、
+        # 单击取色 / Esc / 方向键全部失效。alpha=1 肉眼不可见，最终取色在 hide 后抓屏不受影响。
+        p.fillRect(self.rect(), QColor(0, 0, 0, 1))
+        if self._in_me and self._bgr is not None:
+            cx, cy = self._to_logic(*self._cursor)
+            left, top = self._place_box(cx, cy)
+            self._box_top = (left, top)
+            # 逐像素放大色块
+            for row in range(_COLOR_GRID):
+                for col in range(_COLOR_GRID):
+                    b, g, r = (int(v) for v in self._bgr[row, col])
+                    p.fillRect(QRect(left + col * _COLOR_CELL,
+                                     top + row * _COLOR_CELL,
+                                     _COLOR_CELL, _COLOR_CELL),
+                               QColor(r, g, b))
+            # 网格细线（淡色，辅助数像素）
+            p.setPen(QPen(QColor(0, 0, 0, 36), 1))
+            for i in range(_COLOR_GRID + 1):
+                x = left + i * _COLOR_CELL
+                p.drawLine(x, top, x, top + _COLOR_ZOOM)
+            for i in range(_COLOR_GRID + 1):
+                y = top + i * _COLOR_CELL
+                p.drawLine(left, y, left + _COLOR_ZOOM, y)
+            # 中心像素（= 光标所指，即实际取色点）用高亮框标出
+            ccx0 = left + self._half * _COLOR_CELL
+            ccy0 = top + self._half * _COLOR_CELL
+            p.setPen(QPen(QColor(255, 255, 255, 235), 1))
+            p.drawRect(ccx0 - 1, ccy0 - 1, _COLOR_CELL + 2, _COLOR_CELL + 2)
+            # 放大板外框
+            p.setPen(QPen(QColor(255, 255, 255, 220), 1))
+            p.drawRect(left - 1, top - 1, _COLOR_ZOOM + 2, _COLOR_ZOOM + 2)
+            # 十字准线（贯穿整块，交点即中心像素中心）
+            ccx = ccx0 + _COLOR_CELL // 2
+            ccy = ccy0 + _COLOR_CELL // 2
+            p.setPen(QPen(QColor(255, 255, 255, 200), 1))
+            p.drawLine(left, ccy, left + _COLOR_ZOOM, ccy)
+            p.drawLine(ccx, top, ccx, top + _COLOR_ZOOM)
+            self._draw_color_bar(p)
+        self._draw_hint(p)
+
+    def _draw_color_bar(self, p: QPainter):
+        """放大板正下方的颜色信息条：色块 + HEX + RGB。"""
+        r, g, b = self._rgb
+        left, top = self._box_top
+        bar_w = _COLOR_ZOOM + 2
+        bar_h = 30
+        by = top + _COLOR_ZOOM + 8
+        if by + bar_h > self.height() - 46:      # 底部没位置就放到放大板上方
+            by = top - bar_h - 8
+        hex_s = f"#{r:02X}{g:02X}{b:02X}"
+        rgb_s = f"RGB({r}, {g}, {b})"
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 200))
+        p.drawRoundedRect(QRect(left, by, bar_w, bar_h), 6, 6)
+        p.drawRect(QRect(left + 6, by + 5, 20, 20))     # 色块底色先铺黑
+        p.fillRect(QRect(left + 6, by + 5, 20, 20), QColor(r, g, b))
+        p.setPen(QPen(QColor(255, 255, 255, 160), 1))
+        p.drawRect(left + 6, by + 5, 20, 20)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QRect(left + 34, by, bar_w - 40, bar_h),
+                   Qt.AlignVCenter | Qt.AlignLeft, f"{hex_s}    {rgb_s}")
+
+    def _draw_hint(self, p: QPainter):
+        text = ("移动鼠标或方向键（Shift=10px）微调取色点 · 单击或回车确认 · 右键或 Esc 取消"
+                if self._in_me else "移动鼠标到目标屏幕取色 · 右键或 Esc 取消")
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 180))
+        p.drawRect(0, self.height() - 44, self.width(), 44)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QRect(0, self.height() - 44, self.width(), 44), Qt.AlignCenter, text)
+
+    # ---------- 交互 ----------
+    def mouseMoveEvent(self, ev):
+        # 只做廉价的光标跟踪 + 重绘（用上一帧抓图），真正的抓屏交给 30ms 定时器，
+        # 避免每次鼠标移动都同步抓屏导致放大镜卡顿/滞后。
+        self._track()
+        self.update()
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._confirm_pick()
+        elif ev.button() == Qt.RightButton:
+            self._cancel()
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape:
+            self._cancel()
+            return
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self._confirm_pick()               # 回车 / 小键盘回车 = 确认取色
+            return
+        # 方向键微调取色点（1 物理像素）；按住 Shift 大步进 10 像素
+        step = 10 if (ev.modifiers() & Qt.ShiftModifier) else 1
+        if ev.key() == Qt.Key_Left:
+            self._nudge(-step, 0)
+        elif ev.key() == Qt.Key_Right:
+            self._nudge(step, 0)
+        elif ev.key() == Qt.Key_Up:
+            self._nudge(0, -step)
+        elif ev.key() == Qt.Key_Down:
+            self._nudge(0, step)
+        else:
+            super().keyPressEvent(ev)
+
+    def _nudge(self, dx: int, dy: int) -> None:
+        """把取色点（系统光标）移动 ±N 物理像素并同步刷新放大镜。"""
+        from . import win_actors
+        x, y = self._cursor
+        win_actors.set_cursor_pos(x + dx, y + dy)
+        self._refresh()      # 内部 _track 读回真实光标（系统可能钳制）+ 抓屏 + 重绘
+
+    def _confirm_pick(self):
+        if not self._in_me:
+            return
+        # 隐藏遮罩再抓屏：确保取到真实屏幕像素，而非遮罩自身绘制的内容
+        # （此前取色偶发取到辅助线，正是因为遮罩画的东西被一起抓进了截图）。
+        x, y = self._cursor
+        self.hide()
+        try:
+            bgr = self._grab_around(x, y)
+        except Exception:
+            bgr = None
+        finally:
+            self.show()
+        if bgr is None:
+            return
+        b, g, r = (int(v) for v in bgr[self._half, self._half])
+        from .logbus import log
+        log(f"已取色 #{r:02X}{g:02X}{b:02X} (RGB {r}, {g}, {b})")
+        self.colorPicked.emit(r, g, b)
+        self.close()
+
+    def _cancel(self):
+        self.cancelled.emit()
+        self.close()
+
+
+def run_color_picker(on_picked, on_cancelled) -> None:
+    """在所有屏幕上启动屏幕取色遮罩。
+
+    on_picked(r, g, b)：单击确认后回调颜色（0~255）。
+    on_cancelled()：右键 / Esc 取消后回调。任一屏确认即关闭全部遮罩。
+    """
+    state = {"done": False}
+    overlays: list[ColorPickerOverlay] = []
+    # 全局覆盖十字光标：不依赖遮罩窗口的鼠标命中（透明区穿透也能保持十字），
+    # 取色结束后在 _finish 里恢复。
+    QApplication.setOverrideCursor(Qt.CrossCursor)
+
+    def close_all():
+        for ov in overlays:
+            try:
+                ov.close()
+            except RuntimeError:
+                pass
+
+    def _finish(cb, *args):
+        if state["done"]:
+            return
+        state["done"] = True
+        QApplication.restoreOverrideCursor()
+        close_all()
+        if cb:
+            cb(*args)
+
+    for screen in QApplication.screens():
+        ov = ColorPickerOverlay(screen)
+        ov.colorPicked.connect(lambda r, g, b: _finish(on_picked, r, g, b))
+        ov.cancelled.connect(lambda: _finish(on_cancelled))
+        overlays.append(ov)
+    for ov in overlays:
+        ov.show()
+        ov.raise_()
+        ov.activateWindow()
+        ov.setFocus(Qt.ActiveWindowFocusReason)   # 主动请求键盘焦点，保证 Esc/方向键生效

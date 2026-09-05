@@ -1,0 +1,88 @@
+{
+  "id": "3c8b2c3929e6",
+  "name": "浏览器操作测试",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "dp_browser",
+      "name": "打开浏览器",
+      "params": {
+        "browser_var": "抖音评论",
+        "launch_mode": "attach",
+        "attach_port": "9333",
+        "url": "https://chat.deepseek.com/sign_in",
+        "new_tab": true,
+        "load_timeout_sec": 10.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "dp_element",
+      "name": "元素操作",
+      "params": {
+        "browser_var": "抖音评论",
+        "locator_type": "class",
+        "attr_name": "",
+        "match": "=",
+        "locator_value": "ds-input__input",
+        "index": 1,
+        "action": "input",
+        "input_value": "18551279083",
+        "file_paths": "",
+        "timeout": 10.0,
+        "result_var": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "dp_page_shot",
+      "name": "网页截图",
+      "params": {
+        "browser_var": "抖音评论",
+        "path": "C:\\Users\\Administrator\\Desktop\\program\\清风自动化键鼠工具\\dist\\templates",
+        "name": "",
+        "full_page": false,
+        "result_var": "截图路径"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "截图路径",
+        "text": "",
+        "raw": false,
+        "show_type": true
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "app",
+      "name": "打开应用",
+      "params": {
+        "path": "C:/Users/Administrator/Desktop/program/清风自动化键鼠工具/dist/templates/DeepSeek - 探索未至之境.jpg",
+        "process": "",
+        "target": "",
+        "use_process": true,
+        "wait_sec": 1.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 10,
+  "order": 1
+}

@@ -198,6 +198,48 @@ class TestWebPair(unittest.TestCase):
         self.assertEqual(wait.pair_id, "")
 
 
+class TestContinueOnFailDefault(unittest.TestCase):
+    """失败策略字段的类型级默认：close_app 默认「失败后继续」，其余默认终止。
+
+    continue_on_fail 三态（None=未显式设置）：构造时按类型解析成 bool，
+    序列化/反序列化后仍保持用户显式设置的值。
+    """
+
+    def test_close_app_defaults_continue(self):
+        self.assertTrue(FlowStep(type="close_app").continue_on_fail)
+
+    def test_web_defaults_stop(self):
+        self.assertFalse(FlowStep(type="web").continue_on_fail)
+
+    def test_other_types_default_stop(self):
+        for t in ("wait", "click", "find", "press", "log"):
+            self.assertFalse(FlowStep(type=t).continue_on_fail)
+
+    def test_explicit_false_kept_for_close_app(self):
+        s = FlowStep(type="close_app")
+        s.continue_on_fail = False
+        back = flow_from_dict(flow_to_dict(Flow(steps=[s])))
+        self.assertFalse(back.steps[0].continue_on_fail)
+
+    def test_legacy_close_app_without_field_upgrades_to_true(self):
+        """旧流程文件的 close_app 步骤没有 continue_on_fail 字段 → 载入即默认继续。"""
+        data = {"id": "abc", "name": "F", "steps": [
+            {"type": "close_app", "params": {"process": "notepad.exe"}},
+            {"type": "web", "params": {"action": "open"}},
+        ]}
+        flow = flow_from_dict(data)
+        self.assertIsNotNone(flow)
+        self.assertTrue(flow.steps[0].continue_on_fail)      # close_app 升级为默认勾选
+        self.assertFalse(flow.steps[1].continue_on_fail)     # web 保持默认终止
+
+    def test_explicit_false_in_file_kept(self):
+        data = {"id": "abc", "name": "F", "steps": [
+            {"type": "close_app", "params": {}, "continue_on_fail": False},
+        ]}
+        flow = flow_from_dict(data)
+        self.assertFalse(flow.steps[0].continue_on_fail)
+
+
 class TestFlowIdCompat(unittest.TestCase):
     def test_12_hex(self):
         self.assertTrue(_is_flow_id("0123456789ab"))

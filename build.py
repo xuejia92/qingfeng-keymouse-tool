@@ -49,13 +49,37 @@ HIDDEN_MODULES = [
     "pynput.keyboard._win32",
     "pynput.mouse._win32",
     "mss.windows",
+    # pyttsx3 按驱动名动态 __import__（'pyttsx3.drivers.sapi5'），静态扫描扫不到，
+    # 不显式声明的话打包后语音播报会报「找不到 driver」
+    "pyttsx3.drivers.sapi5",
 ]
 
 # onnxruntime 的条件导入链（cpuinfo+py3nvml 存在时 import transformers 进而
 # 拉入 tensorflow/keras），排除避免体积暴涨
+# 另：本机同时装有 PyQt5/PySide6 时，PyInstaller 会因「多 Qt 绑定」报错中止
+# （attempt to collect multiple Qt bindings packages），程序只用 PySide6，
+# 把其它 Qt 绑定一并排除（官方推荐的 exclude 机制）。
+# 再另：目标检测（yolo_actor）对 torch/ultralytics 已改用 importlib 字符串
+# 动态导入（静态分析扫不到，见 app/yolo_actor.py::_import_lib），本机若残留
+# 任何静态 import（如第三方 hook 的 collect）都会被下面整份防御清单拦住，
+# 防止开发机 site-packages 里整片 ML/AI 生态（paddle/diffusers/ray 等）卷进包。
 EXCLUDED_MODULES = [
     "transformers", "torch", "tensorflow", "keras",
     "cpuinfo", "py3nvml",
+    "PyQt5", "PyQt5.sip", "PyQt6", "PyQt6.sip", "PySide2", "qtpy",
+    # --- AI/ML 生态防御清单（2026-09-03：曾把 exe 撑到 794MB）---
+    "ultralytics", "torchvision", "torchaudio", "torchtext", "torchhub",
+    "paddle", "paddleocr", "paddlex", "paddlenlp",
+    "diffusers", "flax", "gradio", "ray", "streamlit",
+    "yt_dlp", "onnx2tf", "onnxslim", "onnxoptimizer", "onnx_graphsurgeon",
+    "scipy", "pandas", "pyarrow", "polars",
+    "llvmlite", "numba", "matplotlib", "seaborn", "PIL.ImageShow",
+    "sympy", "networkx", "sqlalchemy", "twisted", "openai", "tf_keras",
+    "sentry_sdk", "openpyxl", "peft", "trio", "trl", "bitsandbytes",
+    "sklearn", "skimage", "statsmodels", "xgboost", "lightgbm",
+    "playwright", "patchright", "pygame", "pypinyin",  # 机器上有但程序不用
+    # 注意：不要排除 psutil（DrissionPage 运行依赖）与 onnx 本体（onnxruntime
+    # 的 capi 只依赖自身 dll；onnx 包若有 hook 收集再单独处理）
 ]
 
 # DrissionPage 随包分发的非 .py 数据文件：包内子目录 -> 文件名
@@ -201,6 +225,7 @@ def build_cmd(args) -> list:
         *([] if not args.clean else ["--clean"]),
         *[f"--hidden-import={m}" for m in HIDDEN_MODULES],
         *[f"--exclude-module={m}" for m in EXCLUDED_MODULES],
+        "--additional-hooks-dir", os.path.join(BASE_DIR, "hooks"),
         *[f"--add-data={d}" for d in _add_data_args()],
         os.path.join(BASE_DIR, "main.py"),
     ]

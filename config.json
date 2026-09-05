@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "999.1.1",
   "show_hide_hotkey": "shift+f1",
   "stop_all_hotkey": "shift+f2",
   "capture_interval_sec": 10,
@@ -30,11 +30,9 @@
   },
   "find_tasks": [],
   "flow_groups": [
-    "测试使用",
-    "222"
+    "测试使用"
   ],
   "flow_group_seqs": {
-    "222": 2,
     "测试使用": 1
   },
   "collapsed_flow_groups": [
@@ -44,27 +42,33 @@
   "log_print_only": true,
   "collapsed_module_groups": [
     "app_web",
+    "condition",
+    "drission",
     "input",
-    "perceive"
+    "perceive",
+    "python"
   ],
+  "module_group_titles": {},
+  "module_groups_custom": [],
+  "module_group_assign": {},
   "module_groups_explicit": true,
   "schedule_tasks": [
     {
       "id": "a71cbf5a9910",
       "name": "新建定时任务",
       "group": "",
-      "flow_id": "10982d1ec144",
-      "flow_name": "条件语句判断测试",
+      "flow_id": "f3b3da16ecc3",
+      "flow_name": "打印九九乘法表",
       "enabled": false,
-      "mode": "second",
+      "mode": "minute",
       "interval": 1,
       "at_time": "09:00",
       "weekdays": [],
       "monthdays": [],
-      "once_at": "2026-09-02 15:03",
+      "once_at": "2026-09-05 13:04",
       "cron": "",
-      "last_run": "2026-09-02 17:13:57",
-      "next_run": "",
+      "last_run": "2026-09-05 13:03:50",
+      "next_run": "2026-09-05 13:04:00",
       "missed_fires": 0,
       "last_alert_date": ""
     }

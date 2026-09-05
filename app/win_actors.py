@@ -125,6 +125,11 @@ def cursor_pos() -> tuple[int, int]:
     return int(pt.x), int(pt.y)
 
 
+def set_cursor_pos(x: int, y: int) -> bool:
+    """把系统鼠标移动到指定屏幕物理坐标；成功返回 True。"""
+    return bool(_user32.SetCursorPos(int(x), int(y)))
+
+
 def window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
     """窗口的屏幕物理矩形 (x, y, w, h)；无效返回 None。"""
     if not hwnd or not window_exists(hwnd):
@@ -305,6 +310,35 @@ def activate_window(hwnd: int) -> bool:
     return True
 
 
+def bring_to_front(hwnd: int) -> bool:
+    """把窗口带到前台并保持（「打开应用」带出已运行实例用）。
+
+    与 activate_window 的差别：activate_window 是后台键鼠的「临时置顶」——
+    记录原前台、保留线程绑定，之后由 restore_foreground() 还原；本函数置顶后
+    立即解除线程绑定、不记录还原，前台就停留在目标窗口。
+    """
+    if not hwnd or not window_exists(hwnd):
+        return False
+    SW_RESTORE = 9
+    hw = wintypes.HWND(hwnd)
+    # 最小化的窗口先还原再置顶（SetForegroundWindow 对最小化窗口无效）
+    _user32.ShowWindow(hw, SW_RESTORE)
+    target_tid = int(_user32.GetWindowThreadProcessId(hw, None) or 0)
+    cur_tid = int(_kernel32.GetCurrentThreadId())
+    attached: list[int] = []
+    if target_tid and target_tid != cur_tid:
+        if _user32.AttachThreadInput(cur_tid, target_tid, True):
+            attached.append(target_tid)
+    _user32.SetForegroundWindow(hw)
+    _user32.SetFocus(hw)
+    for tid in attached:
+        try:
+            _user32.AttachThreadInput(cur_tid, tid, False)
+        except Exception:
+            pass
+    return True
+
+
 def restore_foreground() -> None:
     """恢复 activate_window() 之前的前台窗口，并断开线程绑定。"""
     global _prev_foreground, _attached_tids
@@ -326,9 +360,10 @@ def restore_foreground() -> None:
 # ---------- 启动应用 ----------
 
 def launch_app(path: str) -> tuple[bool, str]:
-    """打开本地程序/文件。返回 (成功?, 结果描述)。
+    """打开本地程序/文件/文件夹。返回 (成功?, 结果描述)。
 
-    支持：绝对/相对路径、PATH 里的命令名（如 notepad.exe）、文档/快捷方式。
+    支持：绝对/相对路径、PATH 里的命令名（如 notepad.exe）、文档/快捷方式；
+    目录路径用系统默认方式打开（资源管理器）。
     """
     path = (path or "").strip()
     if not path:
@@ -474,11 +509,56 @@ def list_processes() -> list[dict]:
         items.append({
             "pid": pid,
             "name": name,
+            "path": path,
             "app_name": _file_description(path),
             "title": titles[0],
         })
     items.sort(key=lambda x: (x["app_name"] or x["name"]).lower())
     return items
+
+
+def find_process_window(name: str) -> int:
+    """按进程名找其第一个有可见窗口的主窗口句柄（「打开应用」带出已运行实例用）。
+
+    进程名不区分大小写；填完整路径自动取文件名；不带 .exe 自动补。
+    目标进程未运行、或没有可见窗口时返回 0。
+    """
+    raw = (name or "").strip().replace("/", os.sep)
+    base = raw.rsplit(os.sep, 1)[-1]
+    if not base:
+        return 0
+    if not base.lower().endswith(".exe"):
+        base += ".exe"
+    target = base.lower()
+
+    # 先收集匹配进程名的 PID（避免对每个窗口做一次进程路径查询）
+    pids: set[int] = set()
+    for pid in _enum_pids():
+        path = _process_path(pid)
+        if path and os.path.basename(path).lower() == target:
+            pids.add(pid)
+    if not pids:
+        return 0
+
+    found = [0]
+    _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, _lparam):
+        if found[0]:
+            return False                          # 已找到，停止枚举
+        if not _user32.IsWindowVisible(hwnd):
+            return True
+        if _user32.GetWindowTextLengthW(hwnd) <= 0:
+            return True                           # 无标题的透明/工具窗口跳过
+        pid = ctypes.c_uint()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if int(pid.value) in pids:
+            found[0] = int(hwnd)
+            return False
+        return True
+
+    _user32.EnumWindows(_WNDENUMPROC(_cb), 0)
+    return found[0]
 
 
 def close_app(target: str) -> tuple[bool, str]:

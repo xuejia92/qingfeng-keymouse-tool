@@ -428,6 +428,47 @@ class TestRunLogStep(unittest.TestCase):
             run_log_step({"variables": "a\\b, b", "raw": True}, store)
         self.assertEqual(lg.call_args[0][0], "甲 乙")
 
+    def test_show_type_appends_python_type(self):
+        """勾选「显示变量的 Python 类型」时，值后追加类型名。"""
+        from unittest import mock
+        from app.tasks import run_log_step
+        store = {"count": 5, "name": "张三", "flag": True, "data": [1, 2]}
+        with mock.patch("app.tasks.log_print") as lg:
+            ok, _ = run_log_step(
+                {"variables": "count, name, flag, data", "text": "", "show_type": True},
+                store)
+        self.assertTrue(ok)
+        self.assertEqual(lg.call_args[0][0],
+                         "count = 5 (int)\nname = 张三 (str)\nflag = true (bool)\ndata = [1, 2] (list)")
+
+    def test_show_type_default_off(self):
+        """未勾选时不带类型标注（默认行为不回退）。"""
+        from unittest import mock
+        from app.tasks import run_log_step
+        store = {"count": 5}
+        with mock.patch("app.tasks.log_print") as lg:
+            run_log_step({"variables": "count", "text": ""}, store)
+        self.assertEqual(lg.call_args[0][0], "count = 5")
+
+    def test_show_type_undefined_var_has_no_type(self):
+        """解析失败的变量仍只标注原因，不带类型。"""
+        from unittest import mock
+        from app.tasks import run_log_step
+        with mock.patch("app.tasks.log_print") as lg:
+            ok, _ = run_log_step({"variables": "nope", "text": "", "show_type": True}, {})
+        self.assertTrue(ok)
+        self.assertIn("未定义", lg.call_args[0][0])
+        self.assertNotIn("()", lg.call_args[0][0])
+
+    def test_show_type_raw_output(self):
+        """「原始输出」+ 显示类型：值后也追加类型名，位置在换行/空格分隔符之前。"""
+        from unittest import mock
+        from app.tasks import run_log_step
+        store = {"a": "甲", "b": 7}
+        with mock.patch("app.tasks.log_print_raw") as lg:
+            run_log_step({"variables": "a\\n, b", "raw": True, "show_type": True}, store)
+        self.assertEqual(lg.call_args[0][0], "甲 (str)\n7 (int)")
+
     def test_text_newline_escape(self):
         """「附加文本」字面量 \\n 转成换行。"""
         from unittest import mock

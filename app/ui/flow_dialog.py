@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
 
 from ..config import VARIABLE_TYPES, WEB_ACTIONS, Flow, FlowStep
 from ..conditions import check_condition_variables
+from ..dp_actors import (DP_ELE_ACTIONS, DP_LISTEN_ACTIONS, DP_LOCATORS,
+                         DP_MATCHES, DP_TAB_MODES)
 from ..web_actors import LAUNCH_MODES, TAB_SCOPES
 from .hotkey_edit import HotkeyEdit
 
@@ -26,13 +28,18 @@ MIME_TYPE = "application/x-qf-flow-type"
 
 _TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "text_find": "🔍",
                "screenshot": "📷", "find_image": "🎯", "yolo_detect": "🧠",
+               "color_pick": "🎨",
                "click": "🖱", "press": "⌨", "find": "🖼",
-               "wait": "⏱", "web": "🌐", "app": "🚀", "close_app": "⏹",
+               "wait": "⏱", "web": "🌐", "http_request": "📡", "deepseek": "🤖", "script": "📜", "notify": "🔔", "speech": "🔊", "app": "🚀", "close_app": "⏹",
                "clip_set": "📤", "clip_get": "📥", "py_func": "🐍",
                "if": "🔀", "elseif": "🔁", "else": "↩️", "endif": "🏁",
                "foreach": "🔄", "while": "♻️",
                "endForeach": "🏁", "endWhile": "🏁",
-               "break": "🛑", "continue": "⏭️", "exit": "🔚"}
+               "break": "🛑", "continue": "⏭️", "exit": "🔚",
+               "dp_browser": "🖥", "dp_element": "🧩", "dp_tab": "🗂",
+               "dp_listen": "🎧", "dp_page_shot": "📸", "dp_ele_shot": "🎞",
+               "dp_upload": "📎",
+               "dp_close_browser": "⏹"}
 
 
 class ModuleButton(QPushButton):
@@ -317,15 +324,19 @@ class FlowMetaDialog(QDialog):
 
 
 class ProcessPickerDialog(QDialog):
-    """选择正在运行的进程（供「关闭应用」用）。
+    """选择正在运行的进程（供「关闭应用」「打开应用」用）。
 
     每条显示「应用名 — 进程名 — 窗口标题」，窗口标题用于区分多开实例；
-    支持关键字过滤，双击或确定返回选中的进程名。
+    支持关键字过滤，双击或确定返回选中的进程。purpose:
+    - "close"：选要关闭的进程（按钮「关闭所选进程」）；
+    - "open"：选要带出/打开的进程（按钮「选中该进程」，title 供回填 exe 路径）。
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, purpose: str = "close"):
         super().__init__(parent)
-        self.setWindowTitle("选择要关闭的进程")
+        self._purpose = purpose if purpose in ("close", "open") else "close"
+        self.setWindowTitle("选择要关闭的进程" if self._purpose == "close"
+                            else "选择要带出的进程")
         self.setMinimumSize(460, 500)
 
         layout = QVBoxLayout(self)
@@ -352,7 +363,8 @@ class ProcessPickerDialog(QDialog):
         self._update_hint()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("关闭所选进程")
+        buttons.button(QDialogButtonBox.Ok).setText(
+            "关闭所选进程" if self._purpose == "close" else "选中该进程")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -361,6 +373,12 @@ class ProcessPickerDialog(QDialog):
         self.search.setFocus()
 
     def _update_hint(self):
+        if self._purpose == "open":
+            self.hint.setText(
+                f"共 {len(self._processes)} 个正在运行的应用。\n"
+                "选中后：运行「打开应用」时若该进程仍在运行 → 直接把窗口带到前台；\n"
+                "若已不在运行 → 按它原来的 exe 完整路径重新启动。")
+            return
         self.hint.setText(
             f"共 {len(self._processes)} 个正在运行的应用"
             "（仅列有窗口的程序，后台子进程已过滤）。")
@@ -411,6 +429,7 @@ class StepParamsDialog(QDialog):
     templateCaptureRequested = Signal()  # find 步骤点"屏幕截图选区"
     pointCaptureRequested = Signal()     # click 步骤点"屏幕点选坐标"
     windowCaptureRequested = Signal()    # app/click/press 步骤点"拖动识别窗口"
+    colorPickRequested = Signal()        # color_pick 步骤点"屏幕取色…"
 
     def __init__(self, step: FlowStep, parent=None):
         super().__init__(parent)
@@ -427,15 +446,22 @@ class StepParamsDialog(QDialog):
             QMessageBox.warning(self, "请设置变量坐标",
                                 "已选择「变量坐标」，请选择流程中声明的坐标变量。")
             return
-        # 截图步骤：必须框选区域；「默认保存」必须选择结果变量（自选保存可选）
+        # 截图步骤：区域可留空（=全屏，默认），不强制框选；「默认保存」必须选择
+        # 结果变量（自选保存可选）
         if self._step.type == "screenshot" and getattr(self, "save_var_radio", None) is not None:
-            if not getattr(self, "_region", ""):
-                QMessageBox.warning(self, "请设置截图区域",
-                                    "请先点击「框选区域…」选择截图区域。")
-                return
             if self.save_var_radio.isChecked() and not self._combo_value(self.shot_variable):
                 QMessageBox.warning(self, "请设置结果变量",
                                     "已选择「默认保存」，请选择接收截图路径的结果变量。")
+                return
+        # 屏幕取色：必须先取色，且必须选择结果变量
+        if self._step.type == "color_pick" and getattr(self, "cp_variable", None) is not None:
+            if not getattr(self, "_pick_rgb", None):
+                QMessageBox.warning(self, "请先取色",
+                                    "请点击「屏幕取色…」，在屏幕上单击拾取目标颜色。")
+                return
+            if not self._combo_value(self.cp_variable):
+                QMessageBox.warning(self, "请设置结果变量",
+                                    "请选择接收取色结果（HEX 如 #FF0000 / RGB 如 255,0,0）的结果变量。")
                 return
         # 找图步骤：必须设置模板图与结果变量
         if self._step.type == "find_image" and getattr(self, "find_var", None) is not None:
@@ -473,6 +499,86 @@ class StepParamsDialog(QDialog):
                 QMessageBox.warning(self, "请设置结果变量",
                                     "请选择接收函数运行结果的流程变量。")
                 return
+        # 网络请求：网址必填
+        if self._step.type == "http_request" and getattr(self, "http_url", None) is not None:
+            if not self.http_url.text().strip():
+                QMessageBox.warning(self, "请填写网址",
+                                    "网络请求步骤需要填写请求网址。\n"
+                                    "不带 http/https 前缀时会自动补 https://。")
+                return
+        # DeepSeek 对话：提问必填，且必须选择结果变量
+        if self._step.type == "deepseek" and getattr(self, "ds_question", None) is not None:
+            if not self.ds_question.toPlainText().strip():
+                QMessageBox.warning(self, "请填写提问内容",
+                                    "DeepSeek 对话步骤需要填写提问内容。")
+                return
+            if not self._combo_value(self.ds_result_var):
+                QMessageBox.warning(self, "请设置结果变量",
+                                    "请选择接收 DeepSeek 回答的结果变量。")
+                return
+        # 执行脚本：文本来源必填内容；文件来源路径必填且文件须存在；结果变量必选
+        if self._step.type == "script" and getattr(self, "sc_content", None) is not None:
+            if self.sc_src_text_radio.isChecked():
+                if not self.sc_content.toPlainText().strip():
+                    QMessageBox.warning(self, "请填写脚本内容",
+                                        "请粘贴要执行的 CMD / BAT / PowerShell 命令。")
+                    return
+            else:
+                sc_path = self.sc_path.text().strip()
+                if not sc_path:
+                    QMessageBox.warning(self, "请指定脚本文件",
+                                        "请填写脚本文件的完整路径，或点击「浏览…」选择。")
+                    return
+                if not os.path.isfile(sc_path):
+                    QMessageBox.warning(self, "脚本文件不存在",
+                                        f"文件不存在：\n{sc_path}\n\n请检查路径是否正确。")
+                    return
+            if not self._combo_value(self.sc_result_var):
+                QMessageBox.warning(self, "请设置结果变量",
+                                    "请选择接收脚本输出（stdout+stderr）的结果变量。")
+                return
+        # 消息通知：内容必填
+        if self._step.type == "notify" and getattr(self, "nt_content", None) is not None:
+            if not self.nt_content.toPlainText().strip():
+                QMessageBox.warning(self, "请填写消息内容",
+                                    "消息通知步骤需要填写要显示的消息内容。")
+                return
+        # 语音播报：内容必填
+        if self._step.type == "speech" and getattr(self, "sp_content", None) is not None:
+            if not self.sp_content.toPlainText().strip():
+                QMessageBox.warning(self, "请填写播报内容",
+                                    "语音播报步骤需要填写要朗读的内容（可直接输入文字，或用 $变量名 引用）。")
+                return
+        # 打开应用：勾选「进程打开」时目标进程与应用路径至少填一个；否则仅需应用路径
+        if self._step.type == "app" and getattr(self, "app_proc_edit", None) is not None:
+            if self.app_use_proc.isChecked():
+                proc_txt = (self.app_proc_edit.text().strip()
+                            or getattr(self, "_app_process_name", "") or "")
+                if not self.path_edit.text().strip() and not proc_txt:
+                    QMessageBox.warning(self, "请选择要打开的应用",
+                                        "请填写「应用路径」，或点「从进程列表选择…」选一个运行中的进程。")
+                    return
+            elif not self.path_edit.text().strip():
+                QMessageBox.warning(self, "请填写应用路径",
+                                    "已关闭「进程打开」，请填写要打开的程序 / 文档 / 文件夹路径。")
+                return
+        # 网页「接管浏览器」：必须填写合法端口（1~65535），且与 --remote-debugging-port 一致
+        if self._step.type == "web" and getattr(self, "attach_port_edit", None) is not None \
+                and self.web_action.currentData() == "open" \
+                and self.launch_combo.currentData() == "attach":
+            raw = self.attach_port_edit.text().strip()
+            try:
+                port = int(raw)
+            except ValueError:
+                port = -1
+            if not raw or not (0 < port <= 65535):
+                QMessageBox.warning(
+                    self, "请填写接管端口",
+                    "「接管已打开的浏览器」需要填写调试端口（1~65535）。\n\n"
+                    "设置方法：浏览器图标右键 → 属性 → 「目标」末尾加空格后填\n"
+                    "--remote-debugging-port=端口号 → 确定，再用该端口启动浏览器；\n"
+                    "这里的端口必须与 --remote-debugging-port 后面的数字一致（如 9333）。")
+                return
         # if / elseif / while：条件必填，且引用的变量必须已在此分支之前定义
         if self._step.type in ("if", "elseif", "while") and getattr(self, "cond_edit", None) is not None:
             cond = self.cond_edit.text().strip()
@@ -497,6 +603,62 @@ class StepParamsDialog(QDialog):
             if not self._combo_value(self.foreach_items):
                 QMessageBox.warning(self, "请选择数据源",
                                     "请选择要遍历的数据源变量（其值须为列表/字典/字符串）。")
+                return
+        # DrissionPage「打开浏览器」：浏览器变量必填
+        if self._step.type == "dp_browser" and getattr(self, "dpb_var", None) is not None:
+            if not self.dpb_var.text().strip():
+                QMessageBox.warning(self, "请填写浏览器变量",
+                                    "「打开浏览器」需要指定浏览器对象保存到的变量名（必填项）。\n"
+                                    "后续「元素操作 / 切换标签 / 监听 / 截图 / 上传」都引用该变量。")
+                return
+        # DrissionPage 其余步骤：浏览器变量必填（取自「打开浏览器」步骤）
+        _DP_BROWSER_ATTR = {"dp_element": "dpe_browser", "dp_tab": "dpt_browser",
+                            "dp_listen": "dpl_browser", "dp_page_shot": "dps_browser",
+                            "dp_ele_shot": "dpes_browser", "dp_upload": "dpu_browser",
+                            "dp_close_browser": "dpc_browser"}
+        if self._step.type in _DP_BROWSER_ATTR:
+            combo = getattr(self, _DP_BROWSER_ATTR[self._step.type], None)
+            if combo is not None and not self._combo_value(combo):
+                QMessageBox.warning(self, "请选择浏览器变量",
+                                    "请先执行「打开浏览器」步骤并把浏览器对象保存到变量，\n"
+                                    "再在这里选择/填写该浏览器变量。")
+                return
+        # 元素操作：定位值必填；有返回值的操作必须设结果变量
+        if self._step.type == "dp_element" and getattr(self, "dpe_value", None) is not None:
+            if not self.dpe_value.text().strip():
+                QMessageBox.warning(self, "请填写定位值", "「元素操作」需要填写元素定位值。")
+                return
+            act = self.dpe_action.currentData()
+            if act in ("get_text", "get_attr", "for_new_tab") \
+                    and not self._combo_value(self.dpe_result):
+                QMessageBox.warning(self, "请设置结果变量",
+                                    "该操作有返回值，请选择接收结果的结果变量。")
+                return
+        # 网页截图 / 元素截图：结果变量必填；元素截图还须定位值
+        if self._step.type in ("dp_page_shot", "dp_ele_shot"):
+            res_combo = getattr(self, "dps_result" if self._step.type == "dp_page_shot"
+                                else "dpes_result", None)
+            if res_combo is not None and not self._combo_value(res_combo):
+                QMessageBox.warning(self, "请设置结果变量",
+                                    "截图保存路径需要写入结果变量，请选择。")
+                return
+            if self._step.type == "dp_ele_shot" and not self.dpes_value.text().strip():
+                QMessageBox.warning(self, "请填写定位值", "「元素截图」需要填写元素定位值。")
+                return
+        # 上传文件：定位值与文件路径必填
+        if self._step.type == "dp_upload" and getattr(self, "dpu_value", None) is not None:
+            if not self.dpu_value.text().strip():
+                QMessageBox.warning(self, "请填写定位值", "「上传文件」需要填写元素定位值。")
+                return
+            if not self.dpu_files.toPlainText().strip():
+                QMessageBox.warning(self, "请填写上传文件",
+                                    "「上传文件」需要填写要上传的文件路径。")
+                return
+        # 切换标签：非「新建标签」时切换条件必填
+        if self._step.type == "dp_tab" and getattr(self, "dpt_mode", None) is not None:
+            if self.dpt_mode.currentData() != "new" and not self.dpt_value.text().strip():
+                QMessageBox.warning(self, "请填写切换条件",
+                                    "请填写标签序号 / 标题 / 网址（新建标签时不需要）。")
                 return
         super().accept()
 
@@ -744,8 +906,13 @@ class StepParamsDialog(QDialog):
             self.raw_check = QCheckBox("原始输出")
             self.raw_check.setToolTip("勾选后，输出内容原样写入日志：不加时间戳、不自动换行（适合拼接连续内容）")
             form.addRow("原始输出", self.raw_check)
+            self.show_type_check = QCheckBox("显示变量的 Python 类型")
+            self.show_type_check.setToolTip("打印变量时在每个值后追加 Python 类型名，便于确认变量类型：\n"
+                                            "如 count = 5 (int)、name = 张三 (str)、arr = [1, 2] (list)")
+            form.addRow("", self.show_type_check)
             hint = QLabel("运行时会打印到底部日志（蓝色字体显示），便于调试流程。\n"
-                          "勾选「原始输出」后不加时间戳、不自动换行，内容原样显示。")
+                          "勾选「原始输出」后不加时间戳、不自动换行，内容原样显示；\n"
+                          "勾选「显示变量的 Python 类型」后，每个变量的值后显示类型名（如 (str)/(int)/(list)）。")
             hint.setStyleSheet("color: #8a939c;")
             form.addRow("", hint)
 
@@ -843,17 +1010,19 @@ class StepParamsDialog(QDialog):
             form.addRow("", hint)
 
         elif t == "screenshot":
-            # 截图区域：固定「指定区域截图」（无方式选择），必须框选
+            # 截图区域：默认空 = 全屏（整个虚拟桌面）；可框选自定义局部区域
             self._shot_region_widget = QWidget()
             region_row = QHBoxLayout(self._shot_region_widget)
             region_row.setContentsMargins(0, 0, 0, 0)
             self.region_edit = QLineEdit()
             self.region_edit.setReadOnly(True)
+            self.region_edit.setToolTip("空 = 全屏（整个虚拟桌面）；点击「框选区域…」可只截指定局部")
             pick_region = QPushButton("框选区域…")
             pick_region.clicked.connect(self._request_region)
             pick_region.setToolTip("隐藏本窗口后框选截图区域（与找图/文字识别区域一致）")
-            clear_region = QPushButton("清除")
+            clear_region = QPushButton("恢复全屏")
             clear_region.clicked.connect(lambda: self._set_region_text(None))
+            clear_region.setToolTip("截图区域恢复为全屏")
             region_row.addWidget(self.region_edit, 1)
             region_row.addWidget(pick_region)
             region_row.addWidget(clear_region)
@@ -896,6 +1065,56 @@ class StepParamsDialog(QDialog):
 
             self.save_var_radio.toggled.connect(self._sync_shot_save_rows)
             self._sync_shot_save_rows()
+
+        elif t == "color_pick":
+            # 拾取结果：色块预览 + 只读颜色文本 + 「屏幕取色…」按钮
+            self._pick_rgb = None        # 拾取到的颜色 (r, g, b)，取色/回填后非空
+            color_row = QHBoxLayout()
+            self.cp_swatch = QLabel()
+            self.cp_swatch.setFixedSize(46, 30)
+            self.cp_swatch.setAlignment(Qt.AlignCenter)
+            self.cp_swatch.setStyleSheet(
+                "border: 1px solid #c9d1d9; border-radius: 6px; background: #f7f9fb;")
+            self.cp_value = QLineEdit()
+            self.cp_value.setReadOnly(True)
+            self.cp_value.setPlaceholderText("尚未取色")
+            self.cp_value.setToolTip("屏幕上拾取的颜色值，文本格式跟随右侧「颜色格式」选择")
+            pick_btn = QPushButton("🎨 屏幕取色…")
+            pick_btn.setToolTip("隐藏窗口后取色：移动鼠标对准目标像素（中心十字即取色点，"
+                                "周边像素放大预览），单击确认、右键或 Esc 取消")
+            pick_btn.clicked.connect(self._request_color_pick)
+            color_row.addWidget(self.cp_swatch)
+            color_row.addWidget(self.cp_value, 1)
+            color_row.addWidget(pick_btn)
+            form.addRow("取色颜色", color_row)
+
+            # 颜色格式：HEX (#RRGGBB) / RGB (255,0,0)，切换即时重排文本
+            fmt_row = QHBoxLayout()
+            self.cp_fmt_hex = QRadioButton("HEX")
+            self.cp_fmt_hex.setToolTip("16 进制 #RRGGBB，如 #FF0000")
+            self.cp_fmt_rgb = QRadioButton("RGB")
+            self.cp_fmt_rgb.setToolTip("十进制约 255,0,0（红,绿,蓝 0~255）")
+            self.cp_fmt_hex.setChecked(True)
+            self.cp_fmt_hex.toggled.connect(lambda _: self._refresh_color_ui())
+            self.cp_fmt_rgb.toggled.connect(lambda _: self._refresh_color_ui())
+            fmt_row.addWidget(QLabel("颜色格式"))
+            fmt_row.addWidget(self.cp_fmt_hex)
+            fmt_row.addWidget(self.cp_fmt_rgb)
+            fmt_row.addStretch(1)
+            form.addRow("", fmt_row)
+
+            self.cp_variable = self._var_combo("（选择变量）")
+            self.cp_variable.setToolTip(
+                "取色结果按所选格式写入该变量（HEX 如 #FF0000 / RGB 如 255,0,0），供后续步骤引用")
+            form.addRow("结果变量", self.cp_variable)
+            self._var_combo_hint(form)
+
+            hint = QLabel("在屏幕任意位置取色：点击「屏幕取色…」后本窗口隐藏，鼠标对准目标像素\n"
+                          "（中心十字即取色点，周边像素实时放大），单击确认取色并回到本窗口。\n"
+                          "结果按「颜色格式」保存并写入结果变量：HEX=#RRGGBB / RGB=255,0,0。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
 
         elif t == "find_image":
             # 模板图：预览 + 屏幕截图选区 + 上传本地图片
@@ -1233,17 +1452,49 @@ class StepParamsDialog(QDialog):
             form.addRow("等待时长", self.seconds)
 
         elif t == "app":
+            self.app_use_proc = QCheckBox("进程打开（勾选时：目标进程已在运行则把窗口放到桌面最前）")
+            self.app_use_proc.setToolTip(
+                "勾选（默认）：目标进程已在运行 → 直接把窗口带到最前（不重复启动），\n"
+                "未运行 → 用下方「应用路径」打开；\n"
+                "取消勾选：忽略目标进程，直接用「应用路径」打开程序 / 文档 / 文件夹。")
+            self.app_use_proc.setChecked(True)
+            form.addRow("", self.app_use_proc)
+
+            proc_row = QHBoxLayout()
+            self.app_proc_edit = QLineEdit()
+            self.app_proc_edit.setPlaceholderText(
+                "从进程列表选择或手填进程名（如 chrome.exe）")
+            pick_proc = QPushButton("从进程列表选择…")
+            pick_proc.setToolTip("打开正在运行的进程列表，选择要带出/打开的进程")
+            pick_proc.clicked.connect(self._browse_app_process)
+            proc_row.addWidget(self.app_proc_edit, 1)
+            proc_row.addWidget(pick_proc)
+            form.addRow("目标进程", proc_row)
+            self._app_proc_row = (form, form.rowCount() - 1)
+
             path_row = QHBoxLayout()
             self.path_edit = QLineEdit()
-            self.path_edit.setPlaceholderText("选择要打开的应用程序（.exe / 快捷方式 / 文档）")
-            browse = QPushButton("浏览…")
+            self.path_edit.setPlaceholderText(
+                "程序 / 快捷方式 / 文档 / 文件夹（支持所有文件类型）")
+            browse = QPushButton("浏览文件…")
+            browse.setToolTip("选择要打开的程序 / 文档（所有文件类型）")
             browse.clicked.connect(self._browse_app)
+            browse_dir = QPushButton("浏览文件夹…")
+            browse_dir.setToolTip("选择要用资源管理器打开的文件夹")
+            browse_dir.clicked.connect(self._browse_app_dir)
             path_row.addWidget(self.path_edit, 1)
             path_row.addWidget(browse)
+            path_row.addWidget(browse_dir)
             form.addRow("应用路径", path_row)
             self.wait_sec = self._dspin(0, 300, " 秒")
-            self.wait_sec.setSpecialValueText("0 = 启动后立刻下一步")
-            form.addRow("启动后等待", self.wait_sec)
+            self.wait_sec.setSpecialValueText("0 = 打开后立刻下一步")
+            form.addRow("打开后等待", self.wait_sec)
+            self._app_hint = QLabel("")
+            self._app_hint.setWordWrap(True)
+            self._app_hint.setStyleSheet("color: #8a939c; font-size: 9pt;")
+            form.addRow("", self._app_hint)
+            self.app_use_proc.toggled.connect(self._sync_app_rows)
+            self._sync_app_rows()
 
         elif t == "close_app":
             target_row = QHBoxLayout()
@@ -1267,15 +1518,6 @@ class StepParamsDialog(QDialog):
 
         elif t == "web":
             self._web_rows = []          # [(form, 行号)] 供显隐切换
-            if step.pair_id:
-                pair_hint = QLabel("🔗 本步骤与另一网页步骤成对出现（打开网址 ↔ 关闭浏览器），"
-                                   "删除任一个会同步删除另一个；\n修改下方「操作」类型将解除配对。")
-                pair_hint.setWordWrap(True)
-                pair_hint.setStyleSheet("color: #1668a8; background: #e8f1fa;"
-                                        "border: 1px solid #b9d3e8; border-radius: 4px;"
-                                        "padding: 4px 6px;")
-                form.addRow("", pair_hint)
-
             self.web_action = QComboBox()
             for k, v in WEB_ACTIONS.items():
                 self.web_action.addItem(v, k)
@@ -1290,8 +1532,18 @@ class StepParamsDialog(QDialog):
                 self.launch_combo.addItem(v, k)
             self.launch_combo.setToolTip(
                 "只在首次启动浏览器时生效。\n"
-                "浏览器已经开着时，会沿用现有实例（避免丢登录态），不会为了换模式把它杀掉。")
+                "浏览器已经开着时，会沿用现有实例（避免丢登录态），不会为了换模式把它杀掉。\n"
+                "「接管已打开的浏览器」：连接手动用 --remote-debugging-port=N 打开的浏览器，"
+                "直接开新标签，不新起浏览器进程。")
             self._web_row(form, "launch", "打开方式", self.launch_combo)
+
+            self.attach_port_edit = QLineEdit()
+            self.attach_port_edit.setPlaceholderText("如 9333")
+            self.attach_port_edit.setToolTip(
+                "接管端口：与浏览器快捷方式里 --remote-debugging-port 后面的数字一致。\n"
+                "设置方法：浏览器图标右键 → 属性 → 「目标」末尾加空格后填 "
+                "--remote-debugging-port=9333 → 确定，再用此端口启动浏览器。")
+            self._web_row(form, "attach_port", "接管端口", self.attach_port_edit)
 
             self.tab_target_combo = QComboBox()
             self.tab_target_combo.addItem("在当前标签打开", "reuse")
@@ -1315,14 +1567,373 @@ class StepParamsDialog(QDialog):
             self._web_row(form, "match", "匹配文字", self.match_edit)
 
             self.web_close_hint = QLabel(
-                "退出整个浏览器，并释放流程持有的浏览器会话。\n"
-                "关掉之后，下一个「打开网址」步骤会重新开一个浏览器（登录态不保留）。")
+                "结束本步骤管理的浏览器会话：\n"
+                "· 程序自己启动的浏览器 —— 直接退出，下一个「打开网址」会重开（登录态不保留）；\n"
+                "· 接管（attach）的浏览器 —— 只断开连接、窗口保留，可继续手动使用。")
             self.web_close_hint.setWordWrap(True)
             self.web_close_hint.setStyleSheet("color: #6a737d;")
             self._web_row(form, "close_hint", "说明", self.web_close_hint)
 
             self.web_action.currentIndexChanged.connect(self._sync_web_rows)
+            self.launch_combo.currentIndexChanged.connect(self._sync_web_rows)
             self.tab_scope_combo.currentIndexChanged.connect(self._sync_web_rows)
+
+        elif t == "http_request":
+            from ..config import DEFAULT_USER_AGENT
+            self.http_url = QLineEdit()
+            self.http_url.setPlaceholderText("如 https://api.example.com/data（必填，不带协议自动补 https://）")
+            self.http_url.setToolTip("请求网址，支持 $变量名 引用；不带 http/https 前缀会自动补 https://")
+            form.addRow("网址", self.http_url)
+
+            self.http_method = QComboBox()
+            self.http_method.addItem("GET", "get")
+            self.http_method.addItem("POST", "post")
+            self.http_method.setToolTip("请求方法：GET 或 POST")
+            form.addRow("请求方法", self.http_method)
+
+            # 请求体（仅 POST 显示）
+            self._http_body_widget = QWidget()
+            body_lay = QVBoxLayout(self._http_body_widget)
+            body_lay.setContentsMargins(0, 0, 0, 0)
+            self.http_body = QPlainTextEdit()
+            self.http_body.setPlaceholderText("POST 请求体（可选，支持 $变量名 引用）")
+            self.http_body.setToolTip("POST 时随请求发送的内容；GET 忽略。支持 $变量名 引用")
+            self.http_body.setMaximumHeight(80)
+            body_lay.addWidget(self.http_body)
+            form.addRow("请求体", self._http_body_widget)
+
+            self.http_headers = QPlainTextEdit()
+            self.http_headers.setPlaceholderText("每行一条，如：\nAuthorization: Bearer xxx\nContent-Type: application/json")
+            self.http_headers.setToolTip("自定义请求头，每行一条「Name: Value」；支持 $变量名 引用。\n"
+                                         "User-Agent 与 Cookie 有单独字段，若在下方已填则优先使用下方值")
+            self.http_headers.setMaximumHeight(80)
+            form.addRow("请求头", self.http_headers)
+
+            self.http_cookie = QLineEdit()
+            self.http_cookie.setPlaceholderText("如 sessionid=abc123; token=xyz（可选）")
+            self.http_cookie.setToolTip("Cookie 字符串，直接作为 Cookie 请求头发送；支持 $变量名 引用")
+            form.addRow("Cookie", self.http_cookie)
+
+            self.http_result_type = QComboBox()
+            self.http_result_type.addItem("文本（Text）", "text")
+            self.http_result_type.addItem("图片（Image）", "image")
+            self.http_result_type.setToolTip("结果类型：\n"
+                                             "· 文本：响应体按字符集解码为字符串，写入「文本内容」变量；\n"
+                                             "· 图片：响应体保存为图片文件，把文件路径写入「文本内容」变量")
+            form.addRow("结果类型", self.http_result_type)
+
+            self.http_ua = QLineEdit()
+            self.http_ua.setPlaceholderText(DEFAULT_USER_AGENT)
+            self.http_ua.setToolTip("User-Agent，默认 Chrome 桌面版；支持 $变量名 引用")
+            form.addRow("用户代理", self.http_ua)
+
+            self.http_timeout = self._dspin(1, 300, " 秒")
+            self.http_timeout.setToolTip("请求超时时间，默认 5 秒；超时视为步骤失败")
+            form.addRow("超时时间", self.http_timeout)
+
+            # 系统代理：复选框 + 代理地址（勾选才显示地址行）
+            self.http_proxy_check = QCheckBox("使用系统代理")
+            self.http_proxy_check.setToolTip("勾选后经下方代理地址发起请求（默认本机 Clash 127.0.0.1:7897）")
+            form.addRow("", self.http_proxy_check)
+            self._http_proxy_widget = QWidget()
+            proxy_row = QHBoxLayout(self._http_proxy_widget)
+            proxy_row.setContentsMargins(0, 0, 0, 0)
+            self.http_proxy = QLineEdit()
+            self.http_proxy.setPlaceholderText("127.0.0.1:7897")
+            self.http_proxy.setToolTip("代理地址 host:port，http 与 https 均走该代理")
+            proxy_row.addWidget(self.http_proxy)
+            form.addRow("代理地址", self._http_proxy_widget)
+
+            # 4 个结果变量（都可选，按需勾选）
+            self.http_status_var = self._var_combo("（不保存状态码）")
+            self.http_status_var.setToolTip("HTTP 状态码（整数，含 4xx/5xx）写入该变量")
+            form.addRow("状态码变量", self.http_status_var)
+            self.http_headers_var = self._var_combo("（不保存响应头）")
+            self.http_headers_var.setToolTip("响应头（dict）写入该变量")
+            form.addRow("响应头变量", self.http_headers_var)
+            self.http_cookie_var = self._var_combo("（不保存响应 Cookie）")
+            self.http_cookie_var.setToolTip("响应 Cookie（dict，从 Set-Cookie 解析）写入该变量")
+            form.addRow("响应 Cookie 变量", self.http_cookie_var)
+            self.http_text_var = self._var_combo("（不保存文本内容）")
+            self.http_text_var.setToolTip("文本内容（文本类型）或图片保存路径（图片类型）写入该变量")
+            form.addRow("文本内容变量", self.http_text_var)
+            self._var_combo_hint(form)
+
+            hint = QLabel("发起一次 HTTP 请求并把结果写入变量：状态码（整数）、响应头（dict）、"
+                          "响应 Cookie（dict）、\n文本内容/图片路径。"
+                          "4xx/5xx 状态码不算失败（可按状态码变量分支）；仅网络错误/超时算失败。\n"
+                          "网址、请求头、请求体、Cookie、用户代理均支持 $变量名 引用。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+            self.http_method.currentIndexChanged.connect(self._sync_http_rows)
+            self.http_proxy_check.toggled.connect(self._http_proxy_widget.setVisible)
+
+        elif t == "deepseek":
+            self.ds_model = QComboBox()
+            self.ds_model.setEditable(True)
+            self.ds_model.addItem("deepseek-v4-flash", "deepseek-v4-flash")
+            self.ds_model.addItem("deepseek-v4-pro", "deepseek-v4-pro")
+            self.ds_model.setToolTip("模型名：可下拉选择 deepseek-v4-flash / deepseek-v4-pro，"
+                                     "也可直接输入其它模型名")
+            form.addRow("模型", self.ds_model)
+
+            self.ds_api_key = QLineEdit()
+            self.ds_api_key.setEchoMode(QLineEdit.Password)
+            self.ds_api_key.setPlaceholderText("留空则读取环境变量 DEEPSEEK_API_KEY")
+            self.ds_api_key.setToolTip("DeepSeek API Key；留空时运行时自动读取环境变量 "
+                                       "DEEPSEEK_API_KEY")
+            form.addRow("API Key", self.ds_api_key)
+
+            self.ds_system = QPlainTextEdit()
+            self.ds_system.setPlaceholderText("You are a helpful assistant")
+            self.ds_system.setToolTip("角色设定（system 消息），定义助手身份/语气/任务；"
+                                      "支持 $变量名 引用")
+            self.ds_system.setMaximumHeight(60)
+            form.addRow("角色设定", self.ds_system)
+
+            self.ds_question = QPlainTextEdit()
+            self.ds_question.setPlaceholderText("要问 DeepSeek 的内容（必填，支持 $变量名 引用）")
+            self.ds_question.setToolTip("提问内容（user 消息）；支持 $变量名 引用")
+            self.ds_question.setMaximumHeight(90)
+            form.addRow("提问内容", self.ds_question)
+
+            self.ds_thinking = QCheckBox("思考模式（thinking + reasoning_effort=high）")
+            self.ds_thinking.setToolTip("勾选后开启思考模式：请求下发 thinking.enabled 与 "
+                                        "reasoning_effort=high；\n思考过程会打印到日志，"
+                                        "最终回答仍写入结果变量")
+            form.addRow("", self.ds_thinking)
+
+            self.ds_stream = QCheckBox("流式输出（默认关闭）")
+            self.ds_stream.setToolTip("勾选后以 SSE 流式接收（内容拼接后仍写入结果变量）")
+            form.addRow("", self.ds_stream)
+
+            self.ds_timeout = self._dspin(1, 600, " 秒")
+            self.ds_timeout.setToolTip("请求超时时间，默认 60 秒（推理/思考模型较慢）")
+            form.addRow("超时时间", self.ds_timeout)
+
+            self.ds_proxy_check = QCheckBox("使用系统代理")
+            self.ds_proxy_check.setToolTip("勾选后经下方代理地址发起请求（默认本机 Clash 127.0.0.1:7897）")
+            form.addRow("", self.ds_proxy_check)
+            self._ds_proxy_widget = QWidget()
+            proxy_row = QHBoxLayout(self._ds_proxy_widget)
+            proxy_row.setContentsMargins(0, 0, 0, 0)
+            self.ds_proxy = QLineEdit()
+            self.ds_proxy.setPlaceholderText("127.0.0.1:7897")
+            self.ds_proxy.setToolTip("代理地址 host:port")
+            proxy_row.addWidget(self.ds_proxy)
+            form.addRow("代理地址", self._ds_proxy_widget)
+
+            self.ds_result_var = self._var_combo("（选择结果变量）")
+            self.ds_result_var.setToolTip("DeepSeek 的最终回答写入该变量")
+            form.addRow("结果变量", self.ds_result_var)
+            self._var_combo_hint(form)
+
+            hint = QLabel("调用 DeepSeek API（OpenAI 兼容）做一次对话，把最终回答写入结果变量。\n"
+                          "模型可下拉选 deepseek-v4-flash / deepseek-v4-pro，也可直接输入其它模型名。\n"
+                          "提问内容与角色设定支持 $变量名 引用；开启思考模式后思考过程会打印到日志。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+            self.ds_proxy_check.toggled.connect(self._ds_proxy_widget.setVisible)
+
+        elif t == "script":
+            self.sc_type = QComboBox()
+            self.sc_type.addItem("CMD 命令", "cmd")
+            self.sc_type.addItem("BAT 批处理", "bat")
+            self.sc_type.addItem("PowerShell 脚本", "powershell")
+            self.sc_type.addItem("Python 脚本", "python")
+            self.sc_type.setToolTip("脚本解释器：CMD / BAT 走 cmd.exe，PowerShell 走 powershell.exe，"
+                                    "Python 走 PATH 中的 python/py")
+            form.addRow("脚本类型", self.sc_type)
+
+            # 脚本来源：文本内容 / 脚本文件
+            self.sc_src_text_radio = QRadioButton("文本内容")
+            self.sc_src_file_radio = QRadioButton("脚本文件")
+            self.sc_src_text_radio.setChecked(True)
+            src_row = QHBoxLayout()
+            src_row.addWidget(self.sc_src_text_radio)
+            src_row.addWidget(self.sc_src_file_radio)
+            src_row.addStretch(1)
+            form.addRow("脚本来源", src_row)
+
+            # 文本内容（source=text）
+            self._sc_content_widget = QWidget()
+            content_lay = QVBoxLayout(self._sc_content_widget)
+            content_lay.setContentsMargins(0, 0, 0, 0)
+            self.sc_content = QPlainTextEdit()
+            code_font = QFont("Consolas")
+            code_font.setPointSize(10)
+            self.sc_content.setFont(code_font)
+            self.sc_content.setPlaceholderText(
+                "把 CMD / BAT / PowerShell / Python 命令粘贴到这里，例如：\n"
+                "echo hello world\n"
+                "dir\n"
+                "（PowerShell / Python 请先在上方「脚本类型」里选择对应类型）")
+            self.sc_content.setToolTip("脚本内容，支持 $变量名 引用")
+            self.sc_content.setMinimumHeight(170)
+            content_lay.addWidget(self.sc_content)
+            form.addRow("脚本内容", self._sc_content_widget)
+
+            # 脚本文件（source=file）
+            self._sc_path_widget = QWidget()
+            path_lay = QHBoxLayout(self._sc_path_widget)
+            path_lay.setContentsMargins(0, 0, 0, 0)
+            self.sc_path = QLineEdit()
+            self.sc_path.setPlaceholderText("本地脚本文件的完整路径（如 D:\\scripts\\run.bat）")
+            self.sc_path.setToolTip("脚本文件按原样执行，保留 %~dp0 与相对路径；支持 $变量名 引用")
+            path_lay.addWidget(self.sc_path)
+            self.sc_browse = QPushButton("浏览…")
+            self.sc_browse.setCursor(Qt.PointingHandCursor)
+            self.sc_browse.clicked.connect(self._pick_script_file)
+            path_lay.addWidget(self.sc_browse)
+            form.addRow("脚本文件", self._sc_path_widget)
+
+            # 文件编码
+            self.sc_encoding = QComboBox()
+            for key, label in (("utf-8", "UTF-8 无 BOM（默认）"), ("utf-8-sig", "UTF-8 有 BOM"),
+                               ("gb2312", "GB2312"), ("ascii", "ASCII")):
+                self.sc_encoding.addItem(label, key)
+            self.sc_encoding.setToolTip(
+                "文本来源：脚本文件的写出编码；文件来源：脚本输出的解读编码。\n"
+                "CMD/BAT 的 UTF-8 脚本执行前会自动 chcp 65001 避免中文乱码")
+            form.addRow("文件编码", self.sc_encoding)
+
+            # 运行方式
+            self.sc_window = QComboBox()
+            self.sc_window.addItem("隐藏窗口", "hidden")
+            self.sc_window.addItem("完成后保留命令窗口", "keep")
+            self.sc_window.setToolTip(
+                "隐藏窗口：后台运行不弹窗口，输出写入结果变量；\n"
+                "保留命令窗口：新开可见控制台，脚本跑完后打印输出并等待关闭")
+            form.addRow("运行方式", self.sc_window)
+
+            # 管理员权限
+            self.sc_admin = QCheckBox("以管理员权限运行")
+            self.sc_admin.setToolTip("勾选后触发 UAC 提权（需在弹出的用户账户控制窗口点「是」）")
+            form.addRow("", self.sc_admin)
+
+            # 超时
+            self.sc_timeout = self._dspin(1, 3600, " 秒")
+            self.sc_timeout.setToolTip(
+                "脚本执行超时时间（隐藏窗口模式生效；保留命令窗口模式等待用户关闭窗口，不设超时）")
+            form.addRow("超时时间", self.sc_timeout)
+
+            # 结果变量
+            self.sc_result_var = self._var_combo("（选择结果变量）")
+            self.sc_result_var.setToolTip("脚本输出（stdout + stderr）写入该变量，供后续步骤使用")
+            form.addRow("结果变量", self.sc_result_var)
+            self._var_combo_hint(form)
+
+            hint = QLabel("运行 CMD / BAT / PowerShell / Python 脚本，把输出写入结果变量。\n"
+                          "· 脚本来源可二选一：直接粘贴脚本内容，或指定本地脚本文件完整路径（原样执行）；\n"
+                          "· 文件编码默认 UTF-8 无 BOM，可切 UTF-8 有 BOM / GB2312 / ASCII；\n"
+                          "· 运行方式可选隐藏窗口（后台运行）或完成后保留命令窗口（便于查看结果）；\n"
+                          "· 勾选「以管理员权限运行」会触发 UAC 提权；脚本内容/路径支持 $变量名 引用。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+            self.sc_src_text_radio.toggled.connect(self._sync_script_rows)
+
+        elif t == "notify":
+            from ..notify_actor import NOTIFY_POSITIONS, NOTIFY_TYPES
+
+            self.nt_type = QComboBox()
+            for key, meta in NOTIFY_TYPES.items():
+                self.nt_type.addItem(f"{meta['icon']} {meta['label']}", key)
+            self.nt_type.setToolTip("消息类型：不同类型使用不同的主题颜色区分")
+            form.addRow("消息类型", self.nt_type)
+
+            self.nt_position = QComboBox()
+            for key, label in NOTIFY_POSITIONS.items():
+                self.nt_position.addItem(label, key)
+            self.nt_position.setCurrentIndex(max(0, self.nt_position.findData("bottom")))
+            self.nt_position.setToolTip("通知显示在屏幕的位置（默认屏幕中间底部）")
+            form.addRow("显示位置", self.nt_position)
+
+            self.nt_content = QPlainTextEdit()
+            self.nt_content.setPlaceholderText("要显示的消息内容（支持 $变量名 引用）")
+            self.nt_content.setToolTip("消息内容，支持 $变量名 动态输入；多行自动换行，高度随内容自适应")
+            self.nt_content.setMaximumHeight(120)
+            form.addRow("消息内容", self.nt_content)
+
+            # 插入变量：选中流程变量即以 $变量名 插入消息内容光标处（变量只读下拉，不可手输）
+            self.nt_var = QComboBox()
+            var_names = self._flow_var_names()
+            if var_names:
+                self.nt_var.addItem("＋ 插入变量…", "")
+                for name in var_names:
+                    self.nt_var.addItem(name, name)
+                self.nt_var.setToolTip("选中流程中声明的变量，自动以 $变量名 形式插入到消息内容的光标位置")
+            else:
+                self.nt_var.addItem("流程中暂无变量：先添加「变量」步骤声明", "")
+                self.nt_var.setEnabled(False)
+                self.nt_var.setToolTip("流程中还没有「变量」步骤；先在步骤列表添加「变量」步骤声明变量，"
+                                       "即可在这里选中插入")
+            self.nt_var.currentIndexChanged.connect(self._on_nt_insert_var)
+            form.addRow("插入变量", self.nt_var)
+
+            self.nt_duration = self._dspin(0, 3600, " 秒")
+            self.nt_duration.setDecimals(1)
+            self.nt_duration.setSpecialValueText("0 = 不自动消失")
+            self.nt_duration.setToolTip("自动消失延迟，默认 2 秒；设为 0 表示不自动消失（仅手动关闭）")
+            form.addRow("延迟时间", self.nt_duration)
+
+            self.nt_width = self._spin(120, 1200, " px")
+            self.nt_width.setToolTip("通知宽度（像素，默认 320），高度随内容自动调整")
+            form.addRow("通知宽度", self.nt_width)
+
+            hint = QLabel("在屏幕指定位置弹出一条消息通知，自动消失或手动关闭。\n"
+                          "· 消息类型（信息/成功/警告/错误）用不同主题颜色区分；\n"
+                          "· 显示位置默认屏幕中间底部，也可选屏幕中间、上部、四角与左右居中；\n"
+                          "· 消息内容支持 $变量名 引用，可在下方「插入变量」下拉里直接选变量自动插入；\n"
+                          "· 宽度可调，高度随内容自适应；每条通知都可点右上角 ✕ 手动关闭。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "speech":
+            # 播报内容：可手动输入，也支持 $变量名 引用（下方「插入变量」可直接选变量）
+            self.sp_content = QPlainTextEdit()
+            self.sp_content.setPlaceholderText("要朗读的内容（支持 $变量名 引用）")
+            self.sp_content.setToolTip("语音播报内容：直接输入文字，或引用流程变量（如 $result）一起朗读")
+            self.sp_content.setMaximumHeight(120)
+            form.addRow("播报内容", self.sp_content)
+
+            # 插入变量：选中流程变量即以 $变量名 插入播报内容光标处（变量只读下拉，不可手输）
+            self.sp_var = QComboBox()
+            var_names = self._flow_var_names()
+            if var_names:
+                self.sp_var.addItem("＋ 插入变量…", "")
+                for name in var_names:
+                    self.sp_var.addItem(name, name)
+                self.sp_var.setToolTip("选中流程中声明的变量，自动以 $变量名 形式插入到播报内容的光标位置")
+            else:
+                self.sp_var.addItem("流程中暂无变量：先添加「变量」步骤声明", "")
+                self.sp_var.setEnabled(False)
+                self.sp_var.setToolTip("流程中还没有「变量」步骤；先在步骤列表添加「变量」步骤声明变量，"
+                                       "即可在这里选中插入")
+            self.sp_var.currentIndexChanged.connect(self._on_sp_insert_var)
+            form.addRow("插入变量", self.sp_var)
+
+            self.sp_wait = QCheckBox("等待播报完成后再继续")
+            self.sp_wait.setChecked(True)
+            self.sp_wait.setToolTip("勾选：朗读完这一段才执行下一步骤（默认）；\n"
+                                    "不勾选：后台排队播放，立即继续后续步骤")
+            form.addRow("", self.sp_wait)
+
+            hint = QLabel("用系统语音（pyttsx3 / Windows SAPI5）朗读文本。\n"
+                          "· 播报内容可直接输入文字，或引用流程变量（如 $name），"
+                          "「插入变量」下拉可一键插入；\n"
+                          "· 系统自动优先使用中文语音（若无中文语音则用默认语音）；\n"
+                          "· 勾选「等待播报完成后再继续」时，读完整段才执行下一步骤；\n"
+                          "· 语音引擎不可用（未安装 pyttsx3 / 无语音设备）时本步骤判失败。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
 
         elif t == "py_func":
             # 代码编辑框：等宽字体，placeholder 给出常用示例
@@ -1391,13 +2002,256 @@ class StepParamsDialog(QDialog):
             form.addRow("", hint)
             self._refresh_py_var_state()
 
+        elif t == "dp_browser":
+            self.dpb_var = QLineEdit()
+            self.dpb_var.setPlaceholderText("如 browser（必填，后续元素/标签/截图等步骤都引用它）")
+            form.addRow("浏览器变量", self.dpb_var)
+
+            self.dpb_mode = QComboBox()
+            for k, v in LAUNCH_MODES.items():
+                self.dpb_mode.addItem(v, k)
+            self.dpb_mode.setToolTip("前台显示 / 无头模式 / 后台静默 / 接管已打开的浏览器（需端口）")
+            form.addRow("打开方式", self.dpb_mode)
+
+            self.dpb_port = QLineEdit()
+            self.dpb_port.setPlaceholderText("如 9333")
+            self.dpb_port.setToolTip("接管端口：与浏览器 --remote-debugging-port 后面的数字一致")
+            form.addRow("接管端口", self.dpb_port)
+            self._dpb_port_row = (form, form.rowCount() - 1)
+
+            self.dpb_url = QLineEdit()
+            self.dpb_url.setPlaceholderText("可选：打开后访问的网址（支持 $变量名，不带协议自动补 https://）")
+            form.addRow("访问网址", self.dpb_url)
+
+            self.dpb_new_tab = QCheckBox("在新标签中打开网址")
+            form.addRow("", self.dpb_new_tab)
+
+            self.dpb_timeout = self._dspin(1, 300, " 秒")
+            form.addRow("加载超时", self.dpb_timeout)
+
+            hint = QLabel("「打开浏览器」启动/接管一个浏览器，并把浏览器对象保存到上方变量；\n"
+                          "后续「元素操作 / 切换标签 / 监听 / 截图 / 上传」都从这个变量取浏览器，\n"
+                          "串成一条可视化自动化链路。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+            self.dpb_mode.currentIndexChanged.connect(self._sync_dpb_rows)
+
+        elif t == "dp_element":
+            self.dpe_browser = self._browser_combo()
+            self.dpe_browser.setToolTip("由「打开浏览器」步骤产生的浏览器变量")
+            form.addRow("浏览器变量", self.dpe_browser)
+
+            self._build_locator_rows(form, "dpe")
+
+            self.dpe_action = QComboBox()
+            for k, v in DP_ELE_ACTIONS.items():
+                self.dpe_action.addItem(v, k)
+            self.dpe_action.setToolTip("找到元素后执行的操作（参照 DrissionPage 元素交互文档）")
+            form.addRow("操作", self.dpe_action)
+
+            self.dpe_input = QLineEdit()
+            self.dpe_input.setPlaceholderText("输入内容 / 属性名 / 拖动偏移 x,y（支持 $变量名）")
+            form.addRow("输入内容", self.dpe_input)
+            self._dpe_input_row = (form, form.rowCount() - 1)
+
+            self.dpe_files = QPlainTextEdit()
+            self.dpe_files.setMaximumHeight(60)
+            self.dpe_files.setPlaceholderText("文件路径，多个换行或用 | 分隔（支持 $变量名）")
+            form.addRow("文件路径", self.dpe_files)
+            self._dpe_files_row = (form, form.rowCount() - 1)
+
+            self.dpe_result = self._var_combo("（选择变量）")
+            self.dpe_result.setToolTip("获取文本/属性/新标签等有返回值的操作，结果写入该变量")
+            form.addRow("结果变量", self.dpe_result)
+            self._dpe_result_row = (form, form.rowCount() - 1)
+
+            hint = QLabel("定位元素后执行操作；多个元素匹配时用「元素索引」指定位置。\n"
+                          "有返回值的操作（获取文本/属性/新标签）会把结果写入「结果变量」。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+            self.dpe_locator.currentIndexChanged.connect(self._sync_dpe_rows)
+            self.dpe_action.currentIndexChanged.connect(self._sync_dpe_rows)
+
+        elif t == "dp_tab":
+            self.dpt_browser = self._browser_combo()
+            self.dpt_browser.setToolTip("由「打开浏览器」步骤产生的浏览器变量")
+            form.addRow("浏览器变量", self.dpt_browser)
+
+            self.dpt_mode = QComboBox()
+            for k, v in DP_TAB_MODES.items():
+                self.dpt_mode.addItem(v, k)
+            form.addRow("切换方式", self.dpt_mode)
+
+            self.dpt_value = QLineEdit()
+            self.dpt_value.setPlaceholderText("标签序号 / 标题 / 网址（支持 $变量名）")
+            form.addRow("切换条件", self.dpt_value)
+            self._dpt_value_row = (form, form.rowCount() - 1)
+
+            self.dpt_url = QLineEdit()
+            self.dpt_url.setPlaceholderText("新建标签时访问的网址（可选，支持 $变量名，不带协议自动补 https://）")
+            form.addRow("访问网址", self.dpt_url)
+            self._dpt_url_row = (form, form.rowCount() - 1)
+
+            self.dpt_result = self._var_combo("（选择变量）")
+            self.dpt_result.setToolTip("切换后标签信息 {tab_id, title, url} 写入该变量")
+            form.addRow("结果变量", self.dpt_result)
+            self._var_combo_hint(form)
+
+            hint = QLabel("按序号 / 标题 / 网址切换当前标签，或新建一个标签并切换过去；\n"
+                          "切换后的标签信息（tab_id、标题、网址）可选写入结果变量。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+            self.dpt_mode.currentIndexChanged.connect(self._sync_dpt_rows)
+
+        elif t == "dp_listen":
+            self.dpl_browser = self._browser_combo()
+            self.dpl_browser.setToolTip("由「打开浏览器」步骤产生的浏览器变量")
+            form.addRow("浏览器变量", self.dpl_browser)
+
+            self.dpl_action = QComboBox()
+            for k, v in DP_LISTEN_ACTIONS.items():
+                self.dpl_action.addItem(v, k)
+            form.addRow("监听动作", self.dpl_action)
+
+            self._dpl_rows = []
+            self.dpl_targets = QPlainTextEdit()
+            self.dpl_targets.setMaximumHeight(60)
+            self.dpl_targets.setPlaceholderText("监听目标：URL 包含的文字，多个换行分隔；空=监听全部")
+            form.addRow("监听目标", self.dpl_targets)
+            self._dpl_rows.append(("targets", form, form.rowCount() - 1))
+
+            self.dpl_timeout = self._dspin(0, 300, " 秒")
+            self.dpl_timeout.setToolTip("等待数据包的时长")
+            form.addRow("等待超时", self.dpl_timeout)
+            self._dpl_rows.append(("timeout", form, form.rowCount() - 1))
+
+            self.dpl_url_var = self._var_combo("（不保存）")
+            self.dpl_url_var.setToolTip("数据包网址写入该变量")
+            form.addRow("网址变量", self.dpl_url_var)
+            self._dpl_rows.append(("url_var", form, form.rowCount() - 1))
+
+            self.dpl_status_var = self._var_combo("（不保存）")
+            self.dpl_status_var.setToolTip("响应状态码写入该变量")
+            form.addRow("状态码变量", self.dpl_status_var)
+            self._dpl_rows.append(("status_var", form, form.rowCount() - 1))
+
+            self.dpl_body_var = self._var_combo("（不保存）")
+            self.dpl_body_var.setToolTip("响应体（json 自动解析）写入该变量")
+            form.addRow("响应体变量", self.dpl_body_var)
+            self._dpl_rows.append(("body_var", form, form.rowCount() - 1))
+
+            hint = QLabel("三步链路：启动监听（指定目标）→ 元素操作触发请求 → 等待捕获数据包，\n"
+                          "把网址 / 状态码 / 响应体写入结果变量；结束后停止监听。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+            self.dpl_action.currentIndexChanged.connect(self._sync_dpl_rows)
+
+        elif t == "dp_page_shot":
+            self.dps_browser = self._browser_combo()
+            self.dps_browser.setToolTip("由「打开浏览器」步骤产生的浏览器变量")
+            form.addRow("浏览器变量", self.dps_browser)
+
+            self.dps_full = QCheckBox("整页截图（默认截当前视口）")
+            form.addRow("", self.dps_full)
+
+            self.dps_path = QLineEdit()
+            self.dps_path.setPlaceholderText("保存目录（空=程序模板目录 jietu/，支持 $变量名）")
+            form.addRow("保存目录", self.dps_path)
+
+            self.dps_name = QLineEdit()
+            self.dps_name.setPlaceholderText("文件名（空=自动时间戳，支持 $变量名）")
+            form.addRow("文件名", self.dps_name)
+
+            self.dps_result = self._var_combo("（选择变量）")
+            self.dps_result.setToolTip("截图保存路径写入该变量（必填）")
+            form.addRow("结果变量", self.dps_result)
+            self._var_combo_hint(form)
+
+            hint = QLabel("对当前标签页截图（整页或视口），保存路径写入结果变量。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "dp_ele_shot":
+            self.dpes_browser = self._browser_combo()
+            self.dpes_browser.setToolTip("由「打开浏览器」步骤产生的浏览器变量")
+            form.addRow("浏览器变量", self.dpes_browser)
+
+            self._build_locator_rows(form, "dpes")
+
+            self.dpes_path = QLineEdit()
+            self.dpes_path.setPlaceholderText("保存目录（空=程序模板目录 jietu/）")
+            form.addRow("保存目录", self.dpes_path)
+
+            self.dpes_name = QLineEdit()
+            self.dpes_name.setPlaceholderText("文件名（空=自动时间戳）")
+            form.addRow("文件名", self.dpes_name)
+
+            self.dpes_result = self._var_combo("（选择变量）")
+            self.dpes_result.setToolTip("元素截图保存路径写入该变量（必填）")
+            form.addRow("结果变量", self.dpes_result)
+            self._var_combo_hint(form)
+
+            hint = QLabel("定位元素后对其截图，保存路径写入结果变量。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+            self.dpes_locator.currentIndexChanged.connect(
+                lambda *_: self._sync_locator_rows("dpes"))
+
+        elif t == "dp_upload":
+            self.dpu_browser = self._browser_combo()
+            self.dpu_browser.setToolTip("由「打开浏览器」步骤产生的浏览器变量")
+            form.addRow("浏览器变量", self.dpu_browser)
+
+            self._build_locator_rows(form, "dpu")
+
+            self.dpu_files = QPlainTextEdit()
+            self.dpu_files.setMaximumHeight(60)
+            self.dpu_files.setPlaceholderText("要上传的文件，多个换行或用 | 分隔（支持 $变量名）")
+            form.addRow("上传文件", self.dpu_files)
+
+            hint = QLabel("定位到上传按钮后点击触发文件选择框，并填入要上传的文件路径。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+            self.dpu_locator.currentIndexChanged.connect(
+                lambda *_: self._sync_locator_rows("dpu"))
+
+        elif t == "dp_close_browser":
+            self.dpc_browser = self._browser_combo()
+            self.dpc_browser.setToolTip("由「打开浏览器」步骤产生的浏览器变量")
+            form.addRow("浏览器变量", self.dpc_browser)
+
+            hint = QLabel("关闭该浏览器变量对应的浏览器：\n"
+                          "· 自启浏览器（前台/无头/后台）：直接退出，窗口一并关闭；\n"
+                          "· 接管（attach）的浏览器：只断开连接，窗口保留可继续手动使用。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
         root.addLayout(form)
 
-        if t in ("find", "web"):
-            # 网页步骤同样适用：网址打不开不该把整个流程一棍子打死
-            text = ("找不到目标时跳过本步，继续执行后续步骤（默认终止流程）" if t == "find"
-                    else "本步失败时跳过，继续执行后续步骤（默认终止流程）")
+        if t in ("find", "web", "close_app"):
+            # find/web 默认不勾（失败终止）；close_app 默认勾选（关闭失败不弹提示、继续跑）
+            if t == "close_app":
+                text = "运行失败后继续运行后续流程"
+                tip = ("勾选（默认）：本步关闭失败时不弹出任何提示窗口，跳过本步继续执行后续步骤；\n"
+                       "取消勾选：本步关闭失败时终止整个流程并弹出提示。")
+            elif t == "find":
+                text = "找不到目标时跳过本步，继续执行后续步骤（默认终止流程）"
+                tip = ""
+            else:
+                text = "本步失败时跳过，继续执行后续步骤（默认终止流程）"
+                tip = ""
             self.continue_box = QCheckBox(text)
+            if t == "close_app":
+                self.continue_box.setChecked(True)   # 默认勾选「失败后继续」
+                self.continue_box.setToolTip(tip)
             root.addWidget(self.continue_box)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1485,11 +2339,63 @@ class StepParamsDialog(QDialog):
     def _browse_app(self):
         from PySide6.QtWidgets import QFileDialog
         start = os.path.expanduser("~")
+        cur = self.path_edit.text().strip() if getattr(self, "path_edit", None) else ""
+        if cur:
+            d = cur if os.path.isdir(cur) else os.path.dirname(cur)
+            if d and os.path.isdir(d):
+                start = d
         path, _ = QFileDialog.getOpenFileName(
             self, "选择应用", start,
-            "应用程序 (*.exe *.bat *.cmd *.lnk);;所有文件 (*)")
+            "所有文件 (*);;应用程序 (*.exe *.lnk *.bat *.cmd);;"
+            "文档 (*.txt *.pdf *.docx *.xlsx *.csv);;图片 (*.png *.jpg *.bmp)")
         if path:
             self.path_edit.setText(path)
+
+    def _browse_app_dir(self):
+        from PySide6.QtWidgets import QFileDialog
+        start = os.path.expanduser("~")
+        cur = self.path_edit.text().strip() if getattr(self, "path_edit", None) else ""
+        if cur:
+            d = cur if os.path.isdir(cur) else os.path.dirname(cur)
+            if d and os.path.isdir(d):
+                start = d
+        d = QFileDialog.getExistingDirectory(self, "选择要打开的文件夹", start)
+        if d:
+            self.path_edit.setText(d)
+
+    def _sync_app_rows(self) -> None:
+        """「打开应用」：目标进程行随「进程打开」勾选显隐，提示文案同步两种模式。"""
+        if not getattr(self, "_app_proc_row", None):
+            return
+        use = self.app_use_proc.isChecked()
+        form, row = self._app_proc_row
+        form.setRowVisible(row, use)
+        if use:
+            self._app_hint.setText(
+                "运行逻辑：目标进程已在运行 → 直接把它的窗口带到桌面最前（不重复启动）；\n"
+                "未运行 → 用下方「应用路径」打开。目标进程与应用路径至少填一个。")
+        else:
+            self._app_hint.setText(
+                "已关闭「进程打开」：不匹配目标进程，直接用「应用路径」\n"
+                "打开对应的程序 / 文档 / 文件夹。")
+        self.adjustSize()
+
+    def _browse_app_process(self):
+        """从进程列表选择：输入框显示完整描述（应用名—进程名「窗口标题」），
+        实际按进程名匹配带出（单独存到 _app_process_name）；自动把该进程的 exe
+        完整路径回填到「应用路径」，进程不在运行时可原样重新启动。"""
+        dlg = ProcessPickerDialog(self, purpose="open")
+        if dlg.exec() == QDialog.Accepted:
+            item = dlg.selected_item()
+            if item:
+                name = item.get("name", "")
+                exe = item.get("path", "") or ""
+                self._app_process_name = name
+                self.app_proc_edit.setText(dlg._display(item))
+                if exe:
+                    self.path_edit.setText(exe)
+                self.app_proc_edit.setToolTip(
+                    f"实际按进程名 {name} 匹配；未运行时启动：\n{exe or '（未取到完整路径）'}")
 
     def _browse_close_app(self):
         """打开进程列表选择：输入框显示完整描述（应用名—进程名「窗口标题」），
@@ -1575,9 +2481,11 @@ class StepParamsDialog(QDialog):
             return
         act = self.web_action.currentData()
         scope = self.tab_scope_combo.currentData()
+        launch = self.launch_combo.currentData()
         want = {
             "url": act == "open",
             "launch": act == "open",
+            "attach_port": act == "open" and launch == "attach",
             "tab_target": act == "open",
             "load_timeout": act == "open",
             "wait_after": act == "open",
@@ -1588,6 +2496,208 @@ class StepParamsDialog(QDialog):
         for key, form, row in self._web_rows:
             form.setRowVisible(row, want.get(key, False))
         self.adjustSize()
+
+    def _sync_http_rows(self) -> None:
+        """网络请求：请求体行只在 POST 时显示；代理地址行随「使用系统代理」显隐。"""
+        if not getattr(self, "_http_body_widget", None):
+            return
+        is_post = self.http_method.currentData() == "post"
+        self._http_body_widget.setVisible(is_post)
+        self._http_proxy_widget.setVisible(self.http_proxy_check.isChecked())
+        self.adjustSize()
+
+    def _sync_script_rows(self) -> None:
+        """执行脚本：脚本来源二选一，切换时联动「脚本内容」/「脚本文件」两行显隐。"""
+        if not getattr(self, "_sc_content_widget", None):
+            return
+        is_text = self.sc_src_text_radio.isChecked()
+        self._sc_content_widget.setVisible(is_text)
+        self._sc_path_widget.setVisible(not is_text)
+        self.adjustSize()
+
+    # ---------- DrissionPage 步骤：浏览器变量 / 元素定位 ----------
+    def _browser_var_names(self) -> list[str]:
+        """当前流程中「打开浏览器」步骤产生的浏览器变量名（供后续 dp 步骤下拉引用）。"""
+        try:
+            tab = self.parent()
+            flow = tab._selected_flow() if tab is not None else None
+            if flow is None:
+                return []
+            names: list[str] = []
+            for s in flow.steps:
+                if s.type == "dp_browser":
+                    n = (s.params.get("browser_var") or "").strip()
+                    if n and n not in names:
+                        names.append(n)
+            return names
+        except Exception:
+            return []
+
+    def _browser_combo(self) -> QComboBox:
+        """可编辑的浏览器变量下拉：列流程中「打开浏览器」步骤产生的变量，也支持手动输入。"""
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItem("（选择浏览器变量）", "")
+        for name in self._browser_var_names():
+            combo.addItem(name, name)
+        combo.lineEdit().setPlaceholderText("浏览器变量名")
+        return combo
+
+    def _build_locator_rows(self, form: QFormLayout, prefix: str) -> None:
+        """为需要元素定位的 dp 步骤（元素操作/元素截图/上传文件）构建定位字段组。
+
+        属性名、匹配模式两行随定位方式显隐（css/xpath/tag 不适用匹配模式）。
+        控件与行号都挂在 self.{prefix}_* 上，显隐刷新用 _sync_locator_rows(prefix)。
+        """
+        locator = QComboBox()
+        for k, v in DP_LOCATORS.items():
+            locator.addItem(v, k)
+        locator.setToolTip("元素定位方式（对照 DrissionPage 定位语法速查表）")
+        form.addRow("定位方式", locator)
+
+        attr = QLineEdit()
+        attr.setPlaceholderText("属性名，如 name、href、value")
+        form.addRow("属性名", attr)
+        attr_row = (form, form.rowCount() - 1)
+
+        match = QComboBox()
+        for k, v in DP_MATCHES.items():
+            match.addItem(v, k)
+        match.setToolTip("= 精确 / : 模糊包含 / ^ 开头 / $ 结尾")
+        form.addRow("匹配模式", match)
+        match_row = (form, form.rowCount() - 1)
+
+        value = QLineEdit()
+        value.setPlaceholderText("定位值（支持 $变量名），如 kw、submit、搜索按钮")
+        form.addRow("定位值", value)
+
+        index = QSpinBox()
+        index.setRange(-999, 999)
+        index.setValue(1)
+        index.setToolTip("多个元素匹配时的位置：1 起正数，负数从末尾数（-1=最后一个）")
+        form.addRow("元素索引", index)
+
+        timeout = self._dspin(0, 300, " 秒")
+        timeout.setToolTip("查找元素超时；0 表示不等待")
+        form.addRow("查找超时", timeout)
+
+        setattr(self, f"{prefix}_locator", locator)
+        setattr(self, f"{prefix}_attr", attr)
+        setattr(self, f"{prefix}_match", match)
+        setattr(self, f"{prefix}_value", value)
+        setattr(self, f"{prefix}_index", index)
+        setattr(self, f"{prefix}_timeout", timeout)
+        setattr(self, f"{prefix}_attr_row", attr_row)
+        setattr(self, f"{prefix}_match_row", match_row)
+
+    def _sync_locator_rows(self, prefix: str) -> None:
+        """按定位方式显隐「属性名 / 匹配模式」两行。"""
+        locator = getattr(self, f"{prefix}_locator", None)
+        if locator is None:
+            return
+        form, arow = getattr(self, f"{prefix}_attr_row")
+        _, mrow = getattr(self, f"{prefix}_match_row")
+        lt = locator.currentData()
+        form.setRowVisible(arow, lt == "attr")
+        form.setRowVisible(mrow, lt in ("id", "class", "attr", "text"))
+        self.adjustSize()
+
+    def _sync_dpb_rows(self) -> None:
+        """「打开浏览器」：接管端口行只在「接管已打开的浏览器」时显示。"""
+        if not getattr(self, "_dpb_port_row", None):
+            return
+        form, row = self._dpb_port_row
+        form.setRowVisible(row, self.dpb_mode.currentData() == "attach")
+        self.adjustSize()
+
+    def _sync_dpe_rows(self) -> None:
+        """「元素操作」：定位字段随定位方式显隐；输入/文件/结果行随操作显隐。"""
+        self._sync_locator_rows("dpe")
+        act = self.dpe_action.currentData()
+        input_acts = {"input", "input_enter", "set_value", "select_text",
+                      "select_value", "select_index", "get_attr", "drag"}
+        file_acts = {"to_upload", "to_download"}
+        result_acts = {"get_text", "get_attr", "for_new_tab"}
+        for key, row, visible in (
+            ("_dpe_input_row", None, act in input_acts),
+            ("_dpe_files_row", None, act in file_acts),
+            ("_dpe_result_row", None, act in result_acts),
+        ):
+            entry = getattr(self, key, None)
+            if entry:
+                entry[0].setRowVisible(entry[1], visible)
+        self.adjustSize()
+
+    def _sync_dpt_rows(self) -> None:
+        """「切换标签」：按序号/标题/网址需要条件，新建标签需要网址。"""
+        if not getattr(self, "_dpt_value_row", None):
+            return
+        mode = self.dpt_mode.currentData()
+        form, vrow = self._dpt_value_row
+        form.setRowVisible(vrow, mode != "new")
+        form, urow = self._dpt_url_row
+        form.setRowVisible(urow, mode == "new")
+        self.adjustSize()
+
+    def _sync_dpl_rows(self) -> None:
+        """「监听网络数据」：目标行在启动时显示，超时/结果变量在等待时显示。"""
+        if not getattr(self, "_dpl_rows", None):
+            return
+        act = self.dpl_action.currentData()
+        want = {"targets": act == "start", "timeout": act == "wait",
+                "url_var": act == "wait", "status_var": act == "wait",
+                "body_var": act == "wait"}
+        for key, form, row in self._dpl_rows:
+            form.setRowVisible(row, want.get(key, False))
+        self.adjustSize()
+
+    def _on_nt_insert_var(self, index: int) -> None:
+        """消息通知「插入变量」：把选中的变量以 $变量名 插入消息内容光标处，然后复位下拉。"""
+        if not getattr(self, "nt_var", None) or not getattr(self, "nt_content", None):
+            return
+        name = self.nt_var.currentData()
+        if not name:
+            return
+        cur = self.nt_content.textCursor()
+        cur.insertText(f"${name}")          # 光标自动移到插入文本之后，便于连续输入
+        self.nt_content.setTextCursor(cur)
+        self.nt_var.blockSignals(True)
+        self.nt_var.setCurrentIndex(0)      # 复位到「＋ 插入变量…」占位项
+        self.nt_var.blockSignals(False)
+        self.nt_content.setFocus()
+
+    def _on_sp_insert_var(self, index: int) -> None:
+        """语音播报「插入变量」：把选中的变量以 $变量名 插入播报内容光标处，然后复位下拉。"""
+        if not getattr(self, "sp_var", None) or not getattr(self, "sp_content", None):
+            return
+        name = self.sp_var.currentData()
+        if not name:
+            return
+        cur = self.sp_content.textCursor()
+        cur.insertText(f"${name}")          # 光标自动移到插入文本之后，便于连续输入
+        self.sp_content.setTextCursor(cur)
+        self.sp_var.blockSignals(True)
+        self.sp_var.setCurrentIndex(0)      # 复位到「＋ 插入变量…」占位项
+        self.sp_var.blockSignals(False)
+        self.sp_content.setFocus()
+
+    def _pick_script_file(self):
+        """浏览选择本地脚本文件；按扩展名自动同步脚本类型。"""
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择脚本文件", os.path.expanduser("~"),
+            "脚本文件 (*.bat *.cmd *.ps1 *.py);;所有文件 (*)")
+        if not path:
+            return
+        self.sc_path.setText(path)
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".ps1":
+            self.sc_type.setCurrentIndex(max(0, self.sc_type.findData("powershell")))
+        elif ext == ".py":
+            self.sc_type.setCurrentIndex(max(0, self.sc_type.findData("python")))
+        elif ext in (".bat", ".cmd"):
+            self.sc_type.setCurrentIndex(
+                max(0, self.sc_type.findData("bat" if ext == ".bat" else "cmd")))
 
     def _check_var_name(self):
         """变量名失焦时检查是否与流程中已有变量重复（排除自身），重复则提示。"""
@@ -1654,6 +2764,7 @@ class StepParamsDialog(QDialog):
             self._set_combo_value(self.log_vars, p.get("variables", "") or "")
             self.log_text.setText(p.get("text", "") or "")
             self.raw_check.setChecked(bool(p.get("raw")))
+            self.show_type_check.setChecked(bool(p.get("show_type")))
         elif t == "clip_set":
             self._set_combo_value(self.clip_name, p.get("name", "") or "")
             self.clip_text.setText(p.get("text", "") or "")
@@ -1680,6 +2791,15 @@ class StepParamsDialog(QDialog):
                 self.save_var_radio.setChecked(True)
             self._set_combo_value(self.shot_variable, p.get("variable", "") or "")
             self._sync_shot_save_rows()
+        elif t == "color_pick":
+            fmt = (p.get("format") or "").strip()
+            if fmt == "rgb":
+                self.cp_fmt_rgb.setChecked(True)
+            else:
+                self.cp_fmt_hex.setChecked(True)
+            self._set_pick_color(p.get("color") or "")
+            self._refresh_color_ui()
+            self._set_combo_value(self.cp_variable, p.get("variable", "") or "")
         elif t == "find_image":
             self._image = p.get("image", "") or ""
             self._image_path = p.get("image_path", "") or ""
@@ -1740,18 +2860,26 @@ class StepParamsDialog(QDialog):
         elif t == "wait":
             self.seconds.setValue(float(p.get("seconds", 1)))
         elif t == "app":
+            target = (p.get("target") or "").strip()
+            process = (p.get("process") or "").strip()
+            self._app_process_name = process or target
+            self.app_use_proc.setChecked(bool(p.get("use_process", True)))
+            self.app_proc_edit.setText(target or process or "")
             self.path_edit.setText(p.get("path", "") or "")
             self.wait_sec.setValue(float(p.get("wait_sec", 2)))
+            self._sync_app_rows()
         elif t == "close_app":
             target = p.get("target", "") or ""
             self._close_app_name = (p.get("process") or "").strip() or target
             self.target_edit.setText(target or self._close_app_name)
             self.wait_sec.setValue(float(p.get("wait_sec", 0.5)))
+            self.continue_box.setChecked(step.continue_on_fail)
         elif t == "web":
             self.web_action.setCurrentIndex(max(0, self.web_action.findData(p.get("action"))))
             self.url_edit.setText(p.get("url", "") or "")
             self.launch_combo.setCurrentIndex(
                 max(0, self.launch_combo.findData(p.get("launch_mode"))))
+            self.attach_port_edit.setText(str(p.get("attach_port", "") or ""))
             self.tab_target_combo.setCurrentIndex(
                 max(0, self.tab_target_combo.findData(p.get("tab_target"))))
             self.load_timeout.setValue(float(p.get("load_timeout_sec", 20)))
@@ -1761,6 +2889,64 @@ class StepParamsDialog(QDialog):
             self.match_edit.setText(p.get("match_text", "") or "")
             self.continue_box.setChecked(step.continue_on_fail)
             self._sync_web_rows()
+        elif t == "http_request":
+            self.http_url.setText(p.get("url", "") or "")
+            self.http_method.setCurrentIndex(
+                max(0, self.http_method.findData((p.get("method") or "get").lower())))
+            self.http_body.setPlainText(p.get("body", "") or "")
+            self.http_headers.setPlainText(p.get("headers", "") or "")
+            self.http_cookie.setText(p.get("cookie", "") or "")
+            self.http_result_type.setCurrentIndex(
+                max(0, self.http_result_type.findData((p.get("result_type") or "text").lower())))
+            self.http_ua.setText(p.get("user_agent", "") or "")
+            self.http_timeout.setValue(float(p.get("timeout", 5) or 5))
+            self.http_proxy_check.setChecked(bool(p.get("use_proxy", True)))
+            self.http_proxy.setText(p.get("proxy", "127.0.0.1:7897") or "")
+            self._set_combo_value(self.http_status_var, p.get("status_var", "") or "")
+            self._set_combo_value(self.http_headers_var, p.get("headers_var", "") or "")
+            self._set_combo_value(self.http_cookie_var, p.get("cookie_var", "") or "")
+            self._set_combo_value(self.http_text_var, p.get("text_var", "") or "")
+            self._sync_http_rows()
+        elif t == "deepseek":
+            self._set_combo_value(self.ds_model, p.get("model", "deepseek-v4-flash") or "")
+            self.ds_api_key.setText(p.get("api_key", "") or "")
+            self.ds_system.setPlainText(p.get("system", "You are a helpful assistant") or "")
+            self.ds_question.setPlainText(p.get("question", "") or "")
+            self.ds_thinking.setChecked(bool(p.get("thinking")))
+            self.ds_stream.setChecked(bool(p.get("stream")))
+            self.ds_timeout.setValue(float(p.get("timeout", 60) or 60))
+            self.ds_proxy_check.setChecked(bool(p.get("use_proxy", True)))
+            self.ds_proxy.setText(p.get("proxy", "127.0.0.1:7897") or "")
+            self._set_combo_value(self.ds_result_var, p.get("result_var", "") or "")
+            self._ds_proxy_widget.setVisible(self.ds_proxy_check.isChecked())
+        elif t == "script":
+            self.sc_type.setCurrentIndex(
+                max(0, self.sc_type.findData((p.get("script_type") or "cmd"))))
+            if (p.get("source") or "text") == "file":
+                self.sc_src_file_radio.setChecked(True)
+            else:
+                self.sc_src_text_radio.setChecked(True)
+            self.sc_content.setPlainText(p.get("content", "") or "")
+            self.sc_path.setText(p.get("path", "") or "")
+            self.sc_encoding.setCurrentIndex(
+                max(0, self.sc_encoding.findData((p.get("encoding") or "utf-8"))))
+            self.sc_window.setCurrentIndex(
+                max(0, self.sc_window.findData((p.get("window_mode") or "hidden"))))
+            self.sc_admin.setChecked(bool(p.get("admin")))
+            self.sc_timeout.setValue(float(p.get("timeout", 120) or 120))
+            self._set_combo_value(self.sc_result_var, p.get("result_var", "") or "")
+            self._sync_script_rows()
+        elif t == "notify":
+            self.nt_type.setCurrentIndex(
+                max(0, self.nt_type.findData((p.get("msg_type") or "info"))))
+            self.nt_position.setCurrentIndex(
+                max(0, self.nt_position.findData((p.get("position") or "bottom"))))
+            self.nt_content.setPlainText(p.get("content", "") or "")
+            self.nt_duration.setValue(float(p.get("duration", 2) or 2))
+            self.nt_width.setValue(int(p.get("width", 320) or 320))
+        elif t == "speech":
+            self.sp_content.setPlainText(p.get("content", "") or "")
+            self.sp_wait.setChecked(bool(p.get("wait", True)))
         elif t == "py_func":
             self.code_edit.setPlainText(p.get("code", "") or "")
             self.func_edit.setText(p.get("func_name", "") or "")
@@ -1771,6 +2957,73 @@ class StepParamsDialog(QDialog):
                     self._add_py_var_row(n)
             self._set_combo_value(self.py_result_var, p.get("result_var", "") or "")
             self._refresh_py_var_state()
+        elif t == "dp_browser":
+            self.dpb_var.setText(p.get("browser_var", "") or "")
+            self.dpb_mode.setCurrentIndex(max(0, self.dpb_mode.findData(p.get("launch_mode", "front"))))
+            self.dpb_port.setText(str(p.get("attach_port", "") or ""))
+            self.dpb_url.setText(p.get("url", "") or "")
+            self.dpb_new_tab.setChecked(bool(p.get("new_tab")))
+            self.dpb_timeout.setValue(float(p.get("load_timeout_sec", 20) or 20))
+            self._sync_dpb_rows()
+        elif t == "dp_element":
+            self._set_combo_value(self.dpe_browser, p.get("browser_var", "") or "")
+            self.dpe_locator.setCurrentIndex(max(0, self.dpe_locator.findData(p.get("locator_type", "id"))))
+            self.dpe_attr.setText(p.get("attr_name", "") or "")
+            self.dpe_match.setCurrentIndex(max(0, self.dpe_match.findData(p.get("match", "="))))
+            self.dpe_value.setText(p.get("locator_value", "") or "")
+            self.dpe_index.setValue(int(p.get("index", 1) or 1))
+            self.dpe_action.setCurrentIndex(max(0, self.dpe_action.findData(p.get("action", "click"))))
+            self.dpe_input.setText(p.get("input_value", "") or "")
+            self.dpe_files.setPlainText(p.get("file_paths", "") or "")
+            self.dpe_timeout.setValue(float(p.get("timeout", 10) or 10))
+            self._set_combo_value(self.dpe_result, p.get("result_var", "") or "")
+            self._sync_dpe_rows()
+        elif t == "dp_tab":
+            self._set_combo_value(self.dpt_browser, p.get("browser_var", "") or "")
+            self.dpt_mode.setCurrentIndex(max(0, self.dpt_mode.findData(p.get("switch_mode", "index"))))
+            self.dpt_value.setText(p.get("value", "") or "")
+            self.dpt_url.setText(p.get("url", "") or "")
+            self._set_combo_value(self.dpt_result, p.get("result_var", "") or "")
+            self._sync_dpt_rows()
+        elif t == "dp_listen":
+            self._set_combo_value(self.dpl_browser, p.get("browser_var", "") or "")
+            self.dpl_action.setCurrentIndex(max(0, self.dpl_action.findData(p.get("action", "start"))))
+            self.dpl_targets.setPlainText(p.get("targets", "") or "")
+            self.dpl_timeout.setValue(float(p.get("timeout", 10) or 10))
+            self._set_combo_value(self.dpl_url_var, p.get("url_var", "") or "")
+            self._set_combo_value(self.dpl_status_var, p.get("status_var", "") or "")
+            self._set_combo_value(self.dpl_body_var, p.get("body_var", "") or "")
+            self._sync_dpl_rows()
+        elif t == "dp_page_shot":
+            self._set_combo_value(self.dps_browser, p.get("browser_var", "") or "")
+            self.dps_full.setChecked(bool(p.get("full_page")))
+            self.dps_path.setText(p.get("path", "") or "")
+            self.dps_name.setText(p.get("name", "") or "")
+            self._set_combo_value(self.dps_result, p.get("result_var", "") or "")
+        elif t == "dp_ele_shot":
+            self._set_combo_value(self.dpes_browser, p.get("browser_var", "") or "")
+            self.dpes_locator.setCurrentIndex(max(0, self.dpes_locator.findData(p.get("locator_type", "id"))))
+            self.dpes_attr.setText(p.get("attr_name", "") or "")
+            self.dpes_match.setCurrentIndex(max(0, self.dpes_match.findData(p.get("match", "="))))
+            self.dpes_value.setText(p.get("locator_value", "") or "")
+            self.dpes_index.setValue(int(p.get("index", 1) or 1))
+            self.dpes_timeout.setValue(float(p.get("timeout", 10) or 10))
+            self.dpes_path.setText(p.get("path", "") or "")
+            self.dpes_name.setText(p.get("name", "") or "")
+            self._set_combo_value(self.dpes_result, p.get("result_var", "") or "")
+            self._sync_locator_rows("dpes")
+        elif t == "dp_upload":
+            self._set_combo_value(self.dpu_browser, p.get("browser_var", "") or "")
+            self.dpu_locator.setCurrentIndex(max(0, self.dpu_locator.findData(p.get("locator_type", "id"))))
+            self.dpu_attr.setText(p.get("attr_name", "") or "")
+            self.dpu_match.setCurrentIndex(max(0, self.dpu_match.findData(p.get("match", "="))))
+            self.dpu_value.setText(p.get("locator_value", "") or "")
+            self.dpu_index.setValue(int(p.get("index", 1) or 1))
+            self.dpu_timeout.setValue(float(p.get("timeout", 10) or 10))
+            self.dpu_files.setPlainText(p.get("file_paths", "") or "")
+            self._sync_locator_rows("dpu")
+        elif t == "dp_close_browser":
+            self._set_combo_value(self.dpc_browser, p.get("browser_var", "") or "")
 
     def _fill_background(self, p: dict) -> None:
         """回填后台操作/窗口绑定字段（click/press）。"""
@@ -1801,6 +3054,7 @@ class StepParamsDialog(QDialog):
                 "variables": self._combo_value(self.log_vars),
                 "text": self.log_text.text(),
                 "raw": self.raw_check.isChecked(),
+                "show_type": self.show_type_check.isChecked(),
             })
         elif t == "clip_set":
             step.params.update({
@@ -1829,6 +3083,12 @@ class StepParamsDialog(QDialog):
                 "region": getattr(self, "_region", step.params.get("region", "")) or "",
                 "save_mode": "variable" if self.save_var_radio.isChecked() else "choose",
                 "variable": self._combo_value(self.shot_variable),
+            })
+        elif t == "color_pick":
+            step.params.update({
+                "color": self._color_text(),
+                "format": "rgb" if self.cp_fmt_rgb.isChecked() else "hex",
+                "variable": self._combo_value(self.cp_variable),
             })
         elif t == "find_image":
             new_image = getattr(self, "_image", "") or step.params.get("image", "") or ""
@@ -1892,8 +3152,17 @@ class StepParamsDialog(QDialog):
         elif t == "wait":
             step.params.update({"seconds": self.seconds.value()})
         elif t == "app":
+            text = self.app_proc_edit.text().strip()
+            use = self.app_use_proc.isChecked()
+            # 保存：target=显示文本（列表选择回来的完整描述/手填内容），
+            # process=进程名（运行时先匹配进程带出，未运行才按 path 启动）；
+            # 未勾选「进程打开」时忽略并清空进程字段（旧配置残留兜底由 use_process=False 执行层拦截）
+            process = (getattr(self, "_app_process_name", "") or text) if use else ""
             step.params.update({
                 "path": self.path_edit.text().strip(),
+                "target": (text if text != process else process) if use else "",
+                "process": process,
+                "use_process": use,
                 "wait_sec": self.wait_sec.value(),
             })
         elif t == "close_app":
@@ -1905,11 +3174,13 @@ class StepParamsDialog(QDialog):
                 "process": process,
                 "wait_sec": self.wait_sec.value(),
             })
+            step.continue_on_fail = self.continue_box.isChecked()
         elif t == "web":
             step.params.update({
                 "action": self.web_action.currentData(),
                 "url": self.url_edit.text().strip(),
                 "launch_mode": self.launch_combo.currentData(),
+                "attach_port": self.attach_port_edit.text().strip(),
                 "tab_target": self.tab_target_combo.currentData(),
                 "load_timeout_sec": self.load_timeout.value(),
                 "wait_after_sec": self.wait_after.value(),
@@ -1917,6 +3188,61 @@ class StepParamsDialog(QDialog):
                 "match_text": self.match_edit.text().strip(),
             })
             step.continue_on_fail = self.continue_box.isChecked()
+        elif t == "http_request":
+            step.params.update({
+                "url": self.http_url.text().strip(),
+                "method": self.http_method.currentData(),
+                "body": self.http_body.toPlainText(),
+                "headers": self.http_headers.toPlainText(),
+                "cookie": self.http_cookie.text().strip(),
+                "result_type": self.http_result_type.currentData(),
+                "user_agent": self.http_ua.text(),
+                "timeout": round(self.http_timeout.value(), 1),
+                "use_proxy": self.http_proxy_check.isChecked(),
+                "proxy": self.http_proxy.text().strip() or "127.0.0.1:7897",
+                "status_var": self._combo_value(self.http_status_var),
+                "headers_var": self._combo_value(self.http_headers_var),
+                "cookie_var": self._combo_value(self.http_cookie_var),
+                "text_var": self._combo_value(self.http_text_var),
+            })
+        elif t == "deepseek":
+            step.params.update({
+                "model": self._combo_value(self.ds_model) or "deepseek-v4-flash",
+                "api_key": self.ds_api_key.text().strip(),
+                "system": self.ds_system.toPlainText(),
+                "thinking": self.ds_thinking.isChecked(),
+                "stream": self.ds_stream.isChecked(),
+                "question": self.ds_question.toPlainText().strip(),
+                "result_var": self._combo_value(self.ds_result_var),
+                "timeout": round(self.ds_timeout.value(), 1),
+                "use_proxy": self.ds_proxy_check.isChecked(),
+                "proxy": self.ds_proxy.text().strip() or "127.0.0.1:7897",
+            })
+        elif t == "script":
+            step.params.update({
+                "script_type": self.sc_type.currentData(),
+                "source": "file" if self.sc_src_file_radio.isChecked() else "text",
+                "content": self.sc_content.toPlainText(),
+                "path": self.sc_path.text().strip(),
+                "encoding": self.sc_encoding.currentData(),
+                "window_mode": self.sc_window.currentData(),
+                "admin": self.sc_admin.isChecked(),
+                "timeout": round(self.sc_timeout.value(), 1),
+                "result_var": self._combo_value(self.sc_result_var),
+            })
+        elif t == "notify":
+            step.params.update({
+                "msg_type": self.nt_type.currentData(),
+                "position": self.nt_position.currentData(),
+                "content": self.nt_content.toPlainText().strip(),
+                "duration": round(self.nt_duration.value(), 1),
+                "width": self.nt_width.value(),
+            })
+        elif t == "speech":
+            step.params.update({
+                "content": self.sp_content.toPlainText().strip(),
+                "wait": self.sp_wait.isChecked(),
+            })
         elif t == "py_func":
             used: list[str] = []
             for combo in self._py_var_combos:
@@ -1928,6 +3254,83 @@ class StepParamsDialog(QDialog):
                 "func_name": self.func_edit.text().strip(),
                 "variables": used,
                 "result_var": self._combo_value(self.py_result_var),
+            })
+        elif t == "dp_browser":
+            step.params.update({
+                "browser_var": self.dpb_var.text().strip(),
+                "launch_mode": self.dpb_mode.currentData(),
+                "attach_port": self.dpb_port.text().strip(),
+                "url": self.dpb_url.text().strip(),
+                "new_tab": self.dpb_new_tab.isChecked(),
+                "load_timeout_sec": round(self.dpb_timeout.value(), 1),
+            })
+        elif t == "dp_element":
+            step.params.update({
+                "browser_var": self._combo_value(self.dpe_browser),
+                "locator_type": self.dpe_locator.currentData(),
+                "attr_name": self.dpe_attr.text().strip(),
+                "match": self.dpe_match.currentData(),
+                "locator_value": self.dpe_value.text().strip(),
+                "index": self.dpe_index.value(),
+                "action": self.dpe_action.currentData(),
+                "input_value": self.dpe_input.text(),
+                "file_paths": self.dpe_files.toPlainText().strip(),
+                "timeout": round(self.dpe_timeout.value(), 1),
+                "result_var": self._combo_value(self.dpe_result),
+            })
+        elif t == "dp_tab":
+            step.params.update({
+                "browser_var": self._combo_value(self.dpt_browser),
+                "switch_mode": self.dpt_mode.currentData(),
+                "value": self.dpt_value.text().strip(),
+                "url": self.dpt_url.text().strip(),
+                "result_var": self._combo_value(self.dpt_result),
+            })
+        elif t == "dp_listen":
+            step.params.update({
+                "browser_var": self._combo_value(self.dpl_browser),
+                "action": self.dpl_action.currentData(),
+                "targets": self.dpl_targets.toPlainText().strip(),
+                "timeout": round(self.dpl_timeout.value(), 1),
+                "url_var": self._combo_value(self.dpl_url_var),
+                "status_var": self._combo_value(self.dpl_status_var),
+                "body_var": self._combo_value(self.dpl_body_var),
+            })
+        elif t == "dp_page_shot":
+            step.params.update({
+                "browser_var": self._combo_value(self.dps_browser),
+                "full_page": self.dps_full.isChecked(),
+                "path": self.dps_path.text().strip(),
+                "name": self.dps_name.text().strip(),
+                "result_var": self._combo_value(self.dps_result),
+            })
+        elif t == "dp_ele_shot":
+            step.params.update({
+                "browser_var": self._combo_value(self.dpes_browser),
+                "locator_type": self.dpes_locator.currentData(),
+                "attr_name": self.dpes_attr.text().strip(),
+                "match": self.dpes_match.currentData(),
+                "locator_value": self.dpes_value.text().strip(),
+                "index": self.dpes_index.value(),
+                "timeout": round(self.dpes_timeout.value(), 1),
+                "path": self.dpes_path.text().strip(),
+                "name": self.dpes_name.text().strip(),
+                "result_var": self._combo_value(self.dpes_result),
+            })
+        elif t == "dp_upload":
+            step.params.update({
+                "browser_var": self._combo_value(self.dpu_browser),
+                "locator_type": self.dpu_locator.currentData(),
+                "attr_name": self.dpu_attr.text().strip(),
+                "match": self.dpu_match.currentData(),
+                "locator_value": self.dpu_value.text().strip(),
+                "index": self.dpu_index.value(),
+                "timeout": round(self.dpu_timeout.value(), 1),
+                "file_paths": self.dpu_files.toPlainText().strip(),
+            })
+        elif t == "dp_close_browser":
+            step.params.update({
+                "browser_var": self._combo_value(self.dpc_browser),
             })
 
     def _apply_background(self, step: FlowStep) -> None:
@@ -2075,3 +3478,62 @@ class StepParamsDialog(QDialog):
             self.show()
             self.raise_()
             self.activateWindow()
+
+    # ---------- 屏幕取色（color_pick） ----------
+    def _request_color_pick(self) -> None:
+        """点「屏幕取色…」：隐藏对话框，由外部隐藏主窗口并启动取色遮罩。"""
+        self.hide()
+        self.colorPickRequested.emit()
+
+    def set_color(self, r: int, g: int, b: int) -> None:
+        """取色遮罩回调：写入拾取颜色并按当前「颜色格式」刷新显示。"""
+        self._pick_rgb = (int(r), int(g), int(b))
+        self._refresh_color_ui()
+
+    def finish_color_pick(self) -> None:
+        if not self.isVisible():
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+    def _set_pick_color(self, text: str) -> None:
+        """把配置里保存的颜色文本（#RRGGBB 或 255,0,0）解析回 RGB；解析失败视为未取色。"""
+        text = (text or "").strip()
+        rgb = None
+        if text.startswith("#"):
+            text = text[1:]
+        if len(text) == 6:
+            try:
+                rgb = tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
+            except ValueError:
+                rgb = None
+        else:
+            parts = [s.strip() for s in text.split(",")]
+            if len(parts) == 3:
+                try:
+                    rgb = tuple(int(x) for x in parts)
+                except ValueError:
+                    rgb = None
+        self._pick_rgb = rgb if rgb is not None and all(0 <= c <= 255 for c in rgb) else None
+
+    def _refresh_color_ui(self) -> None:
+        """按当前格式刷新色块背景与颜色文本；未取色时恢复占位样式。"""
+        if getattr(self, "_pick_rgb", None):
+            r, g, b = self._pick_rgb
+            self.cp_swatch.setStyleSheet(
+                f"border: 1px solid #c9d1d9; border-radius: 6px; background: rgb({r},{g},{b});")
+            self.cp_value.setText(self._color_text())
+        else:
+            self.cp_swatch.setStyleSheet(
+                "border: 1px solid #c9d1d9; border-radius: 6px; background: #f7f9fb;")
+            self.cp_value.clear()
+
+    def _color_text(self) -> str:
+        """取色结果按当前「颜色格式」转文本：#RRGGBB / 255,0,0；未取色返回空串。"""
+        rgb = getattr(self, "_pick_rgb", None)
+        if not rgb:
+            return ""
+        r, g, b = rgb
+        if getattr(self, "cp_fmt_rgb", None) is not None and self.cp_fmt_rgb.isChecked():
+            return f"{r},{g},{b}"
+        return f"#{r:02X}{g:02X}{b:02X}"

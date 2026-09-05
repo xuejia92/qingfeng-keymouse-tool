@@ -53,7 +53,8 @@
       "params": {
         "variables": "i",
         "text": "最后的i值",
-        "raw": false
+        "raw": true,
+        "show_type": false
       },
       "continue_on_fail": false,
       "pair_id": "",
@@ -88,5 +89,5 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 5,
-  "order": 0
+  "order": 4
 }

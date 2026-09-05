@@ -24,7 +24,7 @@ from ..conditions import (BLOCK_CLOSE_TYPES, BLOCK_OPEN_TYPES, BLOCK_PAIRS,
                           enclosing_loop, match_endif, validate_block_structure)
 from ..config import (AppConfig, BASE_DIR, FLOW_STEP_TYPES, FLOWS_DIR, Flow,
                       FlowStep, default_step_params, flow_from_file, flow_to_dict,
-                      repair_web_pairs, safe_filename, web_action)
+                      repair_web_pairs, safe_filename)
 from ..flows import FlowRunner
 from ..keymap import hotkey_display
 from ..logbus import log
@@ -37,10 +37,21 @@ from .widgets import set_variant
 # 组 id 同时用于持久化收起状态（config.json 的 collapsed_module_groups）。
 # 注意：endif 是随 if 自动生成的结构标记（见 config.AUTO_STEP_TYPES），不出现在面板。
 MODULE_GROUPS = [
+    # 「常用」放模块面板第一个：日常最常用的模块（语音播报/变量/延时/打印/剪贴板/
+    # 通知/退出）一眼可见，不必滚动。
+    ("logic",    "常用",       ["speech", "var", "wait", "log", "clip_set",
+                                "clip_get", "notify", "exit"]),
     ("input",    "键鼠操作",   ["click", "press", "find"]),
-    ("perceive", "目标识别",   ["ocr", "text_find", "screenshot", "find_image", "yolo_detect"]),
-    ("app_web",  "应用与网页", ["app", "close_app", "web"]),
-    ("logic",    "常用",       ["var", "wait", "log", "clip_set", "clip_get", "exit"]),
+    ("perceive", "目标识别",   ["ocr", "text_find", "screenshot", "find_image",
+                                "yolo_detect", "color_pick"]),
+    ("app_web",  "应用",       ["app", "close_app", "web",
+                                "http_request", "deepseek", "script"]),
+    # DrissionPage 可视化网页自动化（dp_actors.py）：浏览器对象管理 + 元素操作 +
+    # 标签切换 / 监听网络 / 页面截图 / 元素截图 / 上传文件 / 按变量关闭浏览器，
+    # 串成一条可视化链路。
+    ("drission", "DrissionPage", ["dp_browser", "dp_element", "dp_tab", "dp_listen",
+                                   "dp_page_shot", "dp_ele_shot", "dp_upload",
+                                   "dp_close_browser"]),
     ("condition", "条件分支",  ["if", "elseif", "else", "foreach", "while", "break", "continue"]),
     ("python",   "python",     ["py_func"]),
 ]
@@ -337,6 +348,9 @@ class FlowTab(QWidget):
                 label = FLOW_STEP_TYPES[t]
                 btn = ModuleButton(t, label)
                 btn.setMinimumHeight(32)
+                if t == "web":
+                    btn.setToolTip("拖入添加「打开网址」步骤（浏览器保持打开）；"
+                                   "需要关闭浏览器时，双击该步骤在「操作」里选择「关闭浏览器」")
                 self._module_btns.append(btn)
                 self._module_btn_by_type[t] = btn
                 wrap_lay.addWidget(btn)
@@ -721,7 +735,6 @@ class FlowTab(QWidget):
         levels = block_indent_levels(flow.steps)
         for i, s in enumerate(flow.steps):
             mark = "（失败继续）" if s.continue_on_fail else ""
-            pair = " 🔗成对" if s.pair_id else ""
             running = running_idx is not None and i == running_idx
             # ▶ 标记放在缩进之后、序号之前：缩进量不受运行状态影响，层级始终对齐
             head = "▶ " if running else ""
@@ -729,7 +742,7 @@ class FlowTab(QWidget):
             comment_tag = "// " if commented else ""
             text = (f"{INDENT_UNIT * levels[i]}{head}{i + 1}. "
                     f"{comment_tag}{_TYPE_ICONS.get(s.type, '')} {s.name} · "
-                    f"{s.summary()}{mark}{pair}")
+                    f"{s.summary()}{mark}")
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, i)
             if running:
@@ -758,19 +771,14 @@ class FlowTab(QWidget):
             return
         row = max(0, min(row, len(flow.steps)))
         if step_type == "web":
-            # 网页操作 = 打开网址 + 关闭浏览器 成对出现（共享 pair_id）
-            pid = uuid.uuid4().hex[:12]
-            open_step = FlowStep(type="web", params=dict(
+            # 网页动作（2026-09-04 起解耦）：拖「网页操作」只生成单个「打开网址」步骤，
+            # 浏览器保持打开不自动关闭；「关闭浏览器」不再作为面板独立模块，
+            # 需要时双击本步骤在「操作」下拉里选择。
+            step = FlowStep(type="web", params=dict(
                 default_step_params("web", self.cfg.clicker, self.cfg.presser)))
-            open_step.params["action"] = "open"
-            open_step.pair_id = pid
-            close_step = FlowStep(type="web", params=dict(
-                default_step_params("web", self.cfg.clicker, self.cfg.presser)))
-            close_step.params["action"] = "close_browser"
-            close_step.pair_id = pid
-            flow.steps.insert(row, open_step)
-            flow.steps.insert(row + 1, close_step)
-            self._status_msg("已生成「打开网址 + 关闭浏览器」一对（删除时同步删除）", 4000)
+            flow.steps.insert(row, step)
+            self._status_msg("已添加「打开网址」步骤（浏览器保持打开；关闭请编辑步骤的「操作」）",
+                             5000)
         elif step_type in BLOCK_PAIRS:
             # if / foreach / while：起始块 + 结束标记成对出现（结束标记为自动结构标记，
             # 不在面板展示），删除起始块或结束标记时按整块同步删除。
@@ -878,7 +886,6 @@ class FlowTab(QWidget):
                 return
             original = list(flow.steps)       # 快照：结构非法时回滚到拖拽前
             flow.steps[:] = order
-            self._fix_pair_order(flow)
             errors = validate_block_structure(flow.steps)
             if errors:
                 # 拖拽破坏了 if/foreach/while 的闭合边界（如把结束标记拖出块）：
@@ -889,26 +896,6 @@ class FlowTab(QWidget):
                 self.changed.emit()
             self._reload_steps()
         QTimer.singleShot(0, apply)
-
-    @staticmethod
-    def _fix_pair_order(flow: Flow) -> bool:
-        """保证配对的「打开网址」排在「关闭浏览器」之前；顺序颠倒则交换。
-
-        配对的步骤允许被其它步骤隔开（打开网址 → 找图点击 → 关闭浏览器 是常见编排），
-        但「关闭浏览器」跑到「打开网址」前面就失去了成对的意义，这里纠正回来。
-        """
-        changed = False
-        for s in flow.steps:
-            if not s.pair_id:
-                continue
-            idxs = [i for i, x in enumerate(flow.steps) if x.pair_id == s.pair_id]
-            if len(idxs) != 2:
-                continue
-            a, b = idxs
-            if web_action(flow.steps[a]) == "close_browser" and web_action(flow.steps[b]) == "open":
-                flow.steps[a], flow.steps[b] = flow.steps[b], flow.steps[a]
-                changed = True
-        return changed
 
     def _edit_step_param(self):
         flow = self._selected_flow()
@@ -922,14 +909,16 @@ class FlowTab(QWidget):
         dlg.templateCaptureRequested.connect(lambda: self._capture_template_for_step(dlg))
         dlg.pointCaptureRequested.connect(lambda: self._capture_point_for_step(dlg))
         dlg.windowCaptureRequested.connect(lambda: self._capture_window_for_step(dlg))
+        dlg.colorPickRequested.connect(lambda: self._capture_color_for_step(dlg))
 
         # 非模态 + finished 信号保存：截图选区期间对话框 hide() 不会像 exec() 那样
         # 立刻以 Rejected 结束编辑会话（那是 image 保存丢失的根因）
         def _finished(result):
             if result == StepParamsDialog.Accepted:
                 dlg.apply_to(step)
+                # 兼容遗留：旧版成对网页步骤被改成其它动作后，解除残留配对标记
                 if repair_web_pairs(flow.steps):
-                    self._status_msg("步骤动作已修改，不再与配对的网页步骤成对", 4000)
+                    self._status_msg("已解除旧的网页配对标记（网页步骤现已独立）", 4000)
                 self._reload_steps()
                 self.changed.emit()
 
@@ -948,11 +937,7 @@ class FlowTab(QWidget):
         if not self._confirm_del_step(flow, row):
             return
         step = flow.steps[row]
-        if step.pair_id:
-            # 成对步骤：删除当前步骤时同步删除配对的另一个
-            flow.steps[:] = [s for s in flow.steps if s.pair_id != step.pair_id]
-            self._status_msg("已删除网页步骤及其配对的「打开网址/关闭浏览器」", 4000)
-        elif step.type in BRANCH_TYPES:
+        if step.type in BRANCH_TYPES:
             # 「否则 / 否则如果」只删分支头本身：条件判断、条件结束与其它分支
             # 全部保留（原来删任意条件步骤都会连带整块，等于没法只摘掉一个分支）。
             # 该分支下原有的步骤不删除，会并入上一分支，提示里说清去向。
@@ -979,20 +964,19 @@ class FlowTab(QWidget):
                 del flow.steps[row]
         else:
             del flow.steps[row]
+        repair_web_pairs(flow.steps)   # 兼容遗留：删除后即时清理残留的网页配对标记
         self._reload_steps()
         self.changed.emit()
 
     def _confirm_del_step(self, flow, row) -> bool:
         """删除步骤前的确认弹窗。
 
-        不同步骤的删除范围不同（成对网页步骤、条件块整块、只删分支头），弹窗里
+        不同步骤的删除范围不同（条件块整块、只删分支头），弹窗里
         必须写清连带影响再让用户决定。默认按钮是「取消」，按回车/Esc 都不会误删。
         """
         step = flow.steps[row]
         extra = ""
-        if step.pair_id:
-            extra = "\n\n将同时删除配对的另一个网页步骤（同一 pair_id 成对的步骤）。"
-        elif step.type in BRANCH_TYPES:
+        if step.type in BRANCH_TYPES:
             label = FLOW_STEP_TYPES[step.type]
             inner = self._branch_body_count(flow.steps, row)
             tail = f"\n\n其下 {inner} 个步骤将并入上一分支。" if inner else ""
@@ -1173,6 +1157,34 @@ class FlowTab(QWidget):
         if hasattr(win, "_hide_for_capture"):
             win._hide_for_capture()
         QTimer.singleShot(250, lambda: self._start_window_capture(dlg))
+
+    def _capture_color_for_step(self, dlg):
+        """屏幕取色：主窗口隐藏 -> 十字 + 像素放大遮罩 -> 单击回填颜色。"""
+        self._capture_step_dlg = dlg
+        win = self.window()
+        if hasattr(win, "_hide_for_capture"):
+            win._hide_for_capture()
+        QTimer.singleShot(250, lambda: self._start_color_capture(dlg))
+
+    def _start_color_capture(self, dlg):
+        """取色遮罩：移动鼠标实时放大附近像素，单击确认取色回填（右键 / Esc 取消）。"""
+        from ..capture_overlay import run_color_picker
+
+        def done(rgb=None):
+            win = self.window()
+            if hasattr(win, "_restore_after_capture"):
+                win._restore_after_capture()
+            if dlg is not None:
+                if rgb:
+                    dlg.set_color(*rgb)
+                dlg.finish_color_pick()
+            self._capture_step_dlg = None
+
+        try:
+            run_color_picker(on_picked=lambda r, g, b: done((r, g, b)),
+                             on_cancelled=lambda: done())
+        except Exception:
+            done()
 
     def _start_window_capture(self, dlg):
         """窗口识别遮罩：移动鼠标实时高亮目标窗口，单击确认句柄回填。"""

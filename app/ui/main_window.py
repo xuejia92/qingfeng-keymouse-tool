@@ -27,9 +27,9 @@ from .schedule_tab import ScheduleTab
 from .settings_tab import SettingsTab
 from .update_dialog import AutoDownloader, VersionFetcher
 
-# 基准设计分辨率与对应窗口尺寸：2560x1440 屏 → 1300x900
+# 基准设计分辨率与对应窗口尺寸：2560x1440 屏 → 1400x960（2026-09-04 由 1300x900 加大）
 _BASE_SCREEN = (2560, 1440)
-_BASE_WINDOW = (1300, 900)
+_BASE_WINDOW = (1400, 960)
 # 窗口尺寸下限（防止屏幕太小时缩到没法用）
 _MIN_WINDOW = (980, 660)
 
@@ -37,9 +37,9 @@ _MIN_WINDOW = (980, 660)
 def auto_window_size(screen_w: int, screen_h: int) -> tuple[int, int]:
     """按显示器分辨率动态计算主窗口尺寸。
 
-    以 2560x1440 屏对应 1300x900 为基准，按宽高各自比例取较小的缩放系数
+    以 2560x1440 屏对应 1400x960 为基准，按宽高各自比例取较小的缩放系数
     （保证窗口完整落在屏幕内）：
-    - 分辨率 >= 基准（如 4K/2K）：保持 1300x900，不放大
+    - 分辨率 >= 基准（如 4K/2K）：保持 1400x960，不放大
     - 分辨率 < 基准：等比缩小，但宽高都不小于最小窗口尺寸
     """
     if screen_w <= 0 or screen_h <= 0:
@@ -47,7 +47,7 @@ def auto_window_size(screen_w: int, screen_h: int) -> tuple[int, int]:
     scale = min(screen_w / _BASE_SCREEN[0], screen_h / _BASE_SCREEN[1])
     w = max(int(_BASE_WINDOW[0] * scale), _MIN_WINDOW[0])
     h = max(int(_BASE_WINDOW[1] * scale), _MIN_WINDOW[1])
-    # 大屏不放大：封顶到设计尺寸（1080p 以上保持 1300x900）
+    # 大屏不放大：封顶到设计尺寸（1080p 以上保持 1400x960）
     w = min(w, _BASE_WINDOW[0])
     h = min(h, _BASE_WINDOW[1])
     return w, h
@@ -68,7 +68,6 @@ class _RunIndicator(QPushButton):
 
 
 class MainWindow(QMainWindow):
-    featureStateChanged = Signal(str, bool)  # ("clicker"/"presser"/"finder", running)
     hideToTrayNotice = Signal()
 
     def __init__(self, cfg: AppConfig, manager: HotkeyManager):
@@ -195,13 +194,10 @@ class MainWindow(QMainWindow):
         self.press_task.progress.connect(self.presser_tab.set_progress)
 
         self.finder_tab.changed.connect(self._on_finder_changed)
-        self.finder_tab.runningStateChanged.connect(
-            lambda: self.featureStateChanged.emit("finder", self.finder_tab.any_running()))
         self.finder_tab.captureAboutToStart.connect(self._hide_for_capture)
         self.finder_tab.captureFinished.connect(self._restore_after_capture)
 
         self.flow_tab.changed.connect(self._on_flow_changed)
-        self.flow_tab.runningStateChanged.connect(self._on_flow_running_changed)
         self.flow_tab.flowStarted.connect(self._on_flow_started)
         # 流程增删改后，同步刷新定时任务页的流程名兜底显示
         self.flow_tab.changed.connect(self.schedule_tab.on_flows_changed)
@@ -427,9 +423,6 @@ class MainWindow(QMainWindow):
         self._register_hotkeys()
         self._save_timer.start()
 
-    def _on_flow_running_changed(self) -> None:
-        self.featureStateChanged.emit("flow", self.flow_tab.any_running())
-
     def _on_flow_started(self) -> None:
         """有流程开始运行：勾选了「每次运行清空日志」就清空底部日志。"""
         if self.log_panel.clear_on_run:
@@ -530,11 +523,9 @@ class MainWindow(QMainWindow):
 
     def _on_click_state(self, state: str, reason: str) -> None:
         self.clicker_tab.set_running(state == "running", reason)
-        self.featureStateChanged.emit("clicker", state == "running")
 
     def _on_press_state(self, state: str, reason: str) -> None:
         self.presser_tab.set_running(state == "running", reason)
-        self.featureStateChanged.emit("presser", state == "running")
 
     # ---------- 在线更新 ----------
     def _check_update(self) -> None:

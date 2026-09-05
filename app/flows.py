@@ -16,9 +16,19 @@ from .conditions import (MAX_WHILE_ITERATIONS, build_control_flow,
 from .config import FLOW_STEP_TYPES, Flow
 from .logbus import log, log_print
 from .tasks import (run_app_step, run_click_step, run_clip_get_step,
-                    run_clip_set_step, run_close_app_step, run_find_image_step,
-                    run_find_step, run_log_step, run_ocr_step, run_press_step,
-                    run_py_func_step, run_screenshot_step, run_text_find_step,
+                    run_clip_set_step, run_close_app_step, run_color_pick_step,
+                    run_deepseek_step,
+                    run_dp_browser_step, run_dp_close_browser_step,
+                    run_dp_ele_shot_step,
+                    run_dp_element_step, run_dp_listen_step,
+                    run_dp_page_shot_step, run_dp_tab_step, run_dp_upload_step,
+                    run_find_image_step,
+                    run_find_step, run_http_request_step, run_log_step,
+                    run_notify_step,
+                    run_ocr_step, run_press_step,
+                    run_py_func_step, run_script_step, run_screenshot_step,
+                    run_speech_step,
+                    run_text_find_step,
                     run_var_step, run_web_step, run_yolo_detect_step)
 from .values import eval_expression_value, format_value, resolve_variable
 
@@ -434,13 +444,33 @@ class FlowRunner(QObject):
             return run_clip_get_step(step.params, vars.values, vars.types)
         elif step.type == "screenshot":
             return run_screenshot_step(step.params, vars.values, self._stop)
+        elif step.type == "speech":
+            return run_speech_step(step.params, vars.values, self._stop)
         elif step.type == "find_image":
             return run_find_image_step(step.params, vars.values, self._stop)
         elif step.type == "yolo_detect":
             return run_yolo_detect_step(step.params, vars.values, vars.types,
                                         self._stop)
+        elif step.type == "color_pick":
+            return run_color_pick_step(step.params, vars.values, self._stop)
         elif step.type == "py_func":
             return run_py_func_step(step.params, vars.values, self._stop)
+        elif step.type == "dp_browser":
+            return run_dp_browser_step(step.params, vars.values, self._stop)
+        elif step.type == "dp_element":
+            return run_dp_element_step(step.params, vars.values, self._stop)
+        elif step.type == "dp_tab":
+            return run_dp_tab_step(step.params, vars.values, self._stop)
+        elif step.type == "dp_listen":
+            return run_dp_listen_step(step.params, vars.values, self._stop)
+        elif step.type == "dp_page_shot":
+            return run_dp_page_shot_step(step.params, vars.values, self._stop)
+        elif step.type == "dp_ele_shot":
+            return run_dp_ele_shot_step(step.params, vars.values, self._stop)
+        elif step.type == "dp_upload":
+            return run_dp_upload_step(step.params, vars.values, self._stop)
+        elif step.type == "dp_close_browser":
+            return run_dp_close_browser_step(step.params, vars.values, self._stop)
         if step.type == "click":
             reason = run_click_step(step.params, self._stop, progress, vars.values)
         elif step.type == "press":
@@ -453,6 +483,14 @@ class FlowRunner(QObject):
             reason = "已手动停止" if self._stop.is_set() else "等待完成"
         elif step.type == "web":
             return run_web_step(step.params, self._stop)  # 自带成败判定
+        elif step.type == "http_request":
+            return run_http_request_step(step.params, vars.values, self._stop)
+        elif step.type == "deepseek":
+            return run_deepseek_step(step.params, vars.values, self._stop)
+        elif step.type == "script":
+            return run_script_step(step.params, vars.values, self._stop)
+        elif step.type == "notify":
+            return run_notify_step(step.params, vars.values, self._stop)
         elif step.type == "app":
             return run_app_step(step.params, self._stop)  # 自带成败判定
         elif step.type == "close_app":

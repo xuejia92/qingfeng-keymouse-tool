@@ -1,0 +1,57 @@
+{
+  "id": "4095138a1de2",
+  "name": "deepseek测试",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "aaa",
+        "type": "string",
+        "default_value": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "deepseek",
+      "name": "DeepSeek 对话",
+      "params": {
+        "model": "deepseek-v4-flash",
+        "api_key": "sk-b18e864131fd479aa43657fa4a3e4c37",
+        "system": "You are a helpful assistant",
+        "thinking": true,
+        "stream": true,
+        "question": "霍金辐射是啥",
+        "result_var": "aaa",
+        "timeout": 10.0,
+        "base_url": "https://api.deepseek.com",
+        "use_proxy": false,
+        "proxy": "127.0.0.1:7897"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "aaa",
+        "text": "",
+        "raw": true,
+        "show_type": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 7,
+  "order": 8
+}

@@ -16,12 +16,12 @@ from app.ui.main_window import auto_window_size
 
 class TestAutoWindowSize(unittest.TestCase):
     def test_2k_base(self):
-        """2560x1440（基准）→ 1300x900。"""
-        self.assertEqual(auto_window_size(2560, 1440), (1300, 900))
+        """2560x1440（基准）→ 1400x960。"""
+        self.assertEqual(auto_window_size(2560, 1440), (1400, 960))
 
     def test_4k_capped(self):
         """4K 大屏不放大，保持设计尺寸。"""
-        self.assertEqual(auto_window_size(3840, 2160), (1300, 900))
+        self.assertEqual(auto_window_size(3840, 2160), (1400, 960))
 
     def test_1080p_scaled(self):
         """1080p 等比缩小且不超屏。"""
@@ -46,8 +46,8 @@ class TestAutoWindowSize(unittest.TestCase):
 
     def test_invalid_input_falls_back(self):
         """异常输入（0 或负）回退到设计尺寸。"""
-        self.assertEqual(auto_window_size(0, 0), (1300, 900))
-        self.assertEqual(auto_window_size(-1, 500), (1300, 900))
+        self.assertEqual(auto_window_size(0, 0), (1400, 960))
+        self.assertEqual(auto_window_size(-1, 500), (1400, 960))
 
 
 class TestMainWindowScreenSize(unittest.TestCase):

@@ -1,0 +1,48 @@
+{
+  "id": "9ee6799caa2a",
+  "name": "测试",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "x",
+        "type": "string",
+        "default_value": "你到底想干嘛"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "speech",
+      "name": "语音播报",
+      "params": {
+        "content": "$x，你好，这个美丽的世界",
+        "wait": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "x",
+        "text": "",
+        "raw": false,
+        "show_type": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 11,
+  "order": 0
+}

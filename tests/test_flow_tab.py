@@ -19,7 +19,7 @@ from app.config import (AppConfig, AUTO_STEP_TYPES, FLOW_STEP_TYPES, Flow, FlowS
                         default_step_params)
 from app.conditions import validate_condition_structure
 from app.ui import flow_tab as flow_tab_mod
-from app.ui.flow_tab import BRANCH_TYPES, INDENT_UNIT, MODULE_GROUPS, FlowTab
+from app.ui.flow_tab import (BRANCH_TYPES, INDENT_UNIT, MODULE_GROUPS, FlowTab)
 from tests._env import TempConfigPaths
 
 
@@ -38,7 +38,9 @@ class TestModuleGroupsDefinition(unittest.TestCase):
     def test_groups_cover_all_modules(self):
         """分组必须恰好覆盖所有「可拖拽」步骤类型，且无重复。
 
-        自动成对生成的结构类型（endif）不在面板展示，故不要求被分组覆盖。
+        自动成对生成的结构类型（endif 等）不在面板展示，故不要求被分组覆盖。
+        （2026-09-04 起「关闭浏览器」不再作为面板伪类型，关闭入口收敛到
+        web 步骤对话框的「操作」下拉。）
         """
         grouped = [t for _, _, types in MODULE_GROUPS for t in types]
         draggable = [t for t in FLOW_STEP_TYPES if t not in AUTO_STEP_TYPES]
@@ -67,7 +69,7 @@ class TestFlowTabModuleGroups(_TempPathsMixin, unittest.TestCase):
         self._temp_exit()
 
     def test_builds_headers_and_buttons(self):
-        """分组头数量 = 分组数；模块按钮数量 = 可拖拽步骤类型数（不含自动生成的 endif）。"""
+        """分组头数量 = 分组数；模块按钮数量 = 可拖拽步骤类型数（不含自动 endif 等结构标记）。"""
         self.assertEqual(len(self.tab._group_headers), len(MODULE_GROUPS))
         draggable = [t for t in FLOW_STEP_TYPES if t not in AUTO_STEP_TYPES]
         self.assertEqual(len(self.tab._module_btns), len(draggable))
@@ -950,6 +952,194 @@ class TestLoopStepDialogs(unittest.TestCase):
         from app.ui.flow_dialog import StepParamsDialog
         for t in ("endForeach", "endWhile", "endif", "else", "break", "continue"):
             StepParamsDialog(FlowStep(type=t))     # 不应抛异常
+
+
+class TestWebAttachDialogForm(unittest.TestCase):
+    """网页「接管已打开的浏览器」表单：端口行显隐、回填与写回。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def _dialog(self, **params):
+        from app.ui.flow_dialog import StepParamsDialog
+        p = default_step_params("web")
+        p.update(params)
+        return StepParamsDialog(FlowStep(type="web", params=p))
+
+    def _row_visible(self, dlg, key: str):
+        """读 _web_rows 记录的某行当前显隐（QFormLayout.isRowVisible）。"""
+        for k, form, row in dlg._web_rows:
+            if k == key:
+                return form.isRowVisible(row)
+        return None
+
+    def test_attach_row_hidden_for_front(self):
+        """默认前台模式：接管端口行隐藏。"""
+        dlg = self._dialog()
+        self.assertEqual(self._row_visible(dlg, "attach_port"), False)
+
+    def test_attach_row_shown_when_attach_selected(self):
+        """切到「接管」模式：接管端口行显示；切走则隐藏。"""
+        dlg = self._dialog()
+        dlg.launch_combo.setCurrentIndex(dlg.launch_combo.findData("attach"))
+        self.assertEqual(self._row_visible(dlg, "attach_port"), True)
+        dlg.launch_combo.setCurrentIndex(dlg.launch_combo.findData("front"))
+        self.assertEqual(self._row_visible(dlg, "attach_port"), False)
+
+    def test_attach_row_hidden_for_non_open_actions(self):
+        """操作不是「打开网址」（如关闭标签页）时，即使选了接管也不显示端口行。"""
+        dlg = self._dialog()
+        dlg.web_action.setCurrentIndex(dlg.web_action.findData("close_tab"))
+        dlg.launch_combo.setCurrentIndex(dlg.launch_combo.findData("attach"))
+        self.assertEqual(self._row_visible(dlg, "attach_port"), False)
+
+    def test_fill_restores_attach_port(self):
+        """老配置带 attach_port 回填：端口文本与打开方式正确。"""
+        dlg = self._dialog(action="open", launch_mode="attach", attach_port="9333")
+        self.assertEqual(dlg.launch_combo.currentData(), "attach")
+        self.assertEqual(dlg.attach_port_edit.text(), "9333")
+
+    def test_apply_persists_attach_port(self):
+        """保存：attach_port 写回步骤参数。"""
+        from app.ui.flow_dialog import StepParamsDialog
+        step = FlowStep(type="web")
+        dlg = StepParamsDialog(step)
+        dlg.launch_combo.setCurrentIndex(dlg.launch_combo.findData("attach"))
+        dlg.attach_port_edit.setText("9444")
+        dlg.apply_to(step)
+        self.assertEqual(step.params["launch_mode"], "attach")
+        self.assertEqual(step.params["attach_port"], "9444")
+
+
+class TestWebDecoupled(_TempPathsMixin, unittest.TestCase):
+    """网页打开/关闭已解耦（2026-09-04）：独立拖入、互不联动删除、无配对标记。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp_enter()
+        self.cfg = AppConfig()
+        self.cfg.flows = []
+        self.cfg.collapsed_module_groups = []
+        self.tab = FlowTab(self.cfg)
+
+    def tearDown(self):
+        self._temp_exit()
+
+    def _add_flow(self, steps):
+        flow = Flow(name="网页流程", steps=steps)
+        # 不能重新绑定 cfg.flows（FlowTab._flows 持有原列表引用），只能原地 append
+        self.cfg.flows.append(flow)
+        self.tab.refresh_list()          # 左栏重建并自动选中唯一流程
+        self.tab._select_flow_item(flow.id)   # 空流程（无条目可选）时也确保选中
+        return flow
+
+    def _new_web_step(self, action: str):
+        p = default_step_params("web", self.cfg.clicker, self.cfg.presser)
+        p["action"] = action
+        return FlowStep(type="web", params=p)
+
+    def test_drop_web_creates_single_open_step(self):
+        """拖「网页操作」只生成一个「打开网址」步骤：不自动附带关闭、不带 pair_id。"""
+        flow = self._add_flow([])
+        self.tab._on_step_dropped("web", 0)
+        self.assertEqual(len(flow.steps), 1)
+        s = flow.steps[0]
+        self.assertEqual(s.type, "web")
+        self.assertEqual(s.params["action"], "open")
+        self.assertEqual(s.pair_id, "")
+        self.assertFalse(s.continue_on_fail)     # web 失败默认终止（与既有语义一致）
+
+    def test_panel_has_no_close_browser_module(self):
+        """面板不再有独立的「关闭浏览器」模块（2026-09-04 删除入口）。
+
+        关闭浏览器收敛为 web 步骤对话框里「操作」下拉的一个选项；
+        面板「网页操作」拖入仍只生成 open 单步。
+        """
+        types = [t for _, _, types in MODULE_GROUPS for t in types]
+        self.assertNotIn("close_browser", types)
+        self.assertNotIn("close_browser", self.tab._module_btn_by_type)
+        flow = self._add_flow([])
+        self.tab._on_step_dropped("web", 0)
+        self.assertEqual(len(flow.steps), 1)
+        self.assertEqual(flow.steps[0].params["action"], "open")
+
+    def test_open_then_close_keeps_both_independent(self):
+        """打开 + 关闭按顺序插入后是两个独立步骤（可被其它步骤隔开）。
+
+        面板只拖「网页操作」（open 单步），关闭步骤通过编辑该步骤的
+        「操作」下拉切换为 close_browser 生成（与真实操作路径一致）。
+        """
+        flow = self._add_flow([])
+        self.tab._on_step_dropped("web", 0)          # row 0：open
+        self.tab._on_step_dropped("wait", 1)         # row 1：wait（隔开）
+        self.tab._on_step_dropped("web", 2)          # row 2：再拖一个 web 步骤
+        flow.steps[2].params["action"] = "close_browser"   # 模拟在「操作」里改成关闭浏览器
+        self.tab._reload_steps()
+        acts = [s.params.get("action") for s in flow.steps
+                if s.type == "web"]
+        self.assertEqual(acts, ["open", "close_browser"])
+        self.assertEqual([s.pair_id for s in flow.steps], ["", "", ""])
+
+    def test_delete_close_keeps_open(self):
+        """删除「关闭浏览器」不再连带删除配对的「打开网址」（解耦前会同步删）。"""
+        flow = self._add_flow([self._new_web_step("open"),
+                               self._new_web_step("close_browser")])
+        self.tab.step_list.setCurrentRow(1)
+        with mock.patch.object(FlowTab, "_confirm_del_step", return_value=True):
+            self.tab._del_step()
+        self.assertEqual(len(flow.steps), 1)
+        self.assertEqual(flow.steps[0].params["action"], "open")
+
+    def test_step_rows_show_no_pair_marker(self):
+        """步骤列表不再显示「🔗成对」标记，只有（失败继续）语义标记。"""
+        flow = self._add_flow([self._new_web_step("open"),
+                               self._new_web_step("close_browser")])
+        texts = [self.tab.step_list.item(i).text()
+                 for i in range(self.tab.step_list.count())]
+        self.assertTrue(any("关闭浏览器" in t for t in texts))
+        self.assertTrue(all("🔗" not in t for t in texts))
+
+
+class TestCloseAppFailCheckbox(unittest.TestCase):
+    """「关闭应用」失败处理勾选框：默认勾选、可取消、写回 continue_on_fail。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_dialog_defaults_checked(self):
+        """新建 close_app 步骤对话框：勾选框默认勾选「运行失败后继续运行后续流程」。"""
+        from app.ui.flow_dialog import StepParamsDialog
+        dlg = StepParamsDialog(FlowStep(type="close_app"))
+        self.assertTrue(dlg.continue_box.isChecked())
+        self.assertIn("继续运行后续流程", dlg.continue_box.text())
+
+    def test_dialog_fill_unchecked_then_checked(self):
+        """回填：continue_on_fail=False 的旧步骤 → 勾选框不勾。"""
+        from app.ui.flow_dialog import StepParamsDialog
+        step = FlowStep(type="close_app")
+        step.continue_on_fail = False
+        dlg = StepParamsDialog(step)
+        self.assertFalse(dlg.continue_box.isChecked())
+
+    def test_apply_writes_check_state(self):
+        """保存：勾选状态写回 step.continue_on_fail。"""
+        from app.ui.flow_dialog import StepParamsDialog
+        step = FlowStep(type="close_app")
+        dlg = StepParamsDialog(step)
+        dlg.continue_box.setChecked(False)     # 用户取消勾选
+        dlg.apply_to(step)
+        self.assertFalse(step.continue_on_fail)
+        dlg.continue_box.setChecked(True)
+        dlg.apply_to(step)
+        self.assertTrue(step.continue_on_fail)
 
 
 if __name__ == "__main__":

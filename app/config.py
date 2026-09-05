@@ -189,10 +189,21 @@ FLOW_STEP_TYPES = {"var": "变量", "log": "打印输出", "ocr": "文字识别"
                    "text_find": "文字查找", "screenshot": "截图",
                    "find_image": "找图", "yolo_detect": "目标检测",
                    "click": "鼠标点击", "press": "键盘连按", "find": "找图点击",
-                   "wait": "延时等待", "web": "网页操作", "app": "打开应用",
+                   "wait": "延时等待", "web": "打开关闭网页或浏览器", "http_request": "网络请求",
+                   "deepseek": "DeepSeek 对话", "script": "执行脚本",
+                   "notify": "消息通知",
+                   "speech": "语音播报",
+                   "app": "打开应用",
                    "close_app": "关闭应用", "clip_set": "赋值剪贴板",
                    "clip_get": "获取剪贴板内容",
                    "py_func": "python函数",
+                   "color_pick": "屏幕取色",
+                   # DrissionPage 可视化网页自动化（dp_actors.py）
+                   "dp_browser": "打开浏览器", "dp_element": "元素操作",
+                   "dp_tab": "切换标签", "dp_listen": "监听网络数据",
+                   "dp_page_shot": "网页截图", "dp_ele_shot": "元素截图",
+                   "dp_upload": "上传文件",
+                   "dp_close_browser": "关闭浏览器",
                    "if": "条件判断", "elseif": "否则如果",
                    "else": "否则", "endif": "条件结束",
                    "foreach": "Foreach 循环", "endForeach": "Foreach 循环结束",
@@ -220,8 +231,13 @@ VARIABLE_TYPES = {"string": "字符串", "integer": "整数", "float": "浮点�
                   "bool": "布尔型", "list": "列表", "dict": "字典"}
 
 
-# 网页操作（DrissionPage）的子动作：值 -> 显示名
+# web 步骤（打开关闭网页或浏览器）的子动作：值 -> 显示名
 WEB_ACTIONS = {"open": "打开网址", "close_tab": "关闭标签页", "close_browser": "关闭浏览器"}
+
+# 网络请求步骤：默认 User-Agent（Chrome 桌面版）
+DEFAULT_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/112.0.0.0 Safari/537.36")
 
 
 def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
@@ -264,6 +280,7 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "variables": "",              # 要打印的变量名，逗号分隔；空=不打印任何变量
             "text": "",                   # 附加文本，支持 $变量名 占位
             "raw": False,                 # 原始输出：不加时间戳、不自动换行，内容原样显示
+            "show_type": False,           # 显示变量的 Python 类型（如 count = 5 (int)）
         }
     if step_type == "ocr":
         return {
@@ -284,8 +301,12 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
         return {"seconds": 1.0}
     if step_type == "app":
         return {
-            "path": "",                   # 应用路径（可浏览）
-            "wait_sec": 2.0,              # 启动后等待的秒数（给应用留出加载时间）
+            "path": "",                   # 应用路径（可浏览）；进程未运行时启动用，支持文件/快捷方式/文件夹
+            "process": "",                # 目标进程名（如 chrome.exe）：运行时已在运行则带出窗口
+            "target": "",                 # 显示用：进程列表选择的完整描述（如 Google Chrome — chrome.exe）
+            "use_process": True,          # 进程打开：勾选（默认）时先匹配目标进程置前，未运行再用路径启动；
+                                          # 取消勾选则忽略目标进程，直接用路径打开程序/文档/文件夹
+            "wait_sec": 2.0,              # 启动/带出后等待的秒数（给应用留出加载时间）
         }
     if step_type == "close_app":
         return {
@@ -298,12 +319,70 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
         return {
             "action": "open",
             "url": "",
-            "launch_mode": "front",        # front / headless / background
+            "launch_mode": "front",        # front / headless / background / attach
+            "attach_port": "",             # attach（接管手动打开的浏览器）时的调试端口，如 9333
             "tab_target": "reuse",         # reuse=当前标签 / new=新标签
             "load_timeout_sec": 20.0,
             "wait_after_sec": 0.0,
             "tab_scope": "current",        # current / others / match
             "match_text": "",
+        }
+    if step_type == "http_request":
+        return {
+            "url": "",                    # 请求网址（必填，不带协议会自动补 https://）
+            "method": "get",              # get / post
+            "headers": "",                # 请求头：每行一条「Name: Value」，支持 $变量名
+            "body": "",                   # 请求体（POST 时发送，支持 $变量名；GET 忽略）
+            "cookie": "",                 # Cookie 字符串（可选，支持 $变量名）
+            "result_type": "text",        # text=文本 / image=图片（保存到文件）
+            "user_agent": DEFAULT_USER_AGENT,  # User-Agent，支持 $变量名
+            "timeout": 5.0,               # 超时时间（秒）
+            "use_proxy": True,            # 是否使用系统代理
+            "proxy": "127.0.0.1:7897",    # 代理地址 host:port
+            # 结果变量（都可选，按需勾选）：
+            "status_var": "",             # HTTP 状态码（整数）
+            "headers_var": "",            # 响应头（dict）
+            "cookie_var": "",             # 响应 Cookie（dict）
+            "text_var": "",               # 文本内容（text）/ 图片保存路径（image）
+        }
+    if step_type == "deepseek":
+        return {
+            "model": "deepseek-v4-flash",      # 默认 flash；可下拉选 pro 或手动输入
+            "api_key": os.environ.get("DEEPSEEK_API_KEY", ""),  # 留空运行时也读环境变量
+            "system": "You are a helpful assistant",  # 角色设定（system 消息）
+            "thinking": False,                # 思考模式：thinking.enabled + reasoning_effort=high
+            "stream": False,                  # 流式输出（默认关闭）
+            "question": "",                   # 提问内容（必填，支持 $变量名）
+            "result_var": "",                 # 结果变量：最终回答
+            "timeout": 60.0,                  # 超时（秒），推理模型较慢
+            "base_url": "https://api.deepseek.com",
+            "use_proxy": True,                # 系统代理
+            "proxy": "127.0.0.1:7897",
+        }
+    if step_type == "script":
+        return {
+            "script_type": "cmd",         # cmd / bat / powershell / python（cmd 与 bat 都走 cmd.exe）
+            "source": "text",             # text=文本内容 / file=脚本文件
+            "content": "",                # 脚本内容（source=text 时，支持 $变量名 引用）
+            "path": "",                   # 脚本文件完整路径（source=file 时，支持 $变量名 引用）
+            "encoding": "utf-8",          # gb2312 / utf-8 / utf-8-sig / ascii（默认 utf-8 无 BOM）
+            "window_mode": "hidden",      # hidden=隐藏窗口 / keep=完成后保留命令窗口
+            "admin": False,               # 以管理员权限运行（UAC 提权）
+            "timeout": 120.0,             # 超时（秒，仅隐藏窗口模式生效）
+            "result_var": "",             # 输出结果（stdout+stderr）写入的变量
+        }
+    if step_type == "notify":
+        return {
+            "msg_type": "info",           # info=信息 / success=成功 / warning=警告 / error=错误
+            "position": "bottom",         # 显示位置（默认屏幕中间底部），见 POSITIONS 注释
+            "content": "",                # 消息内容，支持 $变量名 引用
+            "duration": 2.0,              # 自动消失延迟（秒），0=不自动消失（仅手动关闭）
+            "width": 320,                 # 通知宽度（像素），高度随内容自适应
+        }
+    if step_type == "speech":
+        return {
+            "content": "",                # 播报内容，支持 $变量名 引用（手动输入或选变量）
+            "wait": True,                 # 是否等待播报完成：勾选=播完再继续；不勾=后台播放不阻塞
         }
     if step_type == "clip_set":
         return {
@@ -330,6 +409,12 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "save_mode": "variable",      # variable=默认保存 / choose=自选保存（弹窗）
             "variable": "",               # 截图绝对路径写入的结果变量（默认保存必填，自选保存可选）
         }
+    if step_type == "color_pick":
+        return {
+            "color": "",                  # 取到的颜色（运行时原样写入结果变量），如 #FF0000 或 255,0,0
+            "format": "hex",              # 取色保存格式：hex=#RRGGBB / rgb=255,0,0
+            "variable": "",               # 颜色字符串写入的结果变量（必填）
+        }
     if step_type == "yolo_detect":
         return {
             "model_path": "",             # YOLOv5 模型文件路径（.pt），可浏览选取或手动输入
@@ -349,6 +434,84 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "variables": [],              # 勾选的流程变量：与函数形参同名者自动作为关键字实参传入，其余注入环境
             "result_var": "",             # 函数返回值保存到的流程变量名
         }
+    # ---- DrissionPage 可视化网页自动化（dp_actors.py）----
+    if step_type == "dp_browser":
+        return {
+            "browser_var": "",            # 浏览器对象保存到的变量名（必填）
+            "launch_mode": "front",       # front / headless / background / attach
+            "attach_port": "",            # attach（接管已打开的浏览器）时的调试端口
+            "url": "",                    # 打开后访问的网址（可选，支持 $变量名）
+            "new_tab": False,             # True=在新标签访问网址
+            "load_timeout_sec": 20.0,     # 网址加载超时
+        }
+    if step_type == "dp_element":
+        return {
+            "browser_var": "",            # 浏览器变量（「打开浏览器」步骤产生）
+            "locator_type": "id",         # id/class/attr/text/tag/css/xpath
+            "attr_name": "",              # locator_type=attr 时的属性名
+            "match": "=",                 # = 精确 / : 模糊 / ^ 开头 / $ 结尾
+            "locator_value": "",          # 定位值（支持 $变量名）
+            "index": 1,                   # 多元素时的位置（1 起，负数从末尾数）
+            "action": "click",            # 找到元素后执行的操作（DP_ELE_ACTIONS）
+            "input_value": "",            # 输入内容/属性名/拖动偏移等（支持 $变量名）
+            "file_paths": "",             # to_upload/to_download 用（支持 $变量名，多个换行或 | 分隔）
+            "timeout": 10.0,              # 查找元素超时（秒）
+            "result_var": "",             # get_text/get_attr/for_new_tab 的结果变量
+        }
+    if step_type == "dp_tab":
+        return {
+            "browser_var": "",
+            "switch_mode": "index",       # index/title/url/new
+            "value": "",                  # 序号/标题/网址（支持 $变量名）
+            "url": "",                    # 新建标签时访问的网址（可选）
+            "result_var": "",             # 切换后标签信息 {tab_id,title,url}
+        }
+    if step_type == "dp_listen":
+        return {
+            "browser_var": "",
+            "action": "start",            # start/wait/stop
+            "targets": "",                # 监听目标：URL 包含的文字，多个换行分隔；空=全部
+            "timeout": 10.0,              # wait 等待超时（秒）
+            "url_var": "",                # wait：数据包网址写入的变量
+            "status_var": "",             # wait：响应状态码写入的变量
+            "body_var": "",               # wait：响应体（json 自动解析）写入的变量
+        }
+    if step_type == "dp_page_shot":
+        return {
+            "browser_var": "",
+            "path": "",                   # 保存目录（空=程序模板目录 jietu/，支持 $变量名）
+            "name": "",                   # 文件名（空=自动时间戳，支持 $变量名）
+            "full_page": False,           # True=整页截图
+            "result_var": "",             # 截图保存路径写入的变量（必填）
+        }
+    if step_type == "dp_ele_shot":
+        return {
+            "browser_var": "",
+            "locator_type": "id",
+            "attr_name": "",
+            "match": "=",
+            "locator_value": "",
+            "index": 1,
+            "timeout": 10.0,
+            "path": "",                   # 保存目录（空=程序模板目录 jietu/）
+            "name": "",                   # 文件名（空=自动时间戳）
+            "result_var": "",             # 截图保存路径写入的变量（必填）
+        }
+    if step_type == "dp_upload":
+        return {
+            "browser_var": "",
+            "locator_type": "id",
+            "attr_name": "",
+            "match": "=",
+            "locator_value": "",
+            "index": 1,
+            "timeout": 10.0,
+            "file_paths": "",             # 要上传的文件，多个换行或 | 分隔（支持 $变量名）
+        }
+    if step_type == "dp_close_browser":
+        return {
+            "browser_var": "",            # 浏览器变量（「打开浏览器」步骤产生）
+        }
     if step_type in ("if", "elseif", "while"):
         return {
             "condition": "",              # 条件表达式，如 x>=1 && y<=10（支持 &&/||/! 与比较运算）
@@ -366,6 +529,18 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
     if step_type in ("else", "endif", "endForeach", "endWhile", "break", "continue"):
         return {}                         # 结构/控制流标记步骤，无参数
     raise ValueError(f"未知步骤类型: {step_type}")
+
+def _dp_locator_text(p: dict) -> str:
+    """DrissionPage 步骤参数里的定位信息 -> 摘要短文本（如「#kw」）。"""
+    from .dp_actors import build_locator
+    t = (p.get("locator_type") or "id").strip()
+    if t in ("css", "xpath", "tag"):
+        value = (p.get("locator_value") or "").strip() or "?"
+        return f"{t}:{value}"
+    loc = build_locator(t, p.get("match"), (p.get("locator_value") or "").strip() or "?",
+                        p.get("attr_name") or "")
+    return loc if len(loc) <= 30 else loc[:29] + "…"
+
 
 @dataclass
 class FlowVariable:
@@ -397,8 +572,12 @@ class FlowStep:
     type: str                       # click / press / find / wait / web
     name: str = ""
     params: dict = field(default_factory=dict)
-    continue_on_fail: bool = False  # 仅对 find / web 步骤有意义
-    pair_id: str = ""               # 网页配对：同一 pair_id 的「打开网址+关闭浏览器」成对出现
+    # 失败策略：True=失败跳过继续、流程不终止（不弹提示）；None=未显式设置，
+    # 构造时按类型取默认（close_app 默认 True，其余 False；见 __post_init__）。
+    continue_on_fail: bool | None = None
+    pair_id: str = ""               # 网页配对（兼容遗留）：早期版本拖「网页操作」自动生成
+                                    # 的「打开+关闭」一对共享该 id；2026-09-04 解耦后不再生成，
+                                    # 仅作旧数据残留字段由 repair_web_pairs 兜底清理，UI 不再联动
     commented: bool = False         # 注释标记：被注释的步骤运行期跳过不执行，列表灰显
 
     def __post_init__(self):
@@ -407,10 +586,17 @@ class FlowStep:
         if not self.name or self.type in STRUCTURAL_STEP_TYPES:
             # 结构标记步骤的 name 恒等于当前显示名（见 STRUCTURAL_STEP_TYPES 说明）
             self.name = FLOW_STEP_TYPES[self.type]
-        # 显示名升级迁移：旧版默认名「日志输出」→「打印输出」（仅纠正残留旧默认名，
-        # 用户自定义的名称不受影响）
+        # continue_on_fail 类型级默认：close_app 默认「失败后继续」（勾选框默认勾选），
+        # 其余步骤默认终止流程；显式传入的 bool 一律保留
+        if self.continue_on_fail is None:
+            self.continue_on_fail = (self.type == "close_app")
+        # 显示名升级迁移：只纠正残留的旧版默认名，用户自定义的名称不受影响。
+        # 「日志输出」→「打印输出」；「网页操作」→「打开关闭网页或浏览器」
+        # （2026-09-04 网页步骤改名：模块面板展示名与实际承载能力更贴合）。
         if self.type == "log" and self.name == "日志输出":
             self.name = "打印输出"
+        if self.type == "web" and self.name == "网页操作":
+            self.name = "打开关闭网页或浏览器"
         merged = default_step_params(self.type)
         merged.update({k: v for k, v in (self.params or {}).items() if v is not None})
         self.params = merged
@@ -510,10 +696,19 @@ class FlowStep:
             if self.type == "wait":
                 return f"等待 {float(p['seconds']):g} 秒"
             if self.type == "app":
+                wait = float(p.get("wait_sec") or 0)
+                wait_txt = f" · 等待 {wait:g}s" if wait > 0 else ""
+                target = (p.get("target") or "").strip()
+                process = (p.get("process") or "").strip()
+                if target:
+                    if len(target) > 40:
+                        target = target[:39] + "…"
+                    return f"打开 {target}{wait_txt}"
+                if process:
+                    return f"打开 {process}{wait_txt}"
                 path = p.get("path") or "未选应用"
                 name = os.path.basename(path) if path else "未选应用"
-                wait = float(p.get("wait_sec") or 0)
-                return f"{name}" + (f" · 等待 {wait:g}s" if wait > 0 else "")
+                return f"{name}{wait_txt}"
             if self.type == "close_app":
                 target = p.get("target") or ""
                 if not target:
@@ -542,15 +737,22 @@ class FlowStep:
                 if p.get("save_mode") == "choose":
                     return f"截图 → 自选保存 → {var}" if var else "截图 → 自选保存"
                 return f"截图 → {var}" if var else "截图 → 默认保存"
+            if self.type == "color_pick":
+                color = (p.get("color") or "").strip() or "未取色"
+                var = p.get("variable") or "未指定变量"
+                return f"取色 {color} → {var}"
             if self.type == "web":
                 act = p.get("action")
                 if act == "open":
                     url = p.get("url") or "未填网址"
                     if len(url) > 38:
                         url = url[:37] + "…"
+                    where = "新标签" if p.get("tab_target") == "new" else "当前标签"
+                    if p.get("launch_mode") == "attach":
+                        port = (str(p.get("attach_port") or "")).strip() or "?"
+                        return f"{url} · 接管端口{port} {where}"
                     mode = {"front": "前台", "headless": "无头", "background": "后台"}.get(
                         p.get("launch_mode"), "前台")
-                    where = "新标签" if p.get("tab_target") == "new" else "当前标签"
                     return f"{url} · {mode}{where}"
                 if act == "close_browser":
                     return "关闭浏览器"
@@ -561,12 +763,111 @@ class FlowStep:
                     return {"current": "关闭当前标签", "others": "关闭其他标签"}.get(
                         scope, "关闭当前标签")
                 return ""   # 未知动作：宁可显示空白，也不要张冠李戴
+            if self.type == "http_request":
+                url = (p.get("url") or "").strip() or "未填网址"
+                if len(url) > 34:
+                    url = url[:33] + "…"
+                method = (p.get("method") or "get").upper()
+                return f"{method} {url}"
+            if self.type == "deepseek":
+                model = (p.get("model") or "deepseek-v4-flash").strip()
+                q = (p.get("question") or "").strip()
+                if len(q) > 20:
+                    q = q[:19] + "…"
+                return f"{model}：{q or '未填写提问'}"
+            if self.type == "script":
+                kind = {"powershell": "PowerShell", "bat": "BAT",
+                        "cmd": "CMD", "python": "Python"}.get(p.get("script_type"), "脚本")
+                if p.get("source") == "file":
+                    name = os.path.basename(p.get("path") or "") or "未选文件"
+                else:
+                    name = "文本内容"
+                admin = " · 管理员" if p.get("admin") else ""
+                return f"执行脚本 {kind} {name}{admin} → {p.get('result_var') or '未指定变量'}"
+            if self.type == "notify":
+                kind = {"info": "信息", "success": "成功", "warning": "警告",
+                        "error": "错误"}.get(p.get("msg_type"), "信息")
+                content = (p.get("content") or "").strip().replace("\r\n", " ").replace("\n", " ")
+                if len(content) > 20:
+                    content = content[:19] + "…"
+                return f"{kind}通知：{content or '（空内容）'}"
+            if self.type == "speech":
+                content = (p.get("content") or "").strip().replace("\r\n", " ").replace("\n", " ")
+                if len(content) > 20:
+                    content = content[:19] + "…"
+                suffix = "（后台播放）" if not p.get("wait", True) else ""
+                return f"语音播报：{content or '（空内容）'}{suffix}"
             if self.type == "py_func":
                 result = p.get("result_var") or "未指定变量"
                 func = (p.get("func_name") or "").strip()
                 if func:
                     return f"调用 {func}() → {result}"
                 return f"python函数（未填函数名）→ {result}"
+            # ---- DrissionPage 模块摘要 ----
+            if self.type == "dp_browser":
+                var = p.get("browser_var") or "未指定变量"
+                mode = p.get("launch_mode") or "front"
+                note = {"front": "前台", "headless": "无头", "background": "后台"}.get(mode)
+                if mode == "attach":
+                    port = (str(p.get("attach_port") or "")).strip() or "?"
+                    note = f"接管端口{port}"
+                url = (p.get("url") or "").strip()
+                if url:
+                    if len(url) > 28:
+                        url = url[:27] + "…"
+                    return f"{var} ← 浏览器（{note}）· {url}"
+                return f"{var} ← 浏览器（{note}）"
+            if self.type == "dp_element":
+                from .dp_actors import DP_ELE_ACTIONS as _DA
+                loc = _dp_locator_text(p)
+                act = _DA.get(p.get("action") or "", p.get("action") or "?")
+                var = p.get("result_var") or ""
+                tail = f" → {var}" if var else ""
+                val = (p.get("input_value") or "").strip()
+                if p.get("action") in ("input", "input_enter", "set_value") and val:
+                    v = val if len(val) <= 12 else val[:11] + "…"
+                    return f"{loc} · {act}「{v}」{tail}"
+                return f"{loc} · {act}{tail}"
+            if self.type == "dp_tab":
+                from .dp_actors import DP_TAB_MODES as _DT
+                mode = p.get("switch_mode") or "index"
+                label = _DT.get(mode, mode)
+                if mode == "new":
+                    url = (p.get("url") or "").strip() or "空白页"
+                    return f"{label} · {url}"
+                val = (p.get("value") or "").strip() or "未填条件"
+                if len(val) > 20:
+                    val = val[:19] + "…"
+                return f"{label}「{val}」"
+            if self.type == "dp_listen":
+                from .dp_actors import DP_LISTEN_ACTIONS as _DLA
+                act = _DLA.get(p.get("action") or "", p.get("action") or "?")
+                if p.get("action") == "start":
+                    targets = (p.get("targets") or "").strip()
+                    what = (targets.replace("\n", "、").replace("|", "、")
+                            if targets else "全部请求")
+                    if len(what) > 24:
+                        what = what[:23] + "…"
+                    return f"{act} · {what}"
+                if p.get("action") == "wait":
+                    saved = "、".join(x for x, v in (
+                        ("url", p.get("url_var")), ("状态码", p.get("status_var")),
+                        ("响应体", p.get("body_var"))) if v)
+                    return f"{act}" + (f" → {saved}" if saved else "")
+                return act
+            if self.type == "dp_page_shot":
+                var = p.get("result_var") or "未指定变量"
+                full = "整页" if p.get("full_page") else "视口"
+                return f"网页截图（{full}） → {var}"
+            if self.type == "dp_ele_shot":
+                var = p.get("result_var") or "未指定变量"
+                return f"元素截图 {_dp_locator_text(p)} → {var}"
+            if self.type == "dp_upload":
+                files = [x for x in (p.get("file_paths") or "").replace("|", "\n").splitlines() if x.strip()]
+                return f"上传 {len(files) or '?'} 个文件 · {_dp_locator_text(p)}"
+            if self.type == "dp_close_browser":
+                var = (p.get("browser_var") or "").strip()
+                return f"关闭浏览器（{var or '未指定变量'}）"
         except (KeyError, TypeError, ValueError):
             pass
         return ""
@@ -578,12 +879,13 @@ def web_action(step: FlowStep) -> str:
 
 
 def repair_web_pairs(steps: list) -> bool:
-    """校验网页配对：同一 pair_id 的步骤必须恰好两个、且动作分别为 open / close_browser。
+    """兼容遗留：清理旧版成对网页步骤的 pair_id（仅作数据兜底）。
 
-    拖动网页模块时自动生成一对（打开网址 + 关闭浏览器），这对步骤共享 pair_id；
-    编辑时若用户把动作改成别的（或复制/排序导致配对被破坏），这里负责修复：
-    不满足「一对 open + close_browser」的组合就把该组所有 pair_id 清空（解除配对），
-    避免出现删除一个却牵连无关步骤的情况。返回是否有步骤被解除配对。
+    早期版本拖「网页操作」会自动生成「打开网址 + 关闭浏览器」一对，共享 pair_id，
+    删除任一个会连带另一个；2026-09-04 起网页动作已解耦，不再生成新配对，
+    UI 也不再做联动删除。这里只负责把旧流程文件/编辑残留的非法配对标记清掉：
+    同一 pair_id 必须恰好两个步骤、且动作分别为 open / close_browser，否则全部解除，
+    避免残留 id 干扰后续编辑。返回是否有步骤被解除配对。
     """
     changed = False
     groups: dict[str, list[FlowStep]] = {}
@@ -724,11 +1026,13 @@ def flow_from_dict(data: dict) -> Flow | None:
         steps = []
         for s in data["steps"]:
             try:
+                _cof = s.get("continue_on_fail")
                 steps.append(FlowStep(
                     type=str(s.get("type", "")),
                     name=str(s.get("name", ""))[:50],
                     params=dict(s.get("params", {}) or {}),
-                    continue_on_fail=bool(s.get("continue_on_fail", False)),
+                    # 字段缺失（旧数据）→ 传 None 走类型默认；显式 false 保留
+                    continue_on_fail=(bool(_cof) if _cof is not None else None),
                     pair_id=str(s.get("pair_id", ""))[:32],
                     commented=bool(s.get("commented", False)),
                 ))
@@ -960,6 +1264,13 @@ class AppConfig:
     clear_log_on_run: bool = True         # 运行新流程时自动清空底部日志（默认开启）
     log_print_only: bool = True           # 底部日志只显示「打印输出」模块的输出（默认开启）
     collapsed_module_groups: list[str] = field(default_factory=list)  # 模块面板中收起的分组 id
+    # 模块面板分组管理（2026-09-04）：分组可改名、可新建自定义分组、模块可移动分组。
+    # - module_group_titles：内置/自定义分组的改名记录（分组 id -> 标题）；
+    # - module_groups_custom：用户新建的自定义分组 [[分组id, 标题], ...]，成员由 assign 推导；
+    # - module_group_assign：被移动过家的模块（步骤类型 -> 现所属分组 id）。
+    module_group_titles: dict[str, str] = field(default_factory=dict)
+    module_groups_custom: list = field(default_factory=list)
+    module_group_assign: dict[str, str] = field(default_factory=dict)
     # 模块面板折叠状态是否已被用户手动调整过：False（默认/旧配置迁移）时模块分组
     # 一律按收起渲染，界面更紧凑；用户首次点开/收起任意分组后置 True，此后完全
     # 按 collapsed_module_groups 记忆用户的自定义展开状态。
@@ -1079,6 +1390,21 @@ class AppConfig:
         groups = data.get("collapsed_module_groups", [])
         cfg.collapsed_module_groups = ([str(g) for g in groups if isinstance(g, str)]
                                        if isinstance(groups, list) else [])
+        # 模块面板分组管理：改名 / 自定义分组 / 模块移动（旧配置无这些键 -> 空默认）
+        titles = data.get("module_group_titles")
+        cfg.module_group_titles = ({str(k): str(v)[:50] for k, v in titles.items()
+                                    if isinstance(k, str) and str(v).strip()}
+                                   if isinstance(titles, dict) else {})
+        custom = data.get("module_groups_custom")
+        cfg.module_groups_custom = ([[str(g[0]), str(g[1])[:50]] for g in custom
+                                     if isinstance(g, (list, tuple)) and len(g) >= 2
+                                     and str(g[0]).strip() and str(g[1]).strip()]
+                                    if isinstance(custom, list) else [])
+        assign = data.get("module_group_assign")
+        cfg.module_group_assign = ({str(k): str(v) for k, v in assign.items()
+                                    if isinstance(k, str) and isinstance(v, str)
+                                    and k.strip() and v.strip()}
+                                   if isinstance(assign, dict) else {})
         # 模块面板折叠是否已被手动调整过（旧配置无此键 -> False -> 首次默认全收起）
         cfg.module_groups_explicit = bool(data.get("module_groups_explicit", False))
 

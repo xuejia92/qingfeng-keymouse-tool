@@ -241,12 +241,23 @@ class TestScreenshotDialog(unittest.TestCase):
         dlg.save_var_radio.setChecked(True)
         self.assertTrue(dlg._shot_choose_hint_widget.isHidden())
 
-    def test_region_required(self):
-        """未框选区域：确定被拦截并提示。"""
+    def test_region_default_fullscreen(self):
+        """新建截图步骤区域默认全屏：显示「全屏」且无需框选即可确定。"""
         dlg = self._open({"region": "", "save_mode": "variable", "variable": "shot"})
+        self.assertEqual(dlg.region_edit.text(), "全屏（整个虚拟桌面）")
         with mock.patch("app.ui.flow_dialog.QMessageBox.warning") as warn:
             dlg.accept()
-        warn.assert_called_once()
+        warn.assert_not_called()          # 空区域=全屏，不拦截
+
+    def test_region_clear_restores_fullscreen(self):
+        """框选后再点「恢复全屏」：区域清空回全屏，保存的参数为空。"""
+        dlg = self._open({"region": "10,20,100,50", "save_mode": "variable",
+                          "variable": "shot"})
+        dlg._set_region_text(None)
+        self.assertEqual(dlg.region_edit.text(), "全屏（整个虚拟桌面）")
+        step = FlowStep(type="screenshot")
+        dlg.apply_to(step)
+        self.assertEqual(step.params["region"], "")
 
     def test_variable_required_for_default_save(self):
         """默认保存但没选结果变量：确定被拦截并提示。"""

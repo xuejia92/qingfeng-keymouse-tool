@@ -1,0 +1,55 @@
+{
+  "id": "c29874293284",
+  "name": "执行脚本",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "aa",
+        "type": "string",
+        "default_value": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "script",
+      "name": "执行脚本",
+      "params": {
+        "script_type": "python",
+        "source": "text",
+        "content": "print(123)",
+        "path": "C:/Users/Administrator/Desktop/aaa.cmd",
+        "encoding": "utf-8",
+        "window_mode": "hidden",
+        "admin": false,
+        "timeout": 60.0,
+        "result_var": "aa"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "aa",
+        "text": "",
+        "raw": true,
+        "show_type": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 9,
+  "order": 2
+}

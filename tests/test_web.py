@@ -1,4 +1,4 @@
-"""网页操作（DrissionPage）步骤的测试。
+"""web 步骤（打开关闭网页或浏览器）的测试。
 
 刻意**不启动真实浏览器**：那会让测试变慢、抢焦点，还依赖本机装了 Chrome。
 这里只覆盖不需要浏览器的部分——参数默认值、摘要显示、序列化往返、
@@ -16,7 +16,7 @@ from app.tasks import run_web_step
 
 class TestStepMetadata(unittest.TestCase):
     def test_web_registered_as_step_type(self):
-        self.assertEqual(FLOW_STEP_TYPES.get("web"), "网页操作")
+        self.assertEqual(FLOW_STEP_TYPES.get("web"), "打开关闭网页或浏览器")
 
     def test_actions_complete(self):
         self.assertEqual(set(WEB_ACTIONS), {"open", "close_tab", "close_browser"})
@@ -37,6 +37,29 @@ class TestStepMetadata(unittest.TestCase):
     def test_launch_modes_offer_background(self):
         self.assertIn("headless", web_actors.LAUNCH_MODES)
         self.assertIn("background", web_actors.LAUNCH_MODES)
+        self.assertIn("attach", web_actors.LAUNCH_MODES)     # 接管已打开的浏览器
+
+    def test_default_params_have_attach_port(self):
+        p = default_step_params("web")
+        self.assertIn("attach_port", p)                      # 新增字段老配置平滑升级
+        self.assertEqual(p["attach_port"], "")
+
+
+class TestNameMigration(unittest.TestCase):
+    def test_new_steps_use_new_name(self):
+        """新建 web 步骤默认显示名 = 新名「打开关闭网页或浏览器」。"""
+        s = FlowStep(type="web")
+        self.assertEqual(s.name, "打开关闭网页或浏览器")
+
+    def test_old_default_name_upgraded(self):
+        """旧流程残留默认名「网页操作」自动纠正为新名。"""
+        s = FlowStep(type="web", name="网页操作")
+        self.assertEqual(s.name, "打开关闭网页或浏览器")
+
+    def test_custom_name_kept(self):
+        """用户自定义的名称不受改名影响。"""
+        s = FlowStep(type="web", name="打开后台")
+        self.assertEqual(s.name, "打开后台")
 
 
 class TestSummary(unittest.TestCase):
@@ -59,6 +82,16 @@ class TestSummary(unittest.TestCase):
         self.assertEqual(self._summary(action="open", url="https://a.com",
                                        launch_mode="front", tab_target="new"),
                          "https://a.com · 前台新标签")
+
+    def test_open_attach_shows_port(self):
+        self.assertEqual(self._summary(action="open", url="https://a.com",
+                                       launch_mode="attach", attach_port="9333",
+                                       tab_target="new"),
+                         "https://a.com · 接管端口9333 新标签")
+
+    def test_open_attach_without_port_placeholder(self):
+        self.assertIn("?", self._summary(action="open", url="https://a.com",
+                                         launch_mode="attach"))
 
     def test_open_without_url(self):
         self.assertIn("未填网址", self._summary(action="open", url=""))
@@ -329,6 +362,216 @@ class TestRunWebStep(unittest.TestCase):
     def test_close_tab_without_instance(self):
         ok, _ = run_web_step({"action": "close_tab", "tab_scope": "current"})
         self.assertTrue(ok)
+
+
+class _FakeAttachBrowser:
+    """可断言的假浏览器：记录端口与 quit 调用，tabs_count/address 模拟 DrissionPage。"""
+
+    def __init__(self, port=None):
+        self.port = int(port) if port else 9222
+        self.address = f"127.0.0.1:{self.port}"
+        self.tabs_count = 2
+        self.quit_called = 0
+
+    def quit(self, *a, **k):
+        self.quit_called += 1
+
+
+class TestAttachMode(unittest.TestCase):
+    """「接管已打开的浏览器」（等价 Chromium(端口)）：参数校验、会话复用/切换与关闭语义。
+
+    刻意不启动真实浏览器：用打桩的 Chromium 类记录调用。
+    """
+
+    def setUp(self):
+        web_actors.shutdown()
+
+    def tearDown(self):
+        web_actors.shutdown()
+
+    def _stub_drission(self):
+        """打桩 _import_drission：Chromium 构造等价于创建 _FakeAttachBrowser 并登记。"""
+        registry = []
+
+        def fake_import():
+            class FakeChromium(_FakeAttachBrowser):
+                def __init__(self, addr_or_opts=None, session_options=None):
+                    super().__init__(addr_or_opts)
+                    registry.append(self)
+
+            return FakeChromium, None, ()
+
+        original = web_actors._import_drission
+        web_actors._import_drission = fake_import
+        return registry, original
+
+    # ---- 端口解析纯函数 ----
+    def test_parse_attach_port_ok(self):
+        self.assertEqual(web_actors._parse_attach_port("9333"), 9333)
+        self.assertEqual(web_actors._parse_attach_port(9333), 9333)
+
+    def test_parse_attach_port_rejects_invalid(self):
+        for bad in ("", None, "abc", "0", "70000", "-5"):
+            with self.assertRaises(ValueError):
+                web_actors._parse_attach_port(bad)
+
+    def test_address_matches_port(self):
+        self.assertTrue(web_actors._address_matches_port("127.0.0.1:9333", 9333))
+        self.assertFalse(web_actors._address_matches_port("127.0.0.1:9222", 9333))
+        self.assertFalse(web_actors._address_matches_port("", 9333))
+
+    # ---- open_url 前置校验：不发任何 DrissionPage ----
+    def test_open_attach_without_port_fails_before_launch(self):
+        ok, why = web_actors.open_url("https://a.com", mode="attach")
+        self.assertFalse(ok)
+        self.assertIn("端口", why)
+        self.assertIsNone(web_actors._browser)
+
+    def test_open_attach_with_invalid_port_fails_before_launch(self):
+        for bad in ("abc", 0, 70000):
+            ok, why = web_actors.open_url("https://a.com", mode="attach",
+                                          attach_port=bad)
+            self.assertFalse(ok, bad)
+            self.assertIn("端口", why)
+
+    # ---- attach 会话建立/复用/切换 ----
+    def test_get_browser_attach_creates_with_port(self):
+        registry, original = self._stub_drission()
+        try:
+            b = web_actors.get_browser("attach", "9333")
+            self.assertEqual(len(registry), 1)
+            self.assertIs(b, registry[0])
+            self.assertEqual(registry[0].port, 9333)
+            self.assertEqual(web_actors.active_mode(), "attach")
+        finally:
+            web_actors._import_drission = original
+            web_actors._reset_browser()
+
+    def test_get_browser_attach_reuses_same_port(self):
+        registry, original = self._stub_drission()
+        try:
+            web_actors.get_browser("attach", "9333")
+            self.assertEqual(len(registry), 1)
+            # 同端口再取：沿用，不重复创建
+            b2 = web_actors.get_browser("attach", "9333")
+            self.assertEqual(len(registry), 1)
+            self.assertIs(b2, registry[0])
+        finally:
+            web_actors._import_drission = original
+            web_actors._reset_browser()
+
+    def test_get_browser_attach_switches_port_keeps_window(self):
+        """接管会话切到另一端口：旧 attach 浏览器不被 quit（窗口保留），连新端口。"""
+        registry, original = self._stub_drission()
+        try:
+            web_actors.get_browser("attach", "9333")
+            web_actors.get_browser("attach", "9444")
+            self.assertEqual(len(registry), 2)
+            self.assertEqual(registry[0].port, 9333)
+            self.assertEqual(registry[1].port, 9444)
+            self.assertEqual(registry[0].quit_called, 0)     # 手动开的浏览器不能被 quit
+            self.assertIs(web_actors._browser, registry[1])
+        finally:
+            web_actors._import_drission = original
+            web_actors._reset_browser()
+
+    # ---- 关闭语义：attach 只断开，自启才 quit ----
+    def test_close_browser_attach_keeps_window(self):
+        b = _FakeAttachBrowser(9333)
+        web_actors._browser = b
+        web_actors._mode = "attach"
+        try:
+            self.assertTrue(web_actors.close_browser())
+            self.assertEqual(b.quit_called, 0)               # 不关用户浏览器
+        finally:
+            web_actors._reset_browser()
+        self.assertIsNone(web_actors._browser)
+
+    def test_close_browser_self_launched_quits(self):
+        b = _FakeAttachBrowser(9222)
+        web_actors._browser = b
+        web_actors._mode = "front"
+        try:
+            self.assertTrue(web_actors.close_browser())
+            self.assertEqual(b.quit_called, 1)               # 自启浏览器正常退出
+        finally:
+            web_actors._reset_browser()
+        self.assertIsNone(web_actors._browser)
+
+    # ---- 关掉最后一个标签的收尾文案：attach 只断开，自启才退出 ----
+    def _one_tab_browser(self, port=9333):
+        """只有 1 个标签的假浏览器：latest_tab.close() 把 tabs_count 归零。"""
+
+        class Tab:
+            tab_id = "t1"
+
+            def __init__(self, owner):
+                self._owner = owner
+
+            def close(self):
+                self._owner.tabs_count = 0
+
+        class OneTabBrowser(_FakeAttachBrowser):
+            def __init__(self, port=None):
+                super().__init__(port)
+                self.tabs_count = 1
+
+            @property
+            def latest_tab(self):
+                return Tab(self)
+
+        return OneTabBrowser(port)
+
+    def test_close_tab_last_on_attach_keeps_window(self):
+        """attach 会话关掉最后一个标签：只断开接管，窗口保留、不 quit。"""
+        b = self._one_tab_browser(9333)
+        web_actors._browser = b
+        web_actors._mode = "attach"
+        try:
+            ok, why = web_actors.close_tab("current")
+            self.assertTrue(ok)
+            self.assertIn("断开接管", why)
+            self.assertIn("窗口保留", why)
+            self.assertEqual(b.quit_called, 0)               # 不关用户手动开的浏览器
+        finally:
+            web_actors._reset_browser()
+        self.assertIsNone(web_actors._browser)
+
+    def test_close_tab_last_on_self_launched_exits(self):
+        """自启浏览器关掉最后一个标签：真正退出，文案说明浏览器已退出。"""
+        b = self._one_tab_browser(9222)
+        web_actors._browser = b
+        web_actors._mode = "front"
+        try:
+            ok, why = web_actors.close_tab("current")
+            self.assertTrue(ok)
+            self.assertIn("浏览器已退出", why)
+            self.assertEqual(b.quit_called, 1)
+        finally:
+            web_actors._reset_browser()
+        self.assertIsNone(web_actors._browser)
+
+    def test_run_close_browser_attach_wording(self):
+        """关闭接管会话时提示「窗口保留」，不再误导为浏览器已退出。"""
+        web_actors._browser = _FakeAttachBrowser(9333)
+        web_actors._mode = "attach"
+        try:
+            ok, why = run_web_step({"action": "close_browser"})
+            self.assertTrue(ok)
+            self.assertIn("接管", why)
+            self.assertIn("保留", why)
+        finally:
+            web_actors._reset_browser()
+
+    def test_run_close_browser_self_launched_wording(self):
+        web_actors._browser = _FakeAttachBrowser(9222)
+        web_actors._mode = "front"
+        try:
+            ok, why = run_web_step({"action": "close_browser"})
+            self.assertTrue(ok)
+            self.assertIn("已关闭", why)
+        finally:
+            web_actors._reset_browser()
 
 
 if __name__ == "__main__":

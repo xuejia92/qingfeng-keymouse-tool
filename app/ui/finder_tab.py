@@ -27,7 +27,7 @@ _DEFAULT_HOTKEYS = ["f8", "f9", "f10", "f11", "f12",
 
 class FinderTab(QWidget):
     changed = Signal()                 # 配置发生增删改
-    runningStateChanged = Signal()     # 任一任务运行状态变化（用于托盘同步）
+    runningStateChanged = Signal()     # 任一任务运行状态变化（供外部订阅；暂无订阅者，保留备用）
     captureAboutToStart = Signal()     # 即将截屏取模（主窗口应先隐藏）
     captureFinished = Signal()         # 截屏取模结束（主窗口可恢复）
 

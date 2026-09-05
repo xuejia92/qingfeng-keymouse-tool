@@ -22,6 +22,18 @@ import os
 
 import numpy as np
 
+
+def _import_lib(name: str):
+    """以 importlib 动态导入（字符串形式，专供 torch/ultralytics 等大体积可选依赖）。
+
+    PyInstaller 只做静态字节码分析，看不到 importlib.import_module 的字符串
+    参数，因此这些依赖不会被打进 exe（实测 ultralytics 一旦被静态收集，
+    hook 会把整片 ML/AI 生态带进包，体积暴涨数倍）；源码运行时若机器上
+    已安装仍可正常使用。目标库缺失时与 import 语句一致地抛 ImportError。
+    """
+    import importlib
+    return importlib.import_module(name)
+
 # (模型绝对路径, 设备) -> 已加载模型（_OnnxModel / _UltralyticsModel / _HubModel）
 _models: dict = {}
 
@@ -34,8 +46,7 @@ class YoloError(Exception):
 
 def _import_torch():
     try:
-        import torch
-        return torch
+        return _import_lib("torch")
     except ImportError:
         raise YoloError(
             "缺少依赖 torch：目标检测需要 PyTorch 与 YOLOv5，请先安装\n"
@@ -90,7 +101,7 @@ class _OnnxModel:
 
     def __init__(self, path: str, device: str):
         try:
-            import onnxruntime as ort
+            ort = _import_lib("onnxruntime")
         except ImportError:
             raise YoloError(
                 "缺少依赖 onnxruntime：加载 .onnx 模型请先安装\n"
@@ -165,7 +176,7 @@ class _UltralyticsModel:
     """
 
     def __init__(self, path: str, device: str):
-        from ultralytics import YOLO
+        YOLO = _import_lib("ultralytics").YOLO
         self._m = YOLO(path)
         self._device = device
         self.predict(np.zeros((8, 8, 3), dtype=np.uint8), 0.99)   # 预热校验
@@ -214,8 +225,8 @@ class _HubModel:
         import sys
         if repo not in sys.path:
             sys.path.insert(0, repo)
-        from models.common import AutoShape
-        from models.experimental import attempt_load
+        AutoShape = _import_lib("models.common").AutoShape
+        attempt_load = _import_lib("models.experimental").attempt_load
         real_load = torch.load
 
         def _load_compat(*a, **kw):

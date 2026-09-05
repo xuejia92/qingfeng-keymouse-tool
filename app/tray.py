@@ -1,4 +1,8 @@
-"""系统托盘：左键切换窗口显隐，右键菜单启停功能 / 全部停止 / 退出。"""
+"""系统托盘：左键切换窗口显隐，右键菜单显示/隐藏主窗口 / 全部停止 / 退出。
+
+（2026-09-05 起不再提供「鼠标连点 / 键盘连按 / 找图任务」启停勾选菜单，
+功能启停统一在各自页面与热键里操作；托盘保留全局控制。）
+"""
 from __future__ import annotations
 
 import os
@@ -23,22 +27,6 @@ class TrayIcon(QSystemTrayIcon):
         self.act_show = QAction("显示 / 隐藏主窗口", menu)
         self.act_show.triggered.connect(window.toggle_show_hide)
         menu.addAction(self.act_show)
-        menu.addSeparator()
-
-        self.act_clicker = QAction("鼠标连点", menu)
-        self.act_clicker.setCheckable(True)
-        self.act_clicker.triggered.connect(window.toggle_clicker)
-        menu.addAction(self.act_clicker)
-
-        self.act_presser = QAction("键盘连按", menu)
-        self.act_presser.setCheckable(True)
-        self.act_presser.triggered.connect(window.toggle_presser)
-        menu.addAction(self.act_presser)
-
-        self.act_finder = QAction("找图任务（全部启用）", menu)
-        self.act_finder.setCheckable(True)
-        self.act_finder.triggered.connect(window.toggle_all_finder)
-        menu.addAction(self.act_finder)
 
         menu.addSeparator()
         act_stop = QAction("全部停止", menu)
@@ -52,26 +40,16 @@ class TrayIcon(QSystemTrayIcon):
         self.setContextMenu(menu)
         self.activated.connect(self._on_activated)
 
-        window.featureStateChanged.connect(self._sync_checks)
         window.hideToTrayNotice.connect(
             lambda: self.showMessage(APP_NAME,
                                      "已最小化到托盘，程序仍在运行。\n"
                                      f"显示/隐藏窗口：{hotkey_display(window.cfg.show_hide_hotkey)}    "
                                      f"紧急停止：{hotkey_display(window.cfg.stop_all_hotkey)}",
                                      self.icon(), 2500))
-        self._sync_checks("clicker", False)
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.Trigger:  # 左键单击
             self.window.toggle_show_hide()
-
-    def _sync_checks(self, feature: str, running: bool) -> None:
-        if feature == "clicker":
-            self.act_clicker.setChecked(running)
-        elif feature == "presser":
-            self.act_presser.setChecked(running)
-        elif feature == "finder":
-            self.act_finder.setChecked(running)
 
     def _quit(self) -> None:
         self.window.shutdown()

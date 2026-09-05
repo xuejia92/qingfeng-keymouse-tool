@@ -79,6 +79,7 @@ def run_web_step(p: dict, stop: threading.Event | None = None) -> tuple[bool, st
             new_tab=p.get("tab_target") == "new",
             timeout=float(p.get("load_timeout_sec") or 20),
             wait_after=float(p.get("wait_after_sec") or 0),
+            attach_port=p.get("attach_port") or None,
         )
     elif action == "close_tab":
         ok, why = web_actors.close_tab(
@@ -86,13 +87,99 @@ def run_web_step(p: dict, stop: threading.Event | None = None) -> tuple[bool, st
             match_text=p.get("match_text", ""),
         )
     elif action == "close_browser":
+        attached = web_actors.active_mode() == "attach"   # 关的是接管会话还是自启会话
         closed = web_actors.close_browser()
-        ok, why = True, ("浏览器已关闭" if closed else "浏览器未启动，无需关闭")
+        if closed:
+            why = ("已断开接管浏览器（窗口保留，可继续手动使用）" if attached
+                   else "浏览器已关闭")
+        else:
+            why = "浏览器未启动，无需关闭"
+        ok = True
     else:
         ok, why = False, f"未知的网页动作: {action}"
     if ok and stop is not None and stop.is_set():
         return False, "已手动停止"
     return ok, why
+
+
+def run_dp_browser_step(p: dict, variables: dict,
+                        stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「打开浏览器」步骤：浏览器对象保存到指定变量（必填）。"""
+    from . import dp_actors
+    try:
+        return dp_actors.run_dp_browser_step(p, variables, stop)
+    except Exception as e:
+        return False, f"打开浏览器失败：{type(e).__name__}: {e}"
+
+
+def run_dp_element_step(p: dict, variables: dict,
+                        stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「元素操作」步骤：定位元素并执行 click/input/to_upload 等操作。"""
+    from . import dp_actors
+    try:
+        return dp_actors.run_dp_element_step(p, variables, stop)
+    except Exception as e:
+        return False, f"元素操作失败：{type(e).__name__}: {e}"
+
+
+def run_dp_tab_step(p: dict, variables: dict,
+                    stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「切换标签」步骤：按序号/标题/网址切换或新建标签。"""
+    from . import dp_actors
+    try:
+        return dp_actors.run_dp_tab_step(p, variables, stop)
+    except Exception as e:
+        return False, f"切换标签失败：{type(e).__name__}: {e}"
+
+
+def run_dp_listen_step(p: dict, variables: dict,
+                       stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「监听网络数据」步骤：启动监听 / 等待捕获数据包 / 停止监听。"""
+    from . import dp_actors
+    try:
+        return dp_actors.run_dp_listen_step(p, variables, stop)
+    except Exception as e:
+        return False, f"监听网络数据失败：{type(e).__name__}: {e}"
+
+
+def run_dp_page_shot_step(p: dict, variables: dict,
+                          stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「网页截图」步骤：页面截图路径写入结果变量。"""
+    from . import dp_actors
+    try:
+        return dp_actors.run_dp_page_shot_step(p, variables, stop)
+    except Exception as e:
+        return False, f"网页截图失败：{type(e).__name__}: {e}"
+
+
+def run_dp_ele_shot_step(p: dict, variables: dict,
+                         stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「元素截图」步骤：元素截图路径写入结果变量。"""
+    from . import dp_actors
+    try:
+        return dp_actors.run_dp_ele_shot_step(p, variables, stop)
+    except Exception as e:
+        return False, f"元素截图失败：{type(e).__name__}: {e}"
+
+
+def run_dp_upload_step(p: dict, variables: dict,
+                       stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「上传文件」步骤：点击元素触发文件选择框并上传指定文件。"""
+    from . import dp_actors
+    try:
+        return dp_actors.run_dp_upload_step(p, variables, stop)
+    except Exception as e:
+        return False, f"上传文件失败：{type(e).__name__}: {e}"
+
+
+def run_dp_close_browser_step(p: dict, variables: dict,
+                              stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「关闭浏览器」步骤：关闭指定浏览器变量对应的浏览器。"""
+    from . import dp_actors
+    try:
+        return dp_actors.run_dp_close_browser_step(p, variables, stop)
+    except Exception as e:
+        return False, f"关闭浏览器失败：{type(e).__name__}: {e}"
 
 
 def _limit_reason(stop: threading.Event, done: int, t0: float,
@@ -108,13 +195,42 @@ def _limit_reason(stop: threading.Event, done: int, t0: float,
 
 
 def run_app_step(p: dict, stop: threading.Event | None = None) -> tuple[bool, str]:
-    """执行「打开应用」步骤：启动本地程序，按需等待若干秒让其加载完成。
+    """执行「打开应用」步骤。
+
+    目标与启动策略：
+    - use_process=True（默认「进程打开」）：process（可选，从进程列表选择/手填）
+      优先——运行时若该进程已在运行，直接把它的窗口带到桌面最前端（不重复启动
+      新实例）；未运行则继续走启动分支。
+    - use_process=False（取消勾选）：忽略 process，直接用 path 启动。
+    - path（可选）：启动用的可执行文件/文档/文件夹路径，进程未运行时用它启动
+      （文件夹用默认方式打开资源管理器）。
+    process 与 path 都空时报错。启动后按 wait_sec 等待加载。
 
     返回 (成功?, 原因)。启动失败视为失败。
     """
     if stop is not None and stop.is_set():
         return False, "已手动停止"
-    ok, why = win_actors.launch_app(p.get("path", ""))
+    use_process = bool(p.get("use_process", True))
+    process = (p.get("process") or "").strip() if use_process else ""
+    path = (p.get("path") or "").strip()
+    if not process and not path:
+        return False, "未选择要打开的应用（填路径或从进程列表选择）"
+
+    # 1) 指定了目标进程且正在运行：带出其窗口
+    if process:
+        hwnd = win_actors.find_process_window(process)
+        if hwnd:
+            if stop is not None and stop.is_set():
+                return False, "已手动停止"
+            win_actors.bring_to_front(hwnd)
+            return True, f"「{process}」已在运行，已把窗口带到前台"
+
+    # 2) 未在运行：走启动分支
+    if not path:
+        if process:
+            return False, f"「{process}」未在运行，且未填写应用路径（无法启动）"
+        return False, "未填写应用路径"
+    ok, why = win_actors.launch_app(path)
     if not ok:
         return False, why
     wait_sec = float(p.get("wait_sec", 0) or 0)
@@ -123,6 +239,236 @@ def run_app_step(p: dict, stop: threading.Event | None = None) -> tuple[bool, st
     if stop is not None and stop.is_set():
         return False, "已手动停止"
     return True, why
+
+
+def run_http_request_step(p: dict, variables: dict,
+                          stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「网络请求」步骤：用标准库 urllib 发起 GET/POST 请求。
+
+    支持：自定义请求头、Cookie、请求体（POST）、User-Agent、超时、系统代理。
+    结果写入 4 个可选结果变量：
+      - status_var：HTTP 状态码（整数，含 4xx/5xx，网络层失败才判失败）
+      - headers_var：响应头（dict）
+      - cookie_var：响应 Cookie（dict，从 Set-Cookie 解析）
+      - text_var：文本内容（result_type=text）或图片保存路径（result_type=image）
+    网址/请求头/请求体/Cookie/User-Agent 均支持 $变量名 引用。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    from .values import resolve_references
+    from . import http_actor
+
+    url = resolve_references(str(p.get("url") or ""), variables).strip()
+    if not url:
+        return False, "网址为空"
+    if not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url   # 不带协议自动补 https://（与网页步骤一致）
+
+    method = (p.get("method") or "get").strip().lower()
+    headers_text = resolve_references(str(p.get("headers") or ""), variables)
+    body = resolve_references(str(p.get("body") or ""), variables)
+    cookie = resolve_references(str(p.get("cookie") or ""), variables)
+    user_agent = resolve_references(str(p.get("user_agent") or ""), variables)
+    result_type = (p.get("result_type") or "text").strip().lower()
+
+    try:
+        timeout = float(p.get("timeout") if p.get("timeout") is not None else 5)
+    except (TypeError, ValueError):
+        timeout = 5.0
+
+    try:
+        result = http_actor.perform_request(
+            url=url,
+            method=method,
+            headers=http_actor.parse_headers(headers_text),
+            body=body,
+            cookie=cookie,
+            result_type=result_type,
+            user_agent=user_agent,
+            timeout=timeout,
+            use_proxy=bool(p.get("use_proxy", True)),
+            proxy=str(p.get("proxy") or "127.0.0.1:7897"),
+        )
+    except http_actor.HttpError as e:
+        return False, str(e)
+
+    status_var = (p.get("status_var") or "").strip()
+    headers_var = (p.get("headers_var") or "").strip()
+    cookie_var = (p.get("cookie_var") or "").strip()
+    text_var = (p.get("text_var") or "").strip()
+    if status_var:
+        variables[status_var] = result["status"]
+    if headers_var:
+        variables[headers_var] = result["headers"]
+    if cookie_var:
+        variables[cookie_var] = result["cookies"]
+    if text_var:
+        variables[text_var] = result["content"]
+
+    what = "图片已保存" if result_type == "image" else "响应已获取"
+    return True, f"{what}（状态码 {result['status']}）"
+
+
+def run_deepseek_step(p: dict, variables: dict,
+                      stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「DeepSeek 对话」步骤：调用 DeepSeek API 做一次对话补全。
+
+    参数：model / api_key / system（角色设定）/ thinking（思考模式）/ stream（流式）/
+    question（提问）/ result_var（结果变量）/ timeout / use_proxy / proxy / base_url。
+    结果：把最终回答写入 result_var；思考过程（reasoning_content）打印到日志。
+    提问、角色设定支持 $变量名 引用。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    from .values import resolve_references
+    from . import deepseek_actor
+
+    question = resolve_references(str(p.get("question") or ""), variables).strip()
+    system = resolve_references(str(p.get("system") or ""), variables)
+    model = (p.get("model") or "deepseek-v4-flash").strip()
+    api_key = (p.get("api_key") or "").strip()
+    result_var = (p.get("result_var") or "").strip()
+
+    try:
+        timeout = float(p.get("timeout") if p.get("timeout") is not None else 60)
+    except (TypeError, ValueError):
+        timeout = 60.0
+
+    try:
+        result = deepseek_actor.chat(
+            api_key=api_key,
+            model=model,
+            system=system,
+            question=question,
+            thinking=bool(p.get("thinking")),
+            stream=bool(p.get("stream")),
+            timeout=timeout,
+            use_proxy=bool(p.get("use_proxy", True)),
+            proxy=str(p.get("proxy") or "127.0.0.1:7897"),
+            base_url=str(p.get("base_url") or "https://api.deepseek.com"),
+        )
+    except deepseek_actor.DeepSeekError as e:
+        return False, str(e)
+
+    if result_var:
+        variables[result_var] = result["content"]
+    if result.get("reasoning"):
+        reasoning = result["reasoning"]
+        if len(reasoning) > 500:
+            reasoning = reasoning[:500] + "…"
+        log(f"DeepSeek 思考过程：{reasoning}")
+    return True, f"已获取 DeepSeek 回答（{len(result['content'])} 字）"
+
+
+def run_script_step(p: dict, variables: dict,
+                    stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「执行脚本」步骤：运行 CMD / BAT / PowerShell / Python 脚本并捕获输出。
+
+    参数：script_type（cmd/bat/powershell/python）/ source（text/file）/ content（文本内容）/
+    path（脚本文件路径）/ encoding（gb2312/utf-8/utf-8-sig/ascii）/
+    window_mode（hidden=隐藏窗口 / keep=完成后保留命令窗口）/ admin（管理员提权）/
+    timeout（秒）/ result_var（输出变量）。
+    脚本内容与文件路径支持 $变量名 引用；输出（stdout+stderr）写入 result_var。
+    脚本跑完即算成功（退出码非 0 记入原因）；空内容/文件缺失/编码错误/超时/UAC 取消才算失败。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    from .values import resolve_references
+    from . import script_actor
+
+    source = (p.get("source") or "text").strip()
+    script_type = (p.get("script_type") or "cmd").strip()
+    content = resolve_references(str(p.get("content") or ""), variables)
+    path = resolve_references(str(p.get("path") or ""), variables)
+    result_var = (p.get("result_var") or "").strip()
+
+    try:
+        result = script_actor.run_script(
+            script_type=script_type,
+            source=source,
+            content=content,
+            path=path,
+            encoding=str(p.get("encoding") or "utf-8"),
+            window_mode=str(p.get("window_mode") or "hidden"),
+            admin=bool(p.get("admin")),
+            timeout=float(p.get("timeout") if p.get("timeout") is not None else 120),
+        )
+    except (script_actor.ScriptError, TypeError, ValueError) as e:
+        return False, str(e)
+
+    if result_var:
+        variables[result_var] = result["output"]
+    code = result.get("returncode") or 0
+    if code:
+        return True, f"脚本执行完成（退出码 {code}，输出 {len(result['output'])} 字）"
+    return True, f"脚本执行完成（输出 {len(result['output'])} 字）"
+
+
+def run_notify_step(p: dict, variables: dict,
+                    stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「消息通知」步骤：在屏幕上弹出一条通知浮窗。
+
+    参数：msg_type（info/success/warning/error）/ position（显示位置）/ content（消息内容，
+    支持 $变量名 引用）/ duration（自动消失秒数）/ width（通知宽度，像素）。
+    消息内容解析 $变量名 后为空判失败；通知展示失败判失败；通知关闭不影响步骤成败。
+    通知浮窗在主线程展示（后台线程经 ui_call 调度）。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    from .values import resolve_references
+    from . import notify_actor
+
+    content = resolve_references(str(p.get("content") or ""), variables).strip()
+    if not content:
+        return False, "消息内容为空"
+
+    msg_type = (p.get("msg_type") or "info").strip()
+    position = (p.get("position") or "bottom").strip()
+    try:
+        duration = float(p.get("duration") if p.get("duration") is not None else 2)
+    except (TypeError, ValueError):
+        duration = 2.0
+    try:
+        width = int(p.get("width") if p.get("width") is not None else 320)
+    except (TypeError, ValueError):
+        width = 320
+
+    try:
+        notify_actor.show_notification(content, msg_type, duration, width, position)
+    except Exception as e:
+        return False, f"通知展示失败：{type(e).__name__}: {e}"
+
+    label = notify_actor._theme(msg_type)["label"]
+    return True, f"已弹出{label}通知"
+
+
+def run_speech_step(p: dict, variables: dict,
+                    stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「语音播报」步骤：用 pyttsx3 语音朗读文本。
+
+    参数：content（播报内容，支持 $变量名 引用）/ wait（勾选=等播完再继续，
+    默认；不勾=后台排队播报不阻塞当前流程）。
+    内容解析 $变量名 后为空判失败；引擎不可用/播报异常判失败。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    from .values import resolve_references
+    from . import speech_actor
+
+    content = resolve_references(str(p.get("content") or ""), variables).strip()
+    if not content:
+        return False, "播报内容为空"
+
+    wait = bool(p.get("wait", True))
+    try:
+        if wait:
+            ok, why = speech_actor.speak(content)
+            return ok, why
+        ok, why = speech_actor.speak_async(content)
+        return ok, why
+    except Exception as e:
+        return False, f"语音播报失败：{type(e).__name__}: {e}"
+
 
 
 def run_close_app_step(p: dict, stop: threading.Event | None = None) -> tuple[bool, str]:
@@ -198,9 +544,12 @@ def run_log_step(p: dict, variables: dict) -> tuple[bool, str]:
     输出走「打印」通道，日志面板以蓝色字体区分。
     勾选「原始输出」（raw=True）时：不加时间戳、不自动换行、不带「变量名 =」前缀，
     多个变量默认直接拼接；变量表达式后加 \\n（换行）或 \\b（空格）控制分隔。
+    勾选「显示类型」（show_type=True）时：每个解析成功的变量值后追加 Python 类型名，
+    如 count = 5 (int)、name = 张三 (str)；解析失败的变量不带类型标注。
     """
     from .values import format_value, resolve_references, resolve_variable
     raw = bool(p.get("raw"))
+    show_type = bool(p.get("show_type"))
     emit = log_print_raw if raw else log_print
     names = [x.strip() for x in (p.get("variables") or "").split(",") if x.strip()]
     raw_text = str(p.get("text") or "")
@@ -215,6 +564,13 @@ def run_log_step(p: dict, variables: dict) -> tuple[bool, str]:
             return True, "打印已输出"
         return True, "未打印任何内容"
 
+    def with_type(value) -> str:
+        """值文本 + 可选 Python 类型标注（如 5 (int)）。"""
+        text_val = format_value(value)
+        if not show_type:
+            return text_val
+        return f"{text_val} ({type(value).__name__})"
+
     text = resolve_references(text_src, variables)
     if raw:
         # 原始输出：只输出值本身，默认不换行拼接；\\n 换行、\\b 空格
@@ -222,7 +578,7 @@ def run_log_step(p: dict, variables: dict) -> tuple[bool, str]:
         for name in names:
             expr, sep = _parse_log_var_item(name)
             ok, value, why = resolve_variable(expr, variables)
-            parts.append((format_value(value) if ok else f"<{why}>") + sep)
+            parts.append((with_type(value) if ok else f"<{why}>") + sep)
         emit(text + "".join(parts) if text else "".join(parts))
         return True, f"已打印 {len(names)} 个变量"
 
@@ -231,7 +587,7 @@ def run_log_step(p: dict, variables: dict) -> tuple[bool, str]:
     for name in names:
         ok, value, why = resolve_variable(name, variables)
         if ok:
-            lines.append(f"{name} = {format_value(value)}")
+            lines.append(f"{name} = {with_type(value)}")
         else:
             lines.append(f"{name} = <{why}>")
     if text:
@@ -387,6 +743,28 @@ def run_screenshot_step(p: dict, variables: dict,
     if var:
         variables[var] = path
     return True, f"截图已保存：{path}"
+
+
+def run_color_pick_step(p: dict, variables: dict,
+                        stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「屏幕取色」步骤：把配置阶段取到的颜色字符串写入指定变量。
+
+    颜色在编辑步骤时通过「屏幕取色…」拾取（取色遮罩实时放大 + 单击确认），
+    这里只做运行时回填——把配置保存的颜色值（如 #FF0000 或 255,0,0）按
+    所选格式原样写入结果变量，供后续步骤引用。
+
+    返回 (成功?, 原因)。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    var = (p.get("variable") or "").strip()
+    if not var:
+        return False, "未指定结果变量"
+    color = str(p.get("color") or "").strip()
+    if not color:
+        return False, "尚未取色（请编辑步骤点「屏幕取色…」拾取颜色）"
+    variables[var] = color
+    return True, f"颜色 {color} 已写入变量 {var}"
 
 
 def run_find_image_step(p: dict, variables: dict,

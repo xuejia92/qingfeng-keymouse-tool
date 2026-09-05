@@ -42,13 +42,13 @@
       "name": "目标检测",
       "params": {
         "model_path": "C:/Users/Administrator/Desktop/program/qinghsui/python/airTest/dm/yolo/datasets/dadishu_yolo/v5-7.0/yolov5s_best.onnx",
-        "region": "864,590,825,754",
+        "region": "1590,451,830,906",
         "classes": "",
-        "confidence": 0.35,
+        "confidence": 0.55,
         "device": "cpu",
-        "action": "left",
+        "action": "none",
         "preview": true,
-        "preview_duration": 0.2,
+        "preview_duration": 0.5,
         "variable": "yolo_result"
       },
       "continue_on_fail": false,
@@ -61,7 +61,8 @@
       "params": {
         "variables": "yolo_result",
         "text": "",
-        "raw": false
+        "raw": false,
+        "show_type": false
       },
       "continue_on_fail": false,
       "pair_id": "",
@@ -90,5 +91,5 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 4,
-  "order": 3
+  "order": 7
 }

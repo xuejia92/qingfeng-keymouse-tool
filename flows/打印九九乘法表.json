@@ -57,7 +57,8 @@
       "params": {
         "variables": "item_i*item_j \\b",
         "text": "$item_i x $item_j =",
-        "raw": true
+        "raw": true,
+        "show_type": false
       },
       "continue_on_fail": false,
       "pair_id": "",
@@ -103,7 +104,8 @@
       "params": {
         "variables": "",
         "text": "\\n",
-        "raw": true
+        "raw": true,
+        "show_type": false
       },
       "continue_on_fail": false,
       "pair_id": "",
@@ -122,5 +124,5 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 3,
-  "order": 1
+  "order": 5
 }

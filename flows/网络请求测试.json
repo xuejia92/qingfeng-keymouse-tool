@@ -1,0 +1,110 @@
+{
+  "id": "3e48f1a9974c",
+  "name": "网络请求测试",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "resutl",
+        "type": "string",
+        "default_value": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "http_request",
+      "name": "网络请求",
+      "params": {
+        "url": "https://platform.deepseek.com/api/v0/users/get_user_summary",
+        "method": "get",
+        "headers": "authorization:Bearer THHqdOzqCwm9IwcU+7zB10CUyA8iW+ffUCgM63BiQOXlyxGeWDMW5nw0o0KEU3Bi",
+        "body": "",
+        "cookie": "",
+        "result_type": "text",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
+        "timeout": 5.0,
+        "use_proxy": true,
+        "proxy": "127.0.0.1:7897",
+        "status_var": "resutl",
+        "headers_var": "",
+        "cookie_var": "",
+        "text_var": "resutl"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "resutl",
+        "type": "dict",
+        "default_value": "$resutl"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "resutl",
+        "type": "dict",
+        "default_value": "$resutl['data']['biz_data'][\"normal_wallets\"][0]"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "resutl",
+        "text": "",
+        "raw": true,
+        "show_type": true
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "res",
+        "type": "string",
+        "default_value": "$resutl[\"balance\"]"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "notify",
+      "name": "消息通知",
+      "params": {
+        "msg_type": "info",
+        "position": "bottom",
+        "content": "deepseek余额剩余：$res",
+        "duration": 2.0,
+        "width": 420
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 6,
+  "order": 3
+}
