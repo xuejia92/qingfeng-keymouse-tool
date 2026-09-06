@@ -103,8 +103,13 @@ def recognize(region: str = "", lang: str = "ch", multi_ocr: bool = True) -> tup
         return False, None, f"文字识别失败：{type(e).__name__}: {e}"
 
 
-def find_text(region: str = "", text: str = "", lang: str = "ch") -> tuple[bool, object, str]:
-    """在屏幕/区域中查找指定文字（OCR 后做包含匹配，忽略大小写）。
+def find_text(region: str = "", text: str = "", lang: str = "ch",
+              tolerance: float | None = None) -> tuple[bool, object, str]:
+    """在屏幕/区域中查找指定文字。
+
+    tolerance 为 None 时做包含匹配（忽略大小写）；传入 0~1 时做近似匹配——
+    目标文字与识别行任意同长子串的最优相似度 >= tolerance 即命中（OCR 会把
+    目标词和相邻文字混在一行，整行直接比相似度会被相邻字拉低，故用滑动窗口）。
 
     返回 (查找成功?, 结果, 说明)。查找成功表示 OCR 正常完成，结果：
       - 找到  -> {"x": 屏幕绝对中心x, "y": 屏幕绝对中心y, "text": 命中的整行文字, "score": 置信度}
@@ -125,7 +130,10 @@ def find_text(region: str = "", text: str = "", lang: str = "ch") -> tuple[bool,
         result, _elapse = ocr(img)
         low = keyword.lower()
         for it in _extract_items(result):
-            if low in it["text"].lower():
+            line_low = it["text"].lower()
+            matched = (low in line_low) if tolerance is None \
+                else _fuzzy_match(low, line_low, tolerance)
+            if matched:
                 cx, cy = _box_center(it["box"])
                 cx, cy = cx + ox, cy + oy
                 return True, {"x": cx, "y": cy, "text": it["text"],
@@ -133,6 +141,60 @@ def find_text(region: str = "", text: str = "", lang: str = "ch") -> tuple[bool,
         return True, None, f"未找到文字「{keyword}」"
     except Exception as e:
         return False, None, f"文字查找失败：{type(e).__name__}: {e}"
+
+
+def _fuzzy_match(keyword: str, line: str, tolerance: float) -> bool:
+    """近似匹配：keyword 与 line 的最优局部相似度 >= tolerance 即命中。
+
+    相似度 = 1 - 编辑距离 / max(len(keyword), len(窗口))，再在 line 上以
+    keyword 长度（±1 字）的滑动窗口取最大值——既容忍 OCR 错字/漏字/多字，
+    又不会像 SequenceMatcher.ratio 那样对单字窗口给出虚高相似度。
+    tolerance=1.0 等价于「keyword 完整出现在 line 中」。
+    """
+    if not keyword or not line:
+        return False
+    if keyword in line:
+        return True
+    if tolerance <= 0.0:
+        return True                       # 容错度 0 = 任意文字都算命中
+    k = len(keyword)
+    best = 0.0
+    # 窗口长取 keyword 长度及 ±1，容忍 OCR 少识别/多识别一个字
+    for w in (k, k + 1, k - 1):
+        if w <= 0:
+            continue
+        for i in range(0, max(1, len(line) - w + 1)):
+            seg = line[i:i + w]
+            s = _edit_similarity(keyword, seg)
+            if s > best:
+                best = s
+                if best >= tolerance:
+                    return True
+    return best >= tolerance
+
+
+def _edit_similarity(a: str, b: str) -> float:
+    """归一化编辑距离相似度 0~1（1=完全相同）。"""
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    dist = _levenshtein(a, b)
+    return 1.0 - dist / max(len(a), len(b))
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """两个字符串的编辑距离（滚动数组 O(len(b)) 空间）。"""
+    n = len(b)
+    prev = list(range(n + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * n
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1,               # 删除
+                         cur[j - 1] + 1,            # 插入
+                         prev[j - 1] + (ca != cb))  # 替换
+        prev = cur
+    return prev[n]
 
 
 def _extract_items(result) -> list[dict]:

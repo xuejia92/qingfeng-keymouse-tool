@@ -171,5 +171,67 @@ class TestRemoveLockFile(unittest.TestCase):
             self.assertTrue(_remove_lock_file(p))   # 文件已不在，也应视为成功
 
 
+class TestShowRequest(unittest.TestCase):
+    """二次启动置前：广播消息与过滤器（Windows 消息机制，需 QCoreApplication）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        global _APP
+        from PySide6.QtCore import QCoreApplication
+
+        _APP = QCoreApplication.instance() or QCoreApplication([])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows 消息机制")
+    def test_message_id_stable_and_positive(self):
+        from app.instance_lock import show_request_message_id
+        a = show_request_message_id()
+        self.assertGreater(a, 0)
+        self.assertEqual(show_request_message_id(), a)   # 同名注册返回同一 id
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows 消息机制")
+    def test_broadcast_returns_bool(self):
+        from app.instance_lock import broadcast_show_request
+        self.assertIsInstance(broadcast_show_request(), bool)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows 消息机制")
+    def test_filter_matches_registered_message(self):
+        import ctypes
+        from ctypes import wintypes
+        from app.instance_lock import ShowRequestFilter, show_request_message_id
+        called = []
+        f = ShowRequestFilter(lambda: called.append(1))
+        msg = wintypes.MSG()
+        msg.message = show_request_message_id()
+        addr = ctypes.addressof(msg)
+        self.assertEqual(f.nativeEventFilter(b"windows_generic_MSG", addr), (True, 0))
+        self.assertEqual(called, [1])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows 消息机制")
+    def test_filter_ignores_unrelated_message(self):
+        import ctypes
+        from ctypes import wintypes
+        from app.instance_lock import ShowRequestFilter
+        called = []
+        f = ShowRequestFilter(lambda: called.append(1))
+        msg = wintypes.MSG()
+        msg.message = 999
+        addr = ctypes.addressof(msg)
+        self.assertEqual(f.nativeEventFilter(b"windows_generic_MSG", addr), (False, 0))
+        self.assertEqual(called, [])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows 消息机制")
+    def test_filter_ignores_non_windows_event(self):
+        import ctypes
+        from ctypes import wintypes
+        from app.instance_lock import ShowRequestFilter, show_request_message_id
+        called = []
+        f = ShowRequestFilter(lambda: called.append(1))
+        msg = wintypes.MSG()
+        msg.message = show_request_message_id()
+        addr = ctypes.addressof(msg)
+        self.assertEqual(f.nativeEventFilter(b"xcb_generic_event_t", addr), (False, 0))
+        self.assertEqual(called, [])
+
+
 if __name__ == "__main__":
     unittest.main()

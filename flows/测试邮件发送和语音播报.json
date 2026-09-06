@@ -1,8 +1,38 @@
 {
   "id": "9ee6799caa2a",
-  "name": "测试",
+  "name": "测试邮件发送和语音播报",
   "group": "测试使用",
   "steps": [
+    {
+      "type": "qq_mail",
+      "name": "邮件发送",
+      "params": {
+        "mail_host": "smtp.qq.com",
+        "mail_port": 465,
+        "mail_user": "1922884595@qq.com",
+        "mail_auth_code": "mloqacymmetreige",
+        "mail_to": "1922884595@qq.com",
+        "subject": "这是一层测试自动化插件$x",
+        "content": "你好美丽的世界，圆你每天都开开心心的$x",
+        "attachments": [
+          "C:/Users/Administrator/Pictures/1706579587d123751702451325.png",
+          "C:/Users/Administrator/bun.lock"
+        ]
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "exit",
+      "name": "退出流程",
+      "params": {
+        "variable": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
     {
       "type": "var",
       "name": "变量",
@@ -44,5 +74,5 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 11,
-  "order": 0
+  "order": 1
 }

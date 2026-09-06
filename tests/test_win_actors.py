@@ -149,8 +149,8 @@ class TestWinActorsPure(unittest.TestCase):
         self.assertEqual(win_actors.wait_window_by_title(""), 0)
 
     def test_list_processes_structure(self):
-        # 只列有可见窗口的应用进程：每条含 pid/name/path/app_name/title（title 非空），
-        # 过滤掉无窗口的后台子进程/服务；全 Unicode API 无乱码
+        # 列出用户应用：有可见窗口的进程 title 非空；无窗口的托盘/后台应用 title 为空。
+        # 每条含 pid/name/path/app_name/title；过滤掉系统服务与同名子进程；全 Unicode 无乱码
         procs = win_actors.list_processes()
         self.assertIsInstance(procs, list)
         for p in procs:
@@ -158,7 +158,7 @@ class TestWinActorsPure(unittest.TestCase):
             self.assertTrue(p["name"].lower().endswith(".exe"))
             self.assertIn("path", p)                       # 「打开应用」未运行时启动用
             self.assertTrue(p["path"].lower().endswith(".exe"))
-            self.assertTrue(p["title"], "应只保留有窗口标题的进程")
+            self.assertIsInstance(p["title"], str)
             for v in (p["name"], p["app_name"], p["title"]):
                 self.assertNotIn("\ufffd", v)
 
@@ -168,6 +168,15 @@ class TestWinActorsPure(unittest.TestCase):
     def test_find_process_window_unknown_name(self):
         # 名字不存在的进程：不会崩、返回 0（真实枚举无副作用）
         self.assertEqual(win_actors.find_process_window("__qf_no_such_proc__.exe"), 0)
+
+    def test_find_window_by_pid_zero(self):
+        self.assertEqual(win_actors.find_window_by_pid(0), 0)
+
+    def test_show_running_instance_zero_pid_false(self):
+        self.assertFalse(win_actors.show_running_instance(0, "清风自动化键鼠工具"))
+
+    def test_show_and_foreground_invalid_hwnd_false(self):
+        self.assertFalse(win_actors.show_and_foreground(0))
 
     def test_bring_to_front_zero_hwnd_false(self):
         self.assertFalse(win_actors.bring_to_front(0))

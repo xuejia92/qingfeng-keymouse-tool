@@ -1,0 +1,62 @@
+{
+  "id": "3808bc799092",
+  "name": "等待文字或图片出现",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "wait_image",
+      "name": "等待图片出现",
+      "params": {
+        "image": "tpl_20260905_203453.png",
+        "image_path": "C:\\Users\\Administrator\\Desktop\\program\\清风自动化键鼠工具\\templates\\tpl_20260905_203453.png",
+        "confidence": 0.85,
+        "region": "",
+        "interval_sec": 1.0,
+        "timeout_sec": 0.0,
+        "result_var": "",
+        "pos_var": "x"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "x",
+        "text": "",
+        "raw": true,
+        "show_type": true
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "click",
+      "name": "鼠标点击",
+      "params": {
+        "mouse_button": "left",
+        "click_type": "single",
+        "interval_ms": 20,
+        "fixed_position": true,
+        "pos_x": 0,
+        "pos_y": 0,
+        "pos_var": "x",
+        "count": 1,
+        "duration_sec": 0.0,
+        "background": false,
+        "window_title": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 12,
+  "order": 0
+}

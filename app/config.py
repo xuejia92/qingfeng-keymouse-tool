@@ -186,13 +186,14 @@ class FindTask:
 # ---------------- 自动化流程 ----------------
 
 FLOW_STEP_TYPES = {"var": "变量", "log": "打印输出", "ocr": "文字识别",
-                   "text_find": "文字查找", "screenshot": "截图",
-                   "find_image": "找图", "yolo_detect": "目标检测",
+                   "text_find": "文字查找", "wait_text": "等待文字出现", "screenshot": "截图",
+                   "find_image": "找图", "wait_image": "等待图片出现", "yolo_detect": "目标检测",
                    "click": "鼠标点击", "press": "键盘连按", "find": "找图点击",
                    "wait": "延时等待", "web": "打开关闭网页或浏览器", "http_request": "网络请求",
                    "deepseek": "DeepSeek 对话", "script": "执行脚本",
                    "notify": "消息通知",
                    "speech": "语音播报",
+                   "qq_mail": "邮件发送",
                    "app": "打开应用",
                    "close_app": "关闭应用", "clip_set": "赋值剪贴板",
                    "clip_get": "获取剪贴板内容",
@@ -210,6 +211,35 @@ FLOW_STEP_TYPES = {"var": "变量", "log": "打印输出", "ocr": "文字识别"
                    "while": "while 循环", "endWhile": "while 循环结束",
                    "break": "break 中断循环", "continue": "continue 继续循环",
                    "exit": "退出流程"}
+
+# 步骤类型 -> 该步骤会「产出/写入」的变量参数字段名。供流程各变量下拉收集
+# 「流程内部变量」：既含 var 步骤的声明，也含其它步骤把结果写入的变量（OCR/找图/
+# 截图/取色/网络请求/DeepSeek/脚本/python函数/DrissionPage 等的输出字段，
+# foreach 每轮写入的 item/index）。运行期变量存储是共享 dict——任何步骤执行后，
+# 其产出变量即可被后续「打印输出」或表达式引用。无产出字段的步骤类型不在表内。
+STEP_OUTPUT_FIELDS: dict[str, tuple[str, ...]] = {
+    "var": ("name",),
+    "foreach": ("item_var", "index_var"),
+    "ocr": ("variable",),
+    "text_find": ("variable",),
+    "wait_text": ("result_var", "pos_var"),
+    "find_image": ("variable",),
+    "wait_image": ("result_var", "pos_var"),
+    "yolo_detect": ("variable",),
+    "screenshot": ("variable",),
+    "color_pick": ("variable",),
+    "clip_get": ("variable",),
+    "http_request": ("status_var", "headers_var", "cookie_var", "text_var"),
+    "deepseek": ("result_var",),
+    "script": ("result_var",),
+    "py_func": ("result_var",),
+    "dp_browser": ("browser_var",),
+    "dp_element": ("result_var",),
+    "dp_tab": ("result_var",),
+    "dp_listen": ("url_var", "status_var", "body_var"),
+    "dp_page_shot": ("result_var",),
+    "dp_ele_shot": ("result_var",),
+}
 
 # 自动成对生成的步骤类型：不显示在模块面板（endif/endForeach/endWhile
 # 分别随 if/foreach/while 拖入时自动创建）。
@@ -296,6 +326,16 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "click": False,               # True=找到后点击该文字
             "click_button": "left",       # left / right
             "variable": "",               # 结果变量：未勾选点击时写坐标 "x,y"，未找到写 false
+        }
+    if step_type == "wait_text":
+        return {
+            "text": "",                   # 目标文字（必填，支持 $变量名 引用）
+            "region": "",                 # 识别区域 "x,y,w,h"（物理像素），空=全屏
+            "interval_sec": 1.0,          # 每次识别的时间间隔（秒）
+            "tolerance": 0.8,             # 近似匹配容错度 0~1（1=完全匹配，越小越宽松）
+            "timeout_sec": 0.0,           # 最长等待（秒），0=一直等到出现为止
+            "result_var": "",             # 可选：命中后把识别到的整行文字写入该变量
+            "pos_var": "",                # 可选：命中后把文字中心坐标 "x,y" 写入该变量
         }
     if step_type == "wait":
         return {"seconds": 1.0}
@@ -384,6 +424,17 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "content": "",                # 播报内容，支持 $变量名 引用（手动输入或选变量）
             "wait": True,                 # 是否等待播报完成：勾选=播完再继续；不勾=后台播放不阻塞
         }
+    if step_type == "qq_mail":
+        return {
+            "mail_host": "smtp.qq.com",   # SMTP 服务器（默认 QQ 邮箱）
+            "mail_port": 465,             # SMTP 端口（QQ 邮箱 SSL 端口，默认 465）
+            "mail_user": "",              # 发送人邮箱（用户自行填写）
+            "mail_auth_code": "",         # 发送人邮箱授权码（QQ 邮箱「设置-账户-开启SMTP服务」生成）
+            "mail_to": "",                # 收件人邮箱（用户自行填写，多个用逗号/分号分隔，支持 $变量名）
+            "subject": "",                # 邮件主题，支持 $变量名 引用
+            "content": "",                # 邮件正文，支持 $变量名 引用
+            "attachments": [],            # 附件绝对路径列表（可多个，浏览选择）
+        }
     if step_type == "clip_set":
         return {
             "name": "",                   # 要写入剪贴板的变量名（与 text 二选一，变量优先）
@@ -402,6 +453,17 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "variable": "",              # 结果变量：找到写矩形区域 "左上x,左上y,右下x,右下y"，未找到写 false
             "preview": False,            # 效果预览：找到后在目标区域画红框
             "preview_duration": 1.0,     # 红框持续时间（秒），默认 1 秒
+        }
+    if step_type == "wait_image":
+        return {
+            "image": "",                 # 模板图文件名（templates/ 下，截屏/上传生成）
+            "image_path": "",            # 模板图绝对路径（跨目录运行时兜底）
+            "confidence": 0.85,          # 匹配置信度阈值 0.5~0.99
+            "region": "",                # 查找区域 "x,y,w,h"（物理像素），空=全屏
+            "interval_sec": 1.0,         # 每次找图的时间间隔（秒）
+            "timeout_sec": 0.0,          # 最长等待（秒），0=一直找直到出现为止
+            "result_var": "",            # 可选：命中后写矩形区域 "左上x,左上y,右下x,右下y"
+            "pos_var": "",               # 可选：命中后写中心坐标 "x,y"
         }
     if step_type == "screenshot":
         return {
@@ -593,10 +655,16 @@ class FlowStep:
         # 显示名升级迁移：只纠正残留的旧版默认名，用户自定义的名称不受影响。
         # 「日志输出」→「打印输出」；「网页操作」→「打开关闭网页或浏览器」
         # （2026-09-04 网页步骤改名：模块面板展示名与实际承载能力更贴合）。
+        # 「QQ邮件发送」→「邮件发送」（2026-09-05）；
+        # 「等待图片」→「等待图片出现」（2026-09-05，与「等待文字出现」命名对齐）。
         if self.type == "log" and self.name == "日志输出":
             self.name = "打印输出"
         if self.type == "web" and self.name == "网页操作":
             self.name = "打开关闭网页或浏览器"
+        if self.type == "qq_mail" and self.name == "QQ邮件发送":
+            self.name = "邮件发送"
+        if self.type == "wait_image" and self.name == "等待图片":
+            self.name = "等待图片出现"
         merged = default_step_params(self.type)
         merged.update({k: v for k, v in (self.params or {}).items() if v is not None})
         self.params = merged
@@ -669,6 +737,11 @@ class FlowStep:
                     text = text[:19] + "…"
                 act = "点击" if p.get("click") else "返回坐标"
                 return f"查找「{text}」· {act}"
+            if self.type == "wait_text":
+                text = (p.get("text") or "").strip() or "未填文字"
+                if len(text) > 20:
+                    text = text[:19] + "…"
+                return f"等待文字「{text}」出现"
             if self.type == "click":
                 btn = {"left": "左键", "right": "右键", "middle": "中键"}.get(p["mouse_button"], "左键")
                 ct = "双击" if p["click_type"] == "double" else "单击"
@@ -729,6 +802,9 @@ class FlowStep:
             if self.type == "find_image":
                 img = os.path.basename(p.get("image") or "") or "未选模板"
                 return f"找图 {img} → {p.get('variable') or '未指定变量'}"
+            if self.type == "wait_image":
+                img = os.path.basename(p.get("image") or "") or "未选模板"
+                return f"等待图片出现 {img}"
             if self.type == "yolo_detect":
                 model = os.path.basename(p.get("model_path") or "") or "未设模型"
                 return f"目标检测 {model} → {p.get('variable') or '未指定变量'}"
@@ -797,6 +873,13 @@ class FlowStep:
                     content = content[:19] + "…"
                 suffix = "（后台播放）" if not p.get("wait", True) else ""
                 return f"语音播报：{content or '（空内容）'}{suffix}"
+            if self.type == "qq_mail":
+                to = (p.get("mail_to") or "").strip() or "未填收件人"
+                if len(to) > 20:
+                    to = to[:19] + "…"
+                n_att = len([x for x in (p.get("attachments") or []) if (str(x) or "").strip()])
+                tail = f" · {n_att} 附件" if n_att else ""
+                return f"发邮件给 {to}{tail}"
             if self.type == "py_func":
                 result = p.get("result_var") or "未指定变量"
                 func = (p.get("func_name") or "").strip()

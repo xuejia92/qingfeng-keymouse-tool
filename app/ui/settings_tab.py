@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                                QPushButton, QVBoxLayout, QWidget)
 
 from ..config import APP_NAME, BASE_DIR, CONFIG_PATH, LOG_PATH, TEMPLATE_DIR
+from .. import hotkey_policy
 from .hotkey_edit import HotkeyEdit
 from .widgets import set_variant
 
@@ -32,9 +33,11 @@ class SettingsTab(QWidget):
         form = QFormLayout(hotkey_box)
         self.hotkey_edit = HotkeyEdit()
         self.hotkey_edit.setMaximumWidth(220)
+        self.hotkey_edit.set_conflict_checker(lambda hk: hotkey_policy.check(hk, "show_hide"))
         form.addRow("显示 / 隐藏主窗口（切换）", self.hotkey_edit)
         self.stop_edit = HotkeyEdit()
         self.stop_edit.setMaximumWidth(220)
+        self.stop_edit.set_conflict_checker(lambda hk: hotkey_policy.check(hk, "stop_all"))
         form.addRow("紧急停止全部任务", self.stop_edit)
         warn = QLabel("⚠ 任务可能在后台持续点击/按键，失控时请立刻按紧急停止热键，"
                       "或用鼠标右键托盘图标选择「全部停止」。")

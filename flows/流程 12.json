@@ -1,0 +1,26 @@
+{
+  "id": "6e9a990d0288",
+  "name": "流程 12",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "app",
+      "name": "打开应用",
+      "params": {
+        "path": "C:/Users/Administrator/Desktop/program/清风自动化键鼠工具/dist/清风自动化键鼠工具.exe",
+        "process": "",
+        "target": "",
+        "use_process": false,
+        "wait_sec": 0.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "alt+shift+m",
+  "loops": 1,
+  "created_seq": 13,
+  "order": 11
+}

@@ -41,10 +41,10 @@
   "clear_log_on_run": true,
   "log_print_only": true,
   "collapsed_module_groups": [
-    "app_web",
     "condition",
     "drission",
     "input",
+    "logic",
     "perceive",
     "python"
   ],

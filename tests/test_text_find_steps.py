@@ -409,6 +409,58 @@ class TestTextFindDialog(unittest.TestCase):
         dlg.apply_to(step)
         self.assertEqual(step.params["variables"], "")
 
+    def test_log_vars_include_internal_output_variables(self):
+        """打印输出的变量下拉应含流程内部产出的变量（OCR/DeepSeek/foreach 等写入的
+        结果变量），不止「变量」步骤的声明。"""
+        from PySide6.QtWidgets import QWidget
+        from app.config import Flow
+        from app.ui.flow_dialog import StepParamsDialog
+
+        flow = Flow(name="内部变量流程", steps=[
+            FlowStep(type="var", params={"name": "x"}),
+            FlowStep(type="ocr", params={"variable": "ocr_txt"}),
+            FlowStep(type="deepseek", params={"result_var": "ai_ans"}),
+            FlowStep(type="http_request", params={"text_var": "resp_body"}),
+            FlowStep(type="foreach", params={"item_var": "item", "index_var": "idx"}),
+        ])
+
+        class _StubTab(QWidget):
+            """为对话框提供 _selected_flow 的最小流程宿主桩。"""
+
+            def _selected_flow(self):
+                return flow
+
+        stub = _StubTab()
+        dlg = StepParamsDialog(FlowStep(type="log", params={}), stub)
+        names = [dlg.log_vars.itemData(i) for i in range(dlg.log_vars.count())]
+        for want in ("x", "ocr_txt", "ai_ans", "resp_body", "item", "idx"):
+            self.assertIn(want, names)
+
+    def test_var_combos_include_internal_output_variables(self):
+        """通用变量下拉（_var_combo）同样应含内部产出变量：文字查找步骤直接选
+        OCR 的输出变量作为点击坐标，不需要先手动建一个「变量」步骤。"""
+        from PySide6.QtWidgets import QWidget
+        from app.config import Flow
+        from app.ui.flow_dialog import StepParamsDialog
+
+        flow = Flow(name="内部变量流程2", steps=[
+            FlowStep(type="ocr", params={"variable": "ocr_txt"}),
+        ])
+
+        class _StubTab(QWidget):
+            def _selected_flow(self):
+                return flow
+
+        stub = _StubTab()
+        dlg = StepParamsDialog(FlowStep(type="text_find", params={}), stub)
+        names = [dlg.tf_variable.itemData(i) for i in range(dlg.tf_variable.count())]
+        self.assertIn("ocr_txt", names)
+
+        stub2 = _StubTab()
+        dlg2 = StepParamsDialog(FlowStep(type="clip_get", params={}), stub2)
+        names2 = [dlg2.clip_variable.itemData(i) for i in range(dlg2.clip_variable.count())]
+        self.assertIn("ocr_txt", names2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow,
 
 from ..config import APP_NAME, AppConfig, ClickerConfig, PresserConfig
 from ..capture_report import stop as stop_capture
+from .. import hotkey_policy
 from ..hotkey_manager import HotkeyManager
 from ..keymap import hotkey_display
 from ..tasks import ClickTask, PressTask
@@ -74,6 +75,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.cfg = cfg
         self.manager = manager
+        # 注入实时配置供各热键录入控件做冲突校验
+        hotkey_policy.set_config(cfg)
         # 正常窗口样式：任务栏显示入口；点 X 隐藏到托盘（见 closeEvent）
         self.setWindowTitle(APP_NAME)
         self.resize(*self._window_size())

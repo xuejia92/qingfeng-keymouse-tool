@@ -471,6 +471,59 @@ def run_speech_step(p: dict, variables: dict,
 
 
 
+def run_qq_mail_step(p: dict, variables: dict,
+                     stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「邮件发送」步骤：通过 QQ SMTP（SSL 465）发送邮件。
+
+    参数：mail_host / mail_port（SMTP 服务器与端口，默认 smtp.qq.com:465）/
+    mail_user（发送人邮箱）/ mail_auth_code（发送人邮箱授权码）/ mail_to（收件人，
+    逗号/分号分隔，支持 $变量名）/ subject（主题，支持 $变量名）/ content（正文，
+    支持 $变量名）/ attachments（附件绝对路径列表）。
+    必填字段缺一判失败；SMTP 发送失败判失败。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    import re
+    from .values import resolve_references
+    from . import mail_actor
+
+    host = (p.get("mail_host") or "").strip() or "smtp.qq.com"
+    try:
+        port = int(p.get("mail_port") or 465)
+    except (TypeError, ValueError):
+        port = 465
+    user = (p.get("mail_user") or "").strip()
+    auth_code = (p.get("mail_auth_code") or "").strip()
+    to_raw = resolve_references(str(p.get("mail_to") or ""), variables).strip()
+    subject = resolve_references(str(p.get("subject") or ""), variables).strip()
+    content = resolve_references(str(p.get("content") or ""), variables)
+    attachments = [str(x) for x in (p.get("attachments") or [])
+                   if (str(x) or "").strip()]
+
+    if not user:
+        return False, "发送人邮箱未填写"
+    if not auth_code:
+        return False, "发送人邮箱授权码未填写"
+    if not to_raw:
+        return False, "收件人邮箱未填写"
+
+    # 收件人：逗号 / 分号（中英文）/ 空白分隔，去重保序
+    to_addrs: list[str] = []
+    for part in re.split(r"[;,，；\s]+", to_raw):
+        part = part.strip()
+        if part and part not in to_addrs:
+            to_addrs.append(part)
+
+    try:
+        return mail_actor.send_mail(
+            host=host, port=port, user=user, auth_code=auth_code,
+            to_addrs=to_addrs, subject=subject, content=content,
+            attachments=attachments)
+    except Exception as e:
+        return False, f"邮件发送失败：{type(e).__name__}: {e}"
+
+
+
 def run_close_app_step(p: dict, stop: threading.Event | None = None) -> tuple[bool, str]:
     """执行「关闭应用」步骤：按进程名结束应用。返回 (成功?, 原因)。
 
@@ -700,6 +753,71 @@ def run_text_find_step(p: dict, variables: dict,
     return True, f"找到文字「{keyword}」（{x}, {y}）"
 
 
+def run_wait_text_step(p: dict, variables: dict,
+                       stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「等待文字出现」步骤：持续对指定区域做模糊识别，直到目标文字出现。
+
+    参数：text（目标文字，支持 $变量名）/ region（识别区域 "x,y,w,h"，空=全屏）/
+    interval_sec（识别间隔，秒）/ tolerance（近似匹配容错度 0~1）/ timeout_sec
+    （最长等待秒数，0=一直等到出现为止）/ result_var（命中后写整行文字）/ pos_var
+    （命中后写中心坐标 "x,y"）。
+
+    停止条件：①手动停止（stop 事件）→ 判失败；②OCR 不可用/异常 → 判失败；
+    ③超过 timeout_sec（>0 时）→ 判失败；④识别到目标文字 → 成功返回。
+    未识别到则按 interval_sec 间隔循环检测（等待可被 stop 打断）。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    from .values import resolve_references
+    from . import ocr as ocr_actor
+
+    keyword = resolve_references(str(p.get("text") or ""), variables).strip()
+    if not keyword:
+        return False, "目标文字为空"
+    region = str(p.get("region") or "")
+
+    try:
+        interval = float(p.get("interval_sec") if p.get("interval_sec") is not None else 1.0)
+    except (TypeError, ValueError):
+        interval = 1.0
+    interval = max(0.05, interval)
+    try:
+        tolerance = float(p.get("tolerance") if p.get("tolerance") is not None else 0.8)
+    except (TypeError, ValueError):
+        tolerance = 0.8
+    tolerance = max(0.0, min(1.0, tolerance))
+    try:
+        timeout = float(p.get("timeout_sec") if p.get("timeout_sec") is not None else 0.0)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    timeout = max(0.0, timeout)
+
+    result_var = (p.get("result_var") or "").strip()
+    pos_var = (p.get("pos_var") or "").strip()
+
+    start = time.time()
+    while True:
+        if stop is not None and stop.is_set():
+            return False, "已手动停止"
+        ok, value, why = ocr_actor.find_text(region=region, text=keyword,
+                                             tolerance=tolerance)
+        if not ok:
+            return False, why                       # OCR 不可用/异常 → 失败
+        if value is not None:
+            if result_var:
+                variables[result_var] = value["text"]
+            if pos_var:
+                variables[pos_var] = f"{int(value['x'])},{int(value['y'])}"
+            return True, f"文字「{keyword}」已出现（{int(value['x'])}, {int(value['y'])}）"
+        if timeout > 0 and (time.time() - start) >= timeout:
+            return False, f"等待文字「{keyword}」超时（{timeout:g} 秒未出现）"
+        # 未出现：等待一个间隔后继续检测（可被 stop 提前打断）
+        if stop is not None:
+            stop.wait(interval)
+        else:
+            time.sleep(interval)
+
+
 def run_screenshot_step(p: dict, variables: dict,
                         stop: threading.Event | None = None) -> tuple[bool, str]:
     """执行「截图」步骤：按指定区域截图，保存到文件。
@@ -814,6 +932,76 @@ def run_find_image_step(p: dict, variables: dict,
         except Exception:
             pass    # 预览失败不影响找图本身（如无 Qt 环境）
     return True, f"找到目标（区域 {left},{top},{right},{bottom}，置信度 {score:.2f}）"
+
+
+def run_wait_image_step(p: dict, variables: dict,
+                        stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「等待图片出现」步骤：持续模板匹配找图，直到目标图片出现。
+
+    参数：image/image_path（模板图）/ confidence（匹配置信度）/ region（查找区域，
+    空=全屏）/ interval_sec（找图间隔，秒）/ timeout_sec（最长等待，0=一直找）/
+    result_var（命中后写矩形区域 "左上x,左上y,右下x,右下y"）/ pos_var（命中后写中心
+    坐标 "x,y"）。
+
+    停止条件：①手动停止（stop）→ 判失败；②模板加载失败/匹配异常 → 判失败；
+    ③超过 timeout_sec（>0 时）→ 判失败；④找到目标图片 → 成功返回。
+    未找到则按 interval_sec 间隔循环检测（等待可被 stop 打断）。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    template = finder.load_template(
+        resolve_template_path(p.get("image", ""), p.get("image_path", "")) or "")
+    if template is None:
+        return False, "模板图加载失败"
+    region = parse_region_str(str(p.get("region", "") or ""))
+    try:
+        confidence = float(p.get("confidence", 0.85) or 0.85)
+    except (TypeError, ValueError):
+        confidence = 0.85
+    try:
+        interval = float(p.get("interval_sec") if p.get("interval_sec") is not None else 1.0)
+    except (TypeError, ValueError):
+        interval = 1.0
+    interval = max(0.05, interval)
+    try:
+        timeout = float(p.get("timeout_sec") if p.get("timeout_sec") is not None else 0.0)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    timeout = max(0.0, timeout)
+
+    result_var = (p.get("result_var") or "").strip()
+    pos_var = (p.get("pos_var") or "").strip()
+
+    start = time.time()
+    while True:
+        if stop is not None and stop.is_set():
+            return False, "已手动停止"
+        try:
+            screen = finder.grab_full_screen()
+            hit = (finder.locate_in_region(template, screen, confidence, region)
+                   if region is not None
+                   else finder.locate(template, screen, confidence))
+        except Exception as e:
+            return False, f"找图失败：{type(e).__name__}: {e}"
+        if hit is not None:
+            cx, cy, score = hit
+            th, tw = template.shape[:2]
+            left = int(cx) - tw // 2
+            top = int(cy) - th // 2
+            right = left + tw
+            bottom = top + th
+            if result_var:
+                variables[result_var] = f"{left},{top},{right},{bottom}"
+            if pos_var:
+                variables[pos_var] = f"{int(cx)},{int(cy)}"
+            return True, f"图片已出现（{int(cx)},{int(cy)}，置信度 {score:.2f}）"
+        if timeout > 0 and (time.time() - start) >= timeout:
+            return False, f"等待图片出现超时（{timeout:g} 秒内未出现）"
+        # 未找到：等待一个间隔后继续检测（可被 stop 提前打断）
+        if stop is not None:
+            stop.wait(interval)
+        else:
+            time.sleep(interval)
 
 
 def run_yolo_detect_step(p: dict, variables: dict,

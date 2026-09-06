@@ -339,6 +339,84 @@ def bring_to_front(hwnd: int) -> bool:
     return True
 
 
+def find_window_by_pid(pid: int, prefer_title: str = "") -> int:
+    """找指定进程的顶层窗口句柄（可见或隐藏都算；隐藏窗口也会被 EnumWindows 枚举）。
+
+    prefer_title 非空时优先返回标题与之匹配的窗口；否则返回第一个有标题的
+    顶层窗口，最后兜底返回任意顶层窗口。找不到返回 0。
+    """
+    if not pid:
+        return 0
+    titled = [0]
+    fallback = [0]
+    _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, _lp):
+        wpid = ctypes.c_uint()
+        _user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(wpid))
+        if int(wpid.value) != int(pid):
+            return True
+        h = int(hwnd)
+        title = window_title(h)
+        if prefer_title and title == prefer_title:
+            titled[0] = h
+            return False                  # 命中优先标题，停止枚举
+        if title and not titled[0]:
+            titled[0] = h
+        if not fallback[0]:
+            fallback[0] = h
+        return True
+
+    _user32.EnumWindows(_WNDENUMPROC(_cb), 0)
+    return titled[0] or fallback[0]
+
+
+def show_and_foreground(hwnd: int) -> bool:
+    """显示窗口（含隐藏到托盘的）并置前；返回是否成功。
+
+    与 bring_to_front 的差别：bring_to_front 用 SW_RESTORE，对隐藏窗口
+    （WS_VISIBLE 关闭）无效；这里先 SW_SHOW 再 SW_RESTORE，覆盖「隐藏」与
+    「最小化」两种状态。
+    """
+    if not hwnd or not window_exists(hwnd):
+        return False
+    hw = wintypes.HWND(hwnd)
+    _user32.ShowWindow(hw, 5)   # SW_SHOW
+    _user32.ShowWindow(hw, 9)   # SW_RESTORE
+    target_tid = int(_user32.GetWindowThreadProcessId(hw, None) or 0)
+    cur_tid = int(_kernel32.GetCurrentThreadId())
+    attached: list[int] = []
+    if target_tid and target_tid != cur_tid:
+        if _user32.AttachThreadInput(cur_tid, target_tid, True):
+            attached.append(target_tid)
+    _user32.SetForegroundWindow(hw)
+    _user32.SetFocus(hw)
+    for tid in attached:
+        try:
+            _user32.AttachThreadInput(cur_tid, tid, False)
+        except Exception:
+            pass
+    return True
+
+
+def show_running_instance(pid: int, title: str = "") -> bool:
+    """二次启动时把已在运行实例（PID）的主窗口显示并置前；返回是否成功。
+
+    优先按标题精确匹配（FindWindow 对隐藏窗口同样有效）；标题撞名但 PID 不符
+    时换按 PID 枚举任意顶层窗口。兜底场景：已运行实例是旧版本、没有监听广播
+    消息时，新实例直接 Win32 显示其窗口。
+    """
+    hwnd = find_window_by_title(title) if title else 0
+    if hwnd:
+        wpid = ctypes.c_uint()
+        _user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(wpid))
+        if int(wpid.value) != int(pid):
+            hwnd = 0                     # 标题撞名但 PID 不符，换按 PID 找
+    if not hwnd:
+        hwnd = find_window_by_pid(pid, title)
+    return show_and_foreground(hwnd) if hwnd else False
+
+
 def restore_foreground() -> None:
     """恢复 activate_window() 之前的前台窗口，并断开线程绑定。"""
     global _prev_foreground, _attached_tids
@@ -480,40 +558,147 @@ def _windows_by_pid() -> dict[int, list[str]]:
     return result
 
 
+_SELF_SESSION: int | None = None
+_SYS_ROOTS: list[str] | None = None
+
+
+def _self_session() -> int:
+    """本进程所在会话 id（用户交互会话通常 ≥1，系统服务在会话 0）。"""
+    global _SELF_SESSION
+    if _SELF_SESSION is None:
+        sid = wintypes.DWORD()
+        if _kernel32.ProcessIdToSessionId(_kernel32.GetCurrentProcessId(),
+                                          ctypes.byref(sid)):
+            _SELF_SESSION = int(sid.value)
+        else:
+            _SELF_SESSION = 0
+    return _SELF_SESSION
+
+
+def _in_self_session(pid: int) -> bool:
+    """进程是否与本程序在同一交互会话（服务/其它会话的进程不算）。"""
+    sid = wintypes.DWORD()
+    if not _kernel32.ProcessIdToSessionId(pid, ctypes.byref(sid)):
+        return False
+    return int(sid.value) == _self_session()
+
+
+def _system_roots() -> list[str]:
+    """Windows / System32 / SysWOW64 归一化小写路径（判断是否系统程序）。"""
+    global _SYS_ROOTS
+    if _SYS_ROOTS is None:
+        buf = ctypes.create_unicode_buffer(260)
+        n = _kernel32.GetWindowsDirectoryW(buf, 260)
+        win = buf.value if n else r"C:\Windows"
+        win = os.path.normpath(win).lower()
+        _SYS_ROOTS = [
+            win,
+            os.path.normpath(os.path.join(win, "System32")).lower(),
+            os.path.normpath(os.path.join(win, "SysWOW64")).lower(),
+        ]
+    return _SYS_ROOTS
+
+
+def _in_system_dir(path: str) -> bool:
+    p = os.path.normpath(path).lower()
+    return any(p == r or p.startswith(r + os.sep) for r in _system_roots())
+
+
+def _process_tree() -> tuple[dict[int, int], dict[int, str]]:
+    """Toolhelp32 快照：一次枚举返回 (pid→父pid, pid→进程名小写)。
+
+    用于识别「无可见窗口」的进程里哪些是真正的用户应用、哪些是后台子进程
+    （如 chrome 的渲染/GPU 子进程——它们没有窗口、且父进程同名）。
+    """
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class _ENTRY(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    _kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    _kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    _kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ENTRY)]
+    _kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ENTRY)]
+
+    parents: dict[int, int] = {}
+    names: dict[int, str] = {}
+    snap = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == ctypes.c_void_p(-1).value:
+        return parents, names
+    try:
+        entry = _ENTRY()
+        entry.dwSize = ctypes.sizeof(_ENTRY)
+        ok = _kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            pid = int(entry.th32ProcessID)
+            parents[pid] = int(entry.th32ParentProcessID)
+            names[pid] = entry.szExeFile.lower()
+            ok = _kernel32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        _kernel32.CloseHandle(snap)
+    return parents, names
+
+
 def list_processes() -> list[dict]:
-    """列出当前**有可见窗口**的运行中进程，供「关闭应用」选择。
+    """列出当前运行中的**用户应用**，供「关闭应用」「打开应用」选择。
 
-    只保留有主窗口的进程，过滤掉无窗口的后台子进程 / 系统服务
-    （如 svchost.exe、chrome 的 GPU/网络子进程、crashpad 等），
-    列表就是「正在运行的应用」。窗口标题用于区分多开实例。
+    之前只保留「有可见窗口」的进程，导致托盘驻留 / 无主窗口的应用（如某些
+    截图查看器）在列表里查不到。现在放宽为：
 
-    每个进程返回：{pid, name(进程名如 chrome.exe), app_name(应用名),
-    title(窗口标题)}。全部走 Unicode API，中文不乱码。
+    - 有可见窗口的进程 → 一定列出（窗口标题用于区分多开实例）；
+    - 无可见窗口，但满足「本会话 + exe 不在系统目录 + 非同名父进程的子进程」
+      → 也列出（title 为空），以覆盖托盘应用、刚启动尚无窗口的程序；
+    - 系统服务（会话 0 / 系统目录）与 chrome 渲染/GPU 之类同名子进程仍被过滤。
+
+    每个进程返回：{pid, name(进程名如 chrome.exe), path(完整路径), app_name(应用名),
+    title(窗口标题，可能为空)}。全部走 Unicode API，中文不乱码。
     """
     windows = _windows_by_pid()
+    parents, names = _process_tree()
     items: list[dict] = []
-    seen: set[int] = set()
     for pid in _enum_pids():
-        if pid <= 0 or pid in seen:
+        if pid <= 0:
             continue
-        titles = windows.get(pid)
-        if not titles:
-            continue                      # 无可见窗口 = 后台子进程/服务，跳过
         path = _process_path(pid)
         if not path:
             continue
         name = os.path.basename(path)
         if not name.lower().endswith(".exe"):
             continue
-        seen.add(pid)
+        titles = windows.get(pid) or []
+        if titles:
+            # 有可见窗口：直接列出
+            items.append({
+                "pid": pid, "name": name, "path": path,
+                "app_name": _file_description(path),
+                "title": titles[0],
+            })
+            continue
+        # 无可见窗口：仅保留「本会话内的非系统应用」，且跳过同名父进程的子进程
+        if _in_system_dir(path):
+            continue
+        if not _in_self_session(pid):
+            continue
+        if names.get(parents.get(pid, 0), "") == name.lower():
+            continue
         items.append({
-            "pid": pid,
-            "name": name,
-            "path": path,
+            "pid": pid, "name": name, "path": path,
             "app_name": _file_description(path),
-            "title": titles[0],
+            "title": "",
         })
-    items.sort(key=lambda x: (x["app_name"] or x["name"]).lower())
+    # 有窗口的应用排在前面（无窗口的后台/托盘应用集中靠后），各自按应用名排序
+    items.sort(key=lambda x: (not x["title"], (x["app_name"] or x["name"]).lower()))
     return items
 
 

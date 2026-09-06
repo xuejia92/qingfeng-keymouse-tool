@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QToolTip, QVBoxLayout, QWidget)
 
 from ..config import VARIABLE_TYPES, WEB_ACTIONS, Flow, FlowStep
+from .. import hotkey_policy
 from ..conditions import check_condition_variables
 from ..dp_actors import (DP_ELE_ACTIONS, DP_LISTEN_ACTIONS, DP_LOCATORS,
                          DP_MATCHES, DP_TAB_MODES)
@@ -27,10 +28,12 @@ from .hotkey_edit import HotkeyEdit
 MIME_TYPE = "application/x-qf-flow-type"
 
 _TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "text_find": "🔍",
-               "screenshot": "📷", "find_image": "🎯", "yolo_detect": "🧠",
+               "wait_text": "⏳",
+               "screenshot": "📷", "find_image": "🎯", "wait_image": "👀",
+               "yolo_detect": "🧠",
                "color_pick": "🎨",
                "click": "🖱", "press": "⌨", "find": "🖼",
-               "wait": "⏱", "web": "🌐", "http_request": "📡", "deepseek": "🤖", "script": "📜", "notify": "🔔", "speech": "🔊", "app": "🚀", "close_app": "⏹",
+               "wait": "⏱", "web": "🌐", "http_request": "📡", "deepseek": "🤖", "script": "📜", "notify": "🔔", "speech": "🔊", "qq_mail": "📧", "app": "🚀", "close_app": "⏹",
                "clip_set": "📤", "clip_get": "📥", "py_func": "🐍",
                "if": "🔀", "elseif": "🔁", "else": "↩️", "endif": "🏁",
                "foreach": "🔄", "while": "♻️",
@@ -298,6 +301,8 @@ class FlowMetaDialog(QDialog):
         form.addRow("运行轮数", self.loops_spin)
         self.hotkey_edit = HotkeyEdit()
         self.hotkey_edit.setMaximumWidth(220)
+        self.hotkey_edit.set_conflict_checker(
+            lambda hk: hotkey_policy.check(hk, f"flow:{self._flow.id}"))
         form.addRow("启停热键（可选）", self.hotkey_edit)
         tip = QLabel("创建后在右侧把模块拖入步骤列表；参数双击步骤即可修改。")
         tip.setStyleSheet("color: #8a939c;")
@@ -381,7 +386,7 @@ class ProcessPickerDialog(QDialog):
             return
         self.hint.setText(
             f"共 {len(self._processes)} 个正在运行的应用"
-            "（仅列有窗口的程序，后台子进程已过滤）。")
+            "（含无窗口的托盘/后台应用；系统服务与同名子进程已过滤）。")
 
     def _refresh(self):
         """重新读取进程列表并重建列表（点了刷新按钮）。"""
@@ -473,6 +478,12 @@ class StepParamsDialog(QDialog):
                 QMessageBox.warning(self, "请设置结果变量",
                                     "请选择接收找图坐标的结果变量。")
                 return
+        # 等待图片出现：模板图必填（结果变量可选）
+        if self._step.type == "wait_image" and getattr(self, "wi_result_var", None) is not None:
+            if not getattr(self, "_image", ""):
+                QMessageBox.warning(self, "请设置模板图",
+                                    "「等待图片出现」需要先设置目标模板图（「屏幕截图选区」或「上传图片」）。")
+                return
         # 目标检测步骤：模型路径必填且文件必须存在；必须选择结果变量
         if self._step.type == "yolo_detect" and getattr(self, "model_path_edit", None) is not None:
             path = self.model_path_edit.text().strip()
@@ -543,12 +554,53 @@ class StepParamsDialog(QDialog):
                 QMessageBox.warning(self, "请填写消息内容",
                                     "消息通知步骤需要填写要显示的消息内容。")
                 return
+        # 等待文字出现：目标文字必填
+        if self._step.type == "wait_text" and getattr(self, "wt_text", None) is not None:
+            if not self.wt_text.text().strip():
+                QMessageBox.warning(self, "请填写目标文字",
+                                    "「等待文字出现」需要填写要等待的目标文字（可用 $变量名 引用）。")
+                return
         # 语音播报：内容必填
         if self._step.type == "speech" and getattr(self, "sp_content", None) is not None:
             if not self.sp_content.toPlainText().strip():
                 QMessageBox.warning(self, "请填写播报内容",
                                     "语音播报步骤需要填写要朗读的内容（可直接输入文字，或用 $变量名 引用）。")
                 return
+        # 邮件发送：发送人邮箱 / 授权码 / 收件人必填，邮箱格式校验，附件文件须存在
+        if self._step.type == "qq_mail" and getattr(self, "mail_user", None) is not None:
+            import re as _re
+            user = self.mail_user.text().strip()
+            auth = self.mail_auth.text().strip()
+            to_raw = self.mail_to.text().strip()
+            if not user:
+                QMessageBox.warning(self, "请填写发送人邮箱",
+                                    "「邮件发送」需要填写发送人邮箱（如 123456@qq.com）。")
+                return
+            if not _re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", user):
+                QMessageBox.warning(self, "发送人邮箱格式不正确",
+                                    f"发送人邮箱格式不正确：\n{user}\n\n正确示例：123456@qq.com")
+                return
+            if not auth:
+                QMessageBox.warning(self, "请填写授权码",
+                                    "「邮件发送」需要填写发送人邮箱的授权码（在 QQ 邮箱\n"
+                                    "「设置-账户-开启SMTP服务」里获取，不是 QQ 登录密码）。")
+                return
+            if not to_raw:
+                QMessageBox.warning(self, "请填写收件人邮箱",
+                                    "「邮件发送」需要填写收件人邮箱（多个用逗号或分号分隔）。")
+                return
+            to_list = [x for x in _re.split(r"[;,，；\s]+", to_raw) if x]
+            bad = [x for x in to_list if not _re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", x)]
+            if bad:
+                QMessageBox.warning(self, "收件人邮箱格式不正确",
+                                    "以下收件人邮箱格式不正确：\n" + "\n".join(bad))
+                return
+            for i in range(self.mail_attach_list.count()):
+                path = self.mail_attach_list.item(i).data(Qt.UserRole)
+                if path and not os.path.isfile(path):
+                    QMessageBox.warning(self, "附件不存在",
+                                        f"附件文件不存在：\n{path}\n\n请移除后重新选择。")
+                    return
         # 打开应用：勾选「进程打开」时目标进程与应用路径至少填一个；否则仅需应用路径
         if self._step.type == "app" and getattr(self, "app_proc_edit", None) is not None:
             if self.app_use_proc.isChecked():
@@ -681,11 +733,16 @@ class StepParamsDialog(QDialog):
             return None, -1
 
     def _flow_var_names(self) -> list[str]:
-        """当前流程中已声明的变量名（按 var 步骤出现顺序去重）。
+        """当前流程中已有的变量名（按步骤出现顺序去重）。
 
-        供打印输出/文字识别的变量下拉、变量步骤的重名校验使用。
+        既含「变量」步骤的声明，也含其它步骤会写入的结果变量——OCR/文字查找/找图/
+        截图/取色/网络请求/DeepSeek/脚本/python函数/DrissionPage 的输出变量、
+        foreach 每轮写入的 item/index（见 config.STEP_OUTPUT_FIELDS）。只要该步骤
+        执行过，其产出变量在运行期就能被后续「打印输出」/表达式/播报引用，
+        因此这些下拉都应能选到。
         获取不到流程（无 parent 或非 FlowTab）时返回空列表。
         """
+        from ..config import STEP_OUTPUT_FIELDS
         try:
             tab = self.parent()
             if tab is None:
@@ -695,8 +752,8 @@ class StepParamsDialog(QDialog):
                 return []
             names: list[str] = []
             for s in flow.steps:
-                if s.type == "var":
-                    name = (s.params.get("name") or "").strip()
+                for key in STEP_OUTPUT_FIELDS.get(s.type, ()):
+                    name = (s.params.get(key) or "").strip()
                     if name and name not in names:
                         names.append(name)
             return names
@@ -1009,6 +1066,69 @@ class StepParamsDialog(QDialog):
             hint.setWordWrap(True)
             form.addRow("", hint)
 
+        elif t == "wait_text":
+            # 目标文字：必填，支持 $变量名 引用
+            self.wt_text = QLineEdit()
+            self.wt_text.setPlaceholderText("要等待出现的文字，可用 $变量名 引用（必填）")
+            form.addRow("目标文字", self.wt_text)
+
+            # 识别区域：默认空=全屏；可框选自定义局部
+            region_row = QHBoxLayout()
+            self.region_edit = QLineEdit()
+            self.region_edit.setReadOnly(True)
+            pick_region = QPushButton("框选区域…")
+            pick_region.clicked.connect(self._request_region)
+            pick_region.setToolTip("隐藏本窗口后框选识别区域（与找图/文字识别区域一致）")
+            clear_region = QPushButton("恢复全屏")
+            clear_region.clicked.connect(lambda: self._set_region_text(None))
+            region_row.addWidget(self.region_edit, 1)
+            region_row.addWidget(pick_region)
+            region_row.addWidget(clear_region)
+            form.addRow("识别区域", region_row)
+
+            self.wt_interval = QDoubleSpinBox()
+            self.wt_interval.setRange(0.05, 60.0)
+            self.wt_interval.setSingleStep(0.1)
+            self.wt_interval.setDecimals(1)
+            self.wt_interval.setSuffix(" 秒")
+            self.wt_interval.setToolTip("每次识别之间的间隔；间隔越短越灵敏，但 CPU 占用越高")
+            form.addRow("识别间隔", self.wt_interval)
+
+            self.wt_tolerance = QDoubleSpinBox()
+            self.wt_tolerance.setRange(0.0, 1.0)
+            self.wt_tolerance.setSingleStep(0.05)
+            self.wt_tolerance.setDecimals(2)
+            self.wt_tolerance.setToolTip("近似匹配容错度 0~1：1=完全匹配；越小越宽松，"
+                                         "越能容忍 OCR 错字/漏字，但可能误判")
+            form.addRow("匹配容错度", self.wt_tolerance)
+
+            self.wt_timeout = QDoubleSpinBox()
+            self.wt_timeout.setRange(0.0, 3600.0)
+            self.wt_timeout.setSingleStep(1.0)
+            self.wt_timeout.setDecimals(0)
+            self.wt_timeout.setSpecialValueText("一直等待")
+            self.wt_timeout.setSuffix(" 秒")
+            self.wt_timeout.setToolTip("最长等待时间；0=一直检测直到文字出现为止，"
+                                       "超过则步骤判失败")
+            form.addRow("最长等待", self.wt_timeout)
+
+            self.wt_result_var = self._var_combo("（可不设置）")
+            self.wt_result_var.setToolTip("可选：文字出现后，把命中的整行识别文字写入该变量")
+            form.addRow("结果变量（文字）", self.wt_result_var)
+            self.wt_pos_var = self._var_combo("（可不设置）")
+            self.wt_pos_var.setToolTip("可选：文字出现后，把文字中心坐标 \"x,y\" 写入该变量")
+            form.addRow("结果变量（坐标）", self.wt_pos_var)
+
+            hint = QLabel("持续对识别区域做模糊识别（近似匹配），目标文字出现即继续下一步骤；\n"
+                          "未识别到则按「识别间隔」循环检测，直到出现或超时/手动停止。\n"
+                          "· 默认全屏识别，也可「框选区域…」只识别指定局部；\n"
+                          "· 「匹配容错度」越小越宽松（更能容忍 OCR 错字/漏字）；\n"
+                          "· 命中后可选把整行文字 / 中心坐标写入变量供后续步骤使用。\n"
+                          "需要 RapidOCR 才能运行：pip install rapidocr_onnxruntime")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
         elif t == "screenshot":
             # 截图区域：默认空 = 全屏（整个虚拟桌面）；可框选自定义局部区域
             self._shot_region_widget = QWidget()
@@ -1201,6 +1321,98 @@ class StepParamsDialog(QDialog):
             hint = QLabel("在屏幕 / 指定区域用模板匹配找图：找到则把矩形区域坐标 \"左上x,左上y,右下x,右下y\" 写入结果变量，\n"
                           "未找到写入 false（步骤不会因未找到而失败，可据此分支）。\n"
                           "区域为空=全屏；也可点击「框选区域…」或输入左上/右下角坐标。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "wait_image":
+            # 模板图：预览 + 屏幕截图选区 + 上传本地图片（与找图一致）
+            img_row = QHBoxLayout()
+            self.preview = QLabel()
+            self.preview.setFixedSize(230, 150)
+            self.preview.setAlignment(Qt.AlignCenter)
+            self.preview.setStyleSheet(
+                "border: 1px solid #c9d1d9; border-radius: 6px; background: #f7f9fb;")
+            img_row.addWidget(self.preview)
+
+            side = QVBoxLayout()
+            side.setSpacing(6)
+            self.capture_btn = QPushButton("📷 屏幕截图选区")
+            self.capture_btn.setToolTip("冻结屏幕 -> 框选 -> 双击确认，生成等待目标模板")
+            self.capture_btn.clicked.connect(self._request_capture)
+            side.addWidget(self.capture_btn)
+            self.upload_btn = QPushButton("📁 上传图片")
+            self.upload_btn.setToolTip("从本地选择一张图片作为等待目标模板（自动复制到程序模板目录）")
+            self.upload_btn.clicked.connect(self._pick_image)
+            side.addWidget(self.upload_btn)
+            self.image_edit = QLineEdit()
+            self.image_edit.setReadOnly(True)
+            self.image_edit.setStyleSheet("color: #8a939c; border: none; background: transparent;")
+            side.addWidget(self.image_edit)
+            side.addStretch(1)
+            img_row.addLayout(side, 1)
+            form.addRow("模板图", img_row)
+
+            self.confidence = QDoubleSpinBox()
+            self.confidence.setRange(0.5, 0.99)
+            self.confidence.setDecimals(2)
+            self.confidence.setSingleStep(0.01)
+            form.addRow("匹配置信度", self.confidence)
+
+            # 查找区域：空=全屏；可框选或手动输入左上/右下角坐标
+            region_row = QHBoxLayout()
+            self.region_edit = QLineEdit()
+            self.region_edit.setReadOnly(True)
+            self.region_edit.setToolTip("左上角 x,y 与宽高；空=全屏（整个虚拟桌面）")
+            pick_region = QPushButton("框选区域…")
+            pick_region.clicked.connect(self._request_region)
+            pick_region.setToolTip("隐藏本窗口后框选查找区域（与找图/文字识别区域一致）")
+            clear_region = QPushButton("恢复全屏")
+            clear_region.clicked.connect(lambda: self._set_region_text(None))
+            region_row.addWidget(self.region_edit, 1)
+            region_row.addWidget(pick_region)
+            region_row.addWidget(clear_region)
+            form.addRow("查找区域", region_row)
+
+            manual_row = QHBoxLayout()
+            self.manual_edit = QLineEdit()
+            self.manual_edit.setPlaceholderText("左上x,左上y,右下x,右下y（如 100,200,400,500）")
+            self.manual_edit.setToolTip("直接输入矩形区域左上角与右下角坐标，4 个数字逗号分隔")
+            apply_btn = QPushButton("应用")
+            apply_btn.setToolTip("解析输入坐标并设为查找区域")
+            apply_btn.clicked.connect(self._apply_manual_region)
+            manual_row.addWidget(self.manual_edit, 1)
+            manual_row.addWidget(apply_btn)
+            form.addRow("坐标输入", manual_row)
+
+            self.wi_interval = QDoubleSpinBox()
+            self.wi_interval.setRange(0.05, 60.0)
+            self.wi_interval.setSingleStep(0.1)
+            self.wi_interval.setDecimals(1)
+            self.wi_interval.setSuffix(" 秒")
+            self.wi_interval.setToolTip("每次找图之间的间隔；间隔越短越灵敏，但 CPU 占用越高")
+            form.addRow("检测间隔", self.wi_interval)
+
+            self.wi_timeout = QDoubleSpinBox()
+            self.wi_timeout.setRange(0.0, 3600.0)
+            self.wi_timeout.setSingleStep(1.0)
+            self.wi_timeout.setDecimals(0)
+            self.wi_timeout.setSpecialValueText("一直找")
+            self.wi_timeout.setSuffix(" 秒")
+            self.wi_timeout.setToolTip("最长等待时间；0=一直找直到图片出现为止，超过则步骤判失败")
+            form.addRow("最长等待", self.wi_timeout)
+
+            self.wi_result_var = self._var_combo("（可不设置）")
+            self.wi_result_var.setToolTip("可选：图片出现后，把矩形区域 \"左上x,左上y,右下x,右下y\" 写入该变量")
+            form.addRow("结果变量（区域）", self.wi_result_var)
+            self.wi_pos_var = self._var_combo("（可不设置）")
+            self.wi_pos_var.setToolTip("可选：图片出现后，把中心坐标 \"x,y\" 写入该变量")
+            form.addRow("结果变量（中心）", self.wi_pos_var)
+
+            hint = QLabel("持续在屏幕 / 指定区域模板匹配找图，目标图片出现即继续下一步骤；\n"
+                          "未找到则按「检测间隔」循环查找，直到出现或超时/手动停止。\n"
+                          "· 默认全屏查找，也可「框选区域…」只查找指定局部；\n"
+                          "· 命中后可选把矩形区域 / 中心坐标写入变量供后续步骤使用。")
             hint.setStyleSheet("color: #8a939c;")
             hint.setWordWrap(True)
             form.addRow("", hint)
@@ -1931,6 +2143,111 @@ class StepParamsDialog(QDialog):
                           "· 系统自动优先使用中文语音（若无中文语音则用默认语音）；\n"
                           "· 勾选「等待播报完成后再继续」时，读完整段才执行下一步骤；\n"
                           "· 语音引擎不可用（未安装 pyttsx3 / 无语音设备）时本步骤判失败。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "qq_mail":
+            # SMTP 服务器 / 端口：默认 QQ 邮箱 smtp.qq.com:465（SSL），一般无需改动
+            self.mail_host = QLineEdit()
+            self.mail_host.setPlaceholderText("smtp.qq.com")
+            self.mail_host.setToolTip("SMTP 服务器地址；QQ 邮箱默认 smtp.qq.com，一般无需修改")
+            form.addRow("SMTP 服务器", self.mail_host)
+
+            self.mail_port = QSpinBox()
+            self.mail_port.setRange(1, 65535)
+            self.mail_port.setToolTip("SMTP 端口；QQ 邮箱默认 465（SSL 加密），一般无需修改")
+            form.addRow("SMTP 端口", self.mail_port)
+
+            # 发送人邮箱（用户自行填写）
+            self.mail_user = QLineEdit()
+            self.mail_user.setPlaceholderText("如 123456@qq.com（发送人邮箱）")
+            self.mail_user.setToolTip("发送邮件的 QQ 邮箱账号，如 123456@qq.com")
+            form.addRow("发送人邮箱", self.mail_user)
+
+            # 授权码：敏感信息，默认掩码显示，勾选「显示」可切换明文
+            self.mail_auth = QLineEdit()
+            self.mail_auth.setEchoMode(QLineEdit.Password)
+            self.mail_auth.setPlaceholderText("QQ 邮箱「设置-账户-开启SMTP服务」生成的授权码")
+            self.mail_auth.setToolTip("QQ 邮箱授权码（非 QQ 登录密码）：QQ 邮箱 → 设置 → 账户 →\n"
+                                      "开启 SMTP 服务，按提示生成 16 位授权码")
+            auth_row = QHBoxLayout()
+            auth_row.addWidget(self.mail_auth, 1)
+            self.mail_auth_show = QCheckBox("显示")
+            self.mail_auth_show.toggled.connect(self._toggle_mail_auth_echo)
+            auth_row.addWidget(self.mail_auth_show)
+            auth_widget = QWidget()
+            auth_widget.setLayout(auth_row)
+            form.addRow("授权码", auth_widget)
+
+            # 收件人邮箱（用户自行填写，多个逗号/分号分隔，支持 $变量名）
+            self.mail_to = QLineEdit()
+            self.mail_to.setPlaceholderText("如 target@qq.com；多个收件人用逗号或分号分隔（支持 $变量名）")
+            self.mail_to.setToolTip("收件人邮箱，多个用逗号或分号分隔；支持 $变量名 引用")
+            form.addRow("收件人邮箱", self.mail_to)
+
+            # 主题：支持 $变量名，插入变量下拉
+            self.mail_subject = QLineEdit()
+            self.mail_subject.setPlaceholderText("邮件主题（支持 $变量名 引用）")
+            form.addRow("发送主题", self.mail_subject)
+            self.mail_subject_var = QComboBox()
+            subj_names = self._flow_var_names()
+            if subj_names:
+                self.mail_subject_var.addItem("＋ 插入变量…", "")
+                for name in subj_names:
+                    self.mail_subject_var.addItem(name, name)
+                self.mail_subject_var.setToolTip("选中流程中声明的变量，自动以 $变量名 形式插入到主题的光标位置")
+            else:
+                self.mail_subject_var.addItem("流程中暂无变量：先添加「变量」步骤声明", "")
+                self.mail_subject_var.setEnabled(False)
+                self.mail_subject_var.setToolTip("流程中还没有「变量」步骤；先在步骤列表添加「变量」步骤声明变量")
+            self.mail_subject_var.currentIndexChanged.connect(self._on_mail_subject_insert_var)
+            form.addRow("插入变量", self.mail_subject_var)
+
+            # 正文：支持 $变量名，插入变量下拉
+            self.mail_content = QPlainTextEdit()
+            self.mail_content.setPlaceholderText("邮件正文（支持 $变量名 引用）")
+            self.mail_content.setMaximumHeight(140)
+            form.addRow("发送内容", self.mail_content)
+            self.mail_content_var = QComboBox()
+            body_names = self._flow_var_names()
+            if body_names:
+                self.mail_content_var.addItem("＋ 插入变量…", "")
+                for name in body_names:
+                    self.mail_content_var.addItem(name, name)
+                self.mail_content_var.setToolTip("选中流程中声明的变量，自动以 $变量名 形式插入到正文的光标位置")
+            else:
+                self.mail_content_var.addItem("流程中暂无变量：先添加「变量」步骤声明", "")
+                self.mail_content_var.setEnabled(False)
+                self.mail_content_var.setToolTip("流程中还没有「变量」步骤；先在步骤列表添加「变量」步骤声明变量")
+            self.mail_content_var.currentIndexChanged.connect(self._on_mail_content_insert_var)
+            form.addRow("插入变量", self.mail_content_var)
+
+            # 附件：列表显示已选文件 + 添加（多选）/ 移除选中按钮
+            self.mail_attach_list = QListWidget()
+            self.mail_attach_list.setMinimumHeight(72)
+            self.mail_attach_list.setSelectionMode(QListWidget.ExtendedSelection)
+            self.mail_attach_list.setToolTip("已添加的附件（文件名显示，悬停可看完整路径）")
+            self.mail_attach_list.itemDoubleClicked.connect(self._remove_mail_attachments)
+            form.addRow("附件", self.mail_attach_list)
+
+            btn_row = QHBoxLayout()
+            add_btn = QPushButton("添加附件…")
+            add_btn.clicked.connect(self._pick_mail_attachments)
+            rm_btn = QPushButton("移除选中")
+            rm_btn.clicked.connect(self._remove_mail_attachments)
+            btn_row.addWidget(add_btn)
+            btn_row.addWidget(rm_btn)
+            btn_row.addStretch(1)
+            btn_widget = QWidget()
+            btn_widget.setLayout(btn_row)
+            form.addRow("", btn_widget)
+
+            hint = QLabel("通过 QQ 邮箱 SMTP 发送邮件（标准库 smtplib，无需额外依赖）。\n"
+                          "· 服务器默认 smtp.qq.com:465（SSL），一般无需修改；\n"
+                          "· 授权码在 QQ 邮箱「设置-账户-开启SMTP服务」里获取，非 QQ 登录密码；\n"
+                          "· 发送主题、发送内容、收件人均支持 $变量名 引用；\n"
+                          "· 附件可添加多个，发送前会校验文件是否存在。")
             hint.setStyleSheet("color: #8a939c;")
             hint.setWordWrap(True)
             form.addRow("", hint)
@@ -2681,6 +2998,74 @@ class StepParamsDialog(QDialog):
         self.sp_var.blockSignals(False)
         self.sp_content.setFocus()
 
+    # ---------- 邮件发送 ----------
+    def _toggle_mail_auth_echo(self, checked: bool) -> None:
+        """切换授权码输入框明文/掩码显示。"""
+        if not getattr(self, "mail_auth", None):
+            return
+        self.mail_auth.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+
+    def _on_mail_subject_insert_var(self, index: int) -> None:
+        """邮件主题「插入变量」：把选中的变量以 $变量名 插入主题光标处，然后复位下拉。"""
+        if not getattr(self, "mail_subject_var", None) or not getattr(self, "mail_subject", None):
+            return
+        name = self.mail_subject_var.currentData()
+        if not name:
+            return
+        self.mail_subject.insert(f"${name}")   # QLineEdit.insert 在光标处插入
+        self.mail_subject.setFocus()
+        self.mail_subject_var.blockSignals(True)
+        self.mail_subject_var.setCurrentIndex(0)
+        self.mail_subject_var.blockSignals(False)
+
+    def _on_mail_content_insert_var(self, index: int) -> None:
+        """邮件正文「插入变量」：把选中的变量以 $变量名 插入正文光标处，然后复位下拉。"""
+        if not getattr(self, "mail_content_var", None) or not getattr(self, "mail_content", None):
+            return
+        name = self.mail_content_var.currentData()
+        if not name:
+            return
+        cur = self.mail_content.textCursor()
+        cur.insertText(f"${name}")          # 光标自动移到插入文本之后，便于连续输入
+        self.mail_content.setTextCursor(cur)
+        self.mail_content.setFocus()
+        self.mail_content_var.blockSignals(True)
+        self.mail_content_var.setCurrentIndex(0)
+        self.mail_content_var.blockSignals(False)
+
+    def _add_mail_attachment(self, path: str) -> None:
+        """把附件路径加入列表（去重；已存在则跳过）。"""
+        if not getattr(self, "mail_attach_list", None):
+            return
+        path = (path or "").strip()
+        if not path:
+            return
+        for i in range(self.mail_attach_list.count()):
+            if self.mail_attach_list.item(i).data(Qt.UserRole) == path:
+                return
+        item = QListWidgetItem(os.path.basename(path) or path)
+        item.setData(Qt.UserRole, path)
+        item.setToolTip(path)
+        self.mail_attach_list.addItem(item)
+
+    def _pick_mail_attachments(self) -> None:
+        """浏览选择附件（可多选），追加到附件列表。"""
+        from PySide6.QtWidgets import QFileDialog
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择附件（可多选）", os.path.expanduser("~"),
+            "所有文件 (*);;文档 (*.pdf *.txt *.doc *.docx *.xls *.xlsx);;"
+            "图片 (*.png *.jpg *.jpeg *.bmp)")
+        for path in paths:
+            if path:
+                self._add_mail_attachment(path)
+
+    def _remove_mail_attachments(self, *_) -> None:
+        """移除附件列表里选中的项。"""
+        if not getattr(self, "mail_attach_list", None):
+            return
+        for item in self.mail_attach_list.selectedItems():
+            self.mail_attach_list.takeItem(self.mail_attach_list.row(item))
+
     def _pick_script_file(self):
         """浏览选择本地脚本文件；按扩展名自动同步脚本类型。"""
         from PySide6.QtWidgets import QFileDialog
@@ -2783,6 +3168,14 @@ class StepParamsDialog(QDialog):
                 max(0, self.tf_button.findData(p.get("click_button", "left"))))
             self.tf_button.setEnabled(self.tf_click.isChecked())
             self._set_combo_value(self.tf_variable, p.get("variable", "") or "")
+        elif t == "wait_text":
+            self.wt_text.setText(p.get("text", "") or "")
+            self._set_region_text(p.get("region", "") or "")
+            self.wt_interval.setValue(float(p.get("interval_sec", 1.0) or 1.0))
+            self.wt_tolerance.setValue(float(p.get("tolerance", 0.8) or 0.8))
+            self.wt_timeout.setValue(float(p.get("timeout_sec", 0.0) or 0.0))
+            self._set_combo_value(self.wt_result_var, p.get("result_var", "") or "")
+            self._set_combo_value(self.wt_pos_var, p.get("pos_var", "") or "")
         elif t == "screenshot":
             self._set_region_text(p.get("region", "") or "")
             if p.get("save_mode") == "choose":
@@ -2810,6 +3203,16 @@ class StepParamsDialog(QDialog):
             self.preview_check.setChecked(bool(p.get("preview")))
             self.preview_spin.setValue(float(p.get("preview_duration", 1.0) or 1.0))
             self.preview_spin.setEnabled(self.preview_check.isChecked())
+        elif t == "wait_image":
+            self._image = p.get("image", "") or ""
+            self._image_path = p.get("image_path", "") or ""
+            self._update_preview()
+            self.confidence.setValue(float(p.get("confidence", 0.85)))
+            self._set_region_text(p.get("region", "") or "")
+            self.wi_interval.setValue(float(p.get("interval_sec", 1.0) or 1.0))
+            self.wi_timeout.setValue(float(p.get("timeout_sec", 0.0) or 0.0))
+            self._set_combo_value(self.wi_result_var, p.get("result_var", "") or "")
+            self._set_combo_value(self.wi_pos_var, p.get("pos_var", "") or "")
         elif t == "yolo_detect":
             self.model_path_edit.setText(p.get("model_path", "") or "")
             self._set_region_text(p.get("region", "") or "")
@@ -2947,6 +3350,19 @@ class StepParamsDialog(QDialog):
         elif t == "speech":
             self.sp_content.setPlainText(p.get("content", "") or "")
             self.sp_wait.setChecked(bool(p.get("wait", True)))
+        elif t == "qq_mail":
+            self.mail_host.setText(p.get("mail_host", "") or "smtp.qq.com")
+            self.mail_port.setValue(int(p.get("mail_port", 465) or 465))
+            self.mail_user.setText(p.get("mail_user", "") or "")
+            self.mail_auth.setText(p.get("mail_auth_code", "") or "")
+            self.mail_to.setText(p.get("mail_to", "") or "")
+            self.mail_subject.setText(p.get("subject", "") or "")
+            self.mail_content.setPlainText(p.get("content", "") or "")
+            self.mail_attach_list.clear()
+            for path in (p.get("attachments") or []):
+                path = (str(path) or "").strip()
+                if path:
+                    self._add_mail_attachment(path)
         elif t == "py_func":
             self.code_edit.setPlainText(p.get("code", "") or "")
             self.func_edit.setText(p.get("func_name", "") or "")
@@ -3078,6 +3494,16 @@ class StepParamsDialog(QDialog):
                 "click_button": self.tf_button.currentData(),
                 "variable": self._combo_value(self.tf_variable),
             })
+        elif t == "wait_text":
+            step.params.update({
+                "text": self.wt_text.text().strip(),
+                "region": getattr(self, "_region", step.params.get("region", "")) or "",
+                "interval_sec": round(self.wt_interval.value(), 1),
+                "tolerance": round(self.wt_tolerance.value(), 2),
+                "timeout_sec": round(self.wt_timeout.value(), 1),
+                "result_var": self._combo_value(self.wt_result_var),
+                "pos_var": self._combo_value(self.wt_pos_var),
+            })
         elif t == "screenshot":
             step.params.update({
                 "region": getattr(self, "_region", step.params.get("region", "")) or "",
@@ -3101,6 +3527,19 @@ class StepParamsDialog(QDialog):
                 "variable": self._combo_value(self.find_var),
                 "preview": self.preview_check.isChecked(),
                 "preview_duration": self.preview_spin.value(),
+            })
+        elif t == "wait_image":
+            new_image = getattr(self, "_image", "") or step.params.get("image", "") or ""
+            new_path = getattr(self, "_image_path", "") or step.params.get("image_path", "") or ""
+            step.params.update({
+                "image": new_image,
+                "image_path": new_path,
+                "confidence": round(self.confidence.value(), 2),
+                "region": getattr(self, "_region", step.params.get("region", "")) or "",
+                "interval_sec": round(self.wi_interval.value(), 1),
+                "timeout_sec": round(self.wi_timeout.value(), 1),
+                "result_var": self._combo_value(self.wi_result_var),
+                "pos_var": self._combo_value(self.wi_pos_var),
             })
         elif t == "yolo_detect":
             step.params.update({
@@ -3242,6 +3681,22 @@ class StepParamsDialog(QDialog):
             step.params.update({
                 "content": self.sp_content.toPlainText().strip(),
                 "wait": self.sp_wait.isChecked(),
+            })
+        elif t == "qq_mail":
+            attachments = []
+            for i in range(self.mail_attach_list.count()):
+                path = self.mail_attach_list.item(i).data(Qt.UserRole)
+                if path:
+                    attachments.append(path)
+            step.params.update({
+                "mail_host": self.mail_host.text().strip() or "smtp.qq.com",
+                "mail_port": self.mail_port.value(),
+                "mail_user": self.mail_user.text().strip(),
+                "mail_auth_code": self.mail_auth.text().strip(),
+                "mail_to": self.mail_to.text().strip(),
+                "subject": self.mail_subject.text().strip(),
+                "content": self.mail_content.toPlainText(),
+                "attachments": attachments,
             })
         elif t == "py_func":
             used: list[str] = []

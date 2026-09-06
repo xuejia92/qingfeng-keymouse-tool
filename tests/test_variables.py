@@ -10,7 +10,8 @@ import unittest
 
 from app.values import (format_value, parse_value, resolve_references,
                         resolve_variable)
-from app.config import Flow, FlowStep, FlowVariable, flow_from_dict, flow_to_dict
+from app.config import (Flow, FlowStep, FlowVariable, STEP_OUTPUT_FIELDS,
+                        default_step_params, flow_from_dict, flow_to_dict)
 
 
 class TestParseValue(unittest.TestCase):
@@ -534,6 +535,37 @@ class TestRunLogStep(unittest.TestCase):
             ok, _ = run_log_step({"variables": "", "text": "\\b", "raw": False}, {})
         self.assertTrue(ok)
         lg.assert_called_once_with(" ")
+
+
+class TestStepOutputFields(unittest.TestCase):
+    """STEP_OUTPUT_FIELDS（变量下拉收集「流程内部变量」用）与默认参数保持对齐。"""
+
+    def test_key_output_steps_registered(self):
+        for st in ("var", "foreach", "ocr", "text_find", "wait_text",
+                   "find_image", "wait_image", "yolo_detect", "screenshot",
+                   "color_pick",
+                   "clip_get", "http_request", "deepseek", "script", "py_func",
+                   "dp_browser", "dp_element", "dp_tab", "dp_listen",
+                   "dp_page_shot", "dp_ele_shot"):
+            self.assertIn(st, STEP_OUTPUT_FIELDS, f"{st} 应登记产出变量字段")
+
+    def test_fields_exist_in_default_params(self):
+        """常量里每个产出字段都必须是 default_step_params 中的合法键，
+        防止模块参数改名/新增后变量下拉静默失效。"""
+        for st, fields in STEP_OUTPUT_FIELDS.items():
+            defaults = default_step_params(st)
+            for key in fields:
+                self.assertIn(key, defaults,
+                              f"{st} 的产出字段 {key} 不在默认参数中")
+
+    def test_var_name_is_the_declaration(self):
+        self.assertEqual(STEP_OUTPUT_FIELDS["var"], ("name",))
+
+    def test_no_output_steps_absent(self):
+        # 纯动作/无产出步骤不应出现在产出表里（避免变量下拉出现无意义候选）
+        for st in ("click", "press", "wait", "log", "notify", "speech",
+                   "qq_mail", "app", "close_app", "clip_set", "exit"):
+            self.assertNotIn(st, STEP_OUTPUT_FIELDS)
 
 
 if __name__ == "__main__":

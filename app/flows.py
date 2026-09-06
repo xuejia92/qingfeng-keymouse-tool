@@ -26,10 +26,12 @@ from .tasks import (run_app_step, run_click_step, run_clip_get_step,
                     run_find_step, run_http_request_step, run_log_step,
                     run_notify_step,
                     run_ocr_step, run_press_step,
-                    run_py_func_step, run_script_step, run_screenshot_step,
+                    run_py_func_step, run_qq_mail_step, run_script_step,
+                    run_screenshot_step,
                     run_speech_step,
                     run_text_find_step,
-                    run_var_step, run_web_step, run_yolo_detect_step)
+                    run_var_step, run_wait_image_step, run_wait_text_step,
+                    run_web_step, run_yolo_detect_step)
 from .values import eval_expression_value, format_value, resolve_variable
 
 
@@ -438,6 +440,8 @@ class FlowRunner(QObject):
             return run_ocr_step(step.params, vars.values, self._stop)
         elif step.type == "text_find":
             return run_text_find_step(step.params, vars.values, self._stop)
+        elif step.type == "wait_text":
+            return run_wait_text_step(step.params, vars.values, self._stop)
         elif step.type == "clip_set":
             return run_clip_set_step(step.params, vars.values)
         elif step.type == "clip_get":
@@ -448,6 +452,8 @@ class FlowRunner(QObject):
             return run_speech_step(step.params, vars.values, self._stop)
         elif step.type == "find_image":
             return run_find_image_step(step.params, vars.values, self._stop)
+        elif step.type == "wait_image":
+            return run_wait_image_step(step.params, vars.values, self._stop)
         elif step.type == "yolo_detect":
             return run_yolo_detect_step(step.params, vars.values, vars.types,
                                         self._stop)
@@ -491,6 +497,8 @@ class FlowRunner(QObject):
             return run_script_step(step.params, vars.values, self._stop)
         elif step.type == "notify":
             return run_notify_step(step.params, vars.values, self._stop)
+        elif step.type == "qq_mail":
+            return run_qq_mail_step(step.params, vars.values, self._stop)
         elif step.type == "app":
             return run_app_step(step.params, self._stop)  # 自带成败判定
         elif step.type == "close_app":

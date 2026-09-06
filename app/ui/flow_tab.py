@@ -41,11 +41,12 @@ MODULE_GROUPS = [
     # 通知/退出）一眼可见，不必滚动。
     ("logic",    "常用",       ["speech", "var", "wait", "log", "clip_set",
                                 "clip_get", "notify", "exit"]),
+    # 「应用与功能」紧跟常用之后（应用打开/关闭、网页、网络请求、DeepSeek、脚本、邮件）。
+    ("app_web",  "应用与功能", ["app", "close_app", "web",
+                                "http_request", "deepseek", "script", "qq_mail"]),
     ("input",    "键鼠操作",   ["click", "press", "find"]),
-    ("perceive", "目标识别",   ["ocr", "text_find", "screenshot", "find_image",
-                                "yolo_detect", "color_pick"]),
-    ("app_web",  "应用",       ["app", "close_app", "web",
-                                "http_request", "deepseek", "script"]),
+    ("perceive", "目标识别",   ["ocr", "text_find", "wait_text", "screenshot", "find_image",
+                                "wait_image", "yolo_detect", "color_pick"]),
     # DrissionPage 可视化网页自动化（dp_actors.py）：浏览器对象管理 + 元素操作 +
     # 标签切换 / 监听网络 / 页面截图 / 元素截图 / 上传文件 / 按变量关闭浏览器，
     # 串成一条可视化链路。

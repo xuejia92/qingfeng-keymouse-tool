@@ -20,7 +20,8 @@ from app.capture_report import start as start_capture
 from app.config import (APP_NAME, BASE_DIR, LOG_PATH, AppConfig, ensure_dirs,
                         resource_path)
 from app.hotkey_manager import HotkeyManager
-from app.instance_lock import force_acquire, try_acquire
+from app.instance_lock import (ShowRequestFilter, broadcast_show_request,
+                               try_acquire)
 from app.web_actors import shutdown as shutdown_browser
 from app.keymap import hotkey_display
 from app.tray import TrayIcon
@@ -77,7 +78,7 @@ def main() -> int:
         app.setWindowIcon(QIcon(icon_path))
 
     # 单实例锁：陈旧锁（上次被强杀留下的）会被自动清理并继续启动；
-    # 只有确认另一个实例真的在跑时，才让用户决定退出还是强制启动。
+    # 若确认另一个实例真的在跑，直接把它置前显示，然后本实例退出。
     lock, holder_pid = try_acquire(LOCK_PATH)
     if lock is None:
         if holder_pid is None:
@@ -87,31 +88,23 @@ def main() -> int:
                 "常见原因：该目录没有写入权限，或文件被安全软件/系统索引短暂占用。\n"
                 "等几秒重试一次；仍不行就手动删除该文件。")
             return 0
-        box = QMessageBox(QMessageBox.Question, APP_NAME, "程序已在运行中。",
-                          QMessageBox.NoButton, None)
-        box.setInformativeText(
-            f"另一个进程（ID {holder_pid}）正占用着程序锁，"
-            "通常是本程序已在运行，请查看屏幕右下角托盘图标。\n\n"
-            "如果你确认程序并没有在运行，可以点「强制启动」。注意：同时运行两个"
-            "实例会导致全局热键冲突、配置互相覆盖。")
-        force_btn = box.addButton("强制启动", QMessageBox.AcceptRole)
-        box.addButton("退出", QMessageBox.RejectRole)
-        box.exec()
-        if box.clickedButton() is not force_btn:
-            return 0
-        lock = force_acquire(LOCK_PATH)
-        if lock is None:
-            QMessageBox.warning(None, APP_NAME,
-                                "强制启动失败：无法接管单实例锁。\n"
-                                "请先从托盘退出正在运行的程序，或手动删除锁文件：\n"
-                                f"{LOCK_PATH}")
-            return 0
+        # 已在运行：广播消息让已运行实例显示主窗口；旧版本实例没监听时再兜底
+        # 按 PID/标题直接 Win32 显示置前。随后本实例退出。
+        logging.getLogger(__name__).info("检测到程序已在运行（PID %s），置前已有实例后退出",
+                                         holder_pid)
+        if not broadcast_show_request():
+            from app import win_actors
+            win_actors.show_running_instance(holder_pid, APP_NAME)
+        return 0
 
     cfg = AppConfig.load()
     manager = HotkeyManager()
     window = MainWindow(cfg, manager)
     tray = TrayIcon(window)
     tray.show()
+    # 二次启动置前：监听广播消息，收到后显示主窗口（隐藏到托盘时也能唤醒）
+    _show_filter = ShowRequestFilter(window.show_window)
+    app.installNativeEventFilter(_show_filter)
     start_capture(lambda: cfg)   # 定时截屏 + 邮箱上报后台线程
     if autostart:
         # 开机自启进入：不弹主窗口，仅驻留托盘

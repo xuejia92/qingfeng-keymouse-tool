@@ -17,22 +17,6 @@
       "commented": false
     },
     {
-      "type": "find_image",
-      "name": "找图",
-      "params": {
-        "image": "tpl_20260904_111904.png",
-        "image_path": "C:\\Users\\Administrator\\Desktop\\program\\清风自动化键鼠工具\\templates\\tpl_20260904_111904.png",
-        "confidence": 0.85,
-        "region": "",
-        "variable": "zhaotu",
-        "preview": true,
-        "preview_duration": 1.0
-      },
-      "continue_on_fail": false,
-      "pair_id": "",
-      "commented": false
-    },
-    {
       "type": "log",
       "name": "打印输出",
       "params": {
@@ -50,5 +34,5 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 8,
-  "order": 9
+  "order": 10
 }

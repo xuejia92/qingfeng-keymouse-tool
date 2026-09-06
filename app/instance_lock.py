@@ -31,7 +31,7 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import QLockFile
+from PySide6.QtCore import QAbstractNativeEventFilter, QLockFile
 
 _LOG = logging.getLogger(__name__)
 
@@ -177,3 +177,65 @@ def force_acquire(lock_path: str) -> QLockFile | None:
     _remove_lock_file(lock_path)
     lock = QLockFile(lock_path)
     return lock if lock.tryLock(0) else None
+
+
+# ---- 二次启动置前：通过广播消息通知已运行实例显示主窗口 ----
+#
+# 用户双击再次打开程序时，与其弹「程序已在运行中 / 强制启动」对话框，
+# 不如直接让已经在跑的实例把主窗口显示并置前（隐藏到托盘时也能唤醒）。
+# 用 RegisterWindowMessageW 注册一个跨进程共享的消息 id（同名注册返回同一 id），
+# 再由新实例 PostMessage(HWND_BROADCAST) 广播；已运行实例用 QAbstractNativeEventFilter
+# 监听，收到后调用自身 show_window()（Qt 状态正确、置前最稳）。
+
+_SHOW_MESSAGE_NAME = "QingFengKeyMouseTool_ShowWindow"
+
+
+def show_request_message_id() -> int:
+    """注册「显示主窗口」跨进程消息，返回系统内唯一 id（同名注册返回同一 id）。"""
+    if sys.platform != "win32":
+        return 0
+    import ctypes
+    return int(ctypes.windll.user32.RegisterWindowMessageW(_SHOW_MESSAGE_NAME))
+
+
+def broadcast_show_request() -> bool:
+    """广播「显示主窗口」消息，由已在运行的实例接收后置前显示。"""
+    msg = show_request_message_id()
+    if not msg:
+        return False
+    import ctypes
+    HWND_BROADCAST = 0xFFFF
+    return bool(ctypes.windll.user32.PostMessageW(HWND_BROADCAST, msg, 0, 0))
+
+
+def _win_msg_id(message) -> int | None:
+    """从 native event filter 传入的 message 指针里读出 Win32 消息 id。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        m = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
+        return int(m.message)
+    except Exception:
+        return None
+
+
+class ShowRequestFilter(QAbstractNativeEventFilter):
+    """监听广播的「显示主窗口」消息，命中时回调（显示并置前主窗口）。"""
+
+    def __init__(self, on_show):
+        super().__init__()
+        self._on_show = on_show
+        self._msg = show_request_message_id()
+
+    def nativeEventFilter(self, event_type, message):
+        try:
+            is_win_msg = bytes(event_type) == b"windows_generic_MSG"
+        except Exception:
+            is_win_msg = event_type == "windows_generic_MSG"
+        if self._msg and is_win_msg and _win_msg_id(message) == self._msg:
+            try:
+                self._on_show()
+            except Exception:
+                _LOG.exception("响应二次启动置前失败")
+            return True, 0
+        return False, 0

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from ..config import PresserConfig
+from .. import hotkey_policy
 from .hotkey_edit import HotkeyEdit
 from .widgets import StatusLabel, StopConditionGroup, set_variant
 
@@ -52,6 +53,7 @@ class PresserTab(QWidget):
         hk_lay.addWidget(QLabel("启停热键"))
         self.hotkey_edit = HotkeyEdit()
         self.hotkey_edit.setMaximumWidth(220)
+        self.hotkey_edit.set_conflict_checker(lambda hk: hotkey_policy.check(hk, "presser"))
         hk_lay.addWidget(self.hotkey_edit)
         hk_lay.addSpacing(18)
         self.toggle_btn = QPushButton("启动")

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
                                QLineEdit, QPushButton, QSpinBox, QVBoxLayout)
 
 from ..config import FindTask, resolve_template_path
+from .. import hotkey_policy
 from .hotkey_edit import HotkeyEdit
 from .widgets import StopConditionGroup
 
@@ -115,6 +116,8 @@ class FindTaskDialog(QDialog):
         hk_row.addWidget(QLabel("启停热键"))
         self.hotkey_edit = HotkeyEdit()
         self.hotkey_edit.setMaximumWidth(220)
+        self.hotkey_edit.set_conflict_checker(
+            lambda hk: hotkey_policy.check(hk, f"find_task:{self._task.id}"))
         hk_row.addWidget(self.hotkey_edit)
         hk_row.addStretch(1)
         root.addLayout(hk_row)
