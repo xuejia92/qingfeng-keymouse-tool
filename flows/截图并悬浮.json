@@ -1,0 +1,44 @@
+{
+  "id": "79e891f0a720",
+  "name": "截图并悬浮",
+  "group": "中键菜单",
+  "steps": [
+    {
+      "type": "manual_shot",
+      "name": "手动截图",
+      "params": {
+        "default_name": "",
+        "variable": "x"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "float_image",
+      "name": "图片悬浮",
+      "params": {
+        "source_mode": "address",
+        "image": "tpl_20260913_152134.png",
+        "image_path": "C:\\Users\\Administrator\\Desktop\\program\\清风自动化键鼠工具\\templates\\tpl_20260913_152134.png",
+        "address": "$x",
+        "timeout": 10.0,
+        "use_proxy": true,
+        "proxy": "127.0.0.1:7897",
+        "position": "right_top",
+        "x": 0,
+        "y": 0,
+        "scale": 80,
+        "click_to_close": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 13,
+  "order": 11
+}

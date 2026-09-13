@@ -8,6 +8,7 @@ run_ocr_step / run_clip_set_step / run_clip_get_step / run_py_func_step 是与 U
 from __future__ import annotations
 
 import inspect
+import os
 import threading
 import time
 from dataclasses import asdict
@@ -861,6 +862,278 @@ def run_screenshot_step(p: dict, variables: dict,
     if var:
         variables[var] = path
     return True, f"截图已保存：{path}"
+
+
+# 「手动截图」在框选结束后、弹「另存为」前的短暂停顿（秒）：
+# 主窗口刚被恢复显示，稍等一下再弹对话框，避免它压在窗口重绘动画上。
+# 独立成模块常量而不是内联字面量，方便测试直接置 0 —— 测试里绝不能去
+# patch 全局 time.sleep：那会让其它仍在跑的后台线程（调度器轮询等）睡了个寂寞。
+MANUAL_SHOT_SETTLE_SEC = 0.2
+
+
+def run_manual_shot_step(p: dict, variables: dict,
+                         stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「手动截图」步骤：运行时由用户框选区域，再自选保存位置。
+
+    与「截图」步骤的区别：截图区域和保存位置**都不在编辑期预设**，全部由用户在
+    运行到本步骤时决定。顺序是「先框选、后选保存位置」：
+
+      1. 隐藏主窗口 -> 全屏遮罩 -> 用户拖拽框选 -> 双击确认（Esc 取消）；
+      2. 抓取框选到的区域；
+      3. 弹「另存为」对话框，由用户指定保存路径。
+
+    框选遮罩和另存为对话框都是 QWidget，只能在主线程跑，因此两步都经
+    screenshot_actor.ui_call 调度到主线程，本函数在后台线程阻塞等结果。
+
+    **任一环节被取消（Esc / 取消对话框）都判本步骤失败**，不静默跳过——
+    用户明确取消了却继续往下跑，容易让后续步骤作用在错误的前提上。
+
+    返回 (成功?, 原因)。
+    """
+    from . import screenshot_actor
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+
+    # 1) 运行时框选区域
+    rect = screenshot_actor.ui_call(screenshot_actor.select_region)
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    if not rect:
+        return False, "已取消框选"
+    x, y, w, h = rect
+    if int(w) < 1 or int(h) < 1:
+        return False, "框选区域过小"
+    region = f"{int(x)},{int(y)},{int(w)},{int(h)}"
+
+    # 2) 抓取框选区域
+    try:
+        img = screenshot_actor.grab_image("region", region)
+    except Exception as e:
+        return False, f"截图失败：{type(e).__name__}: {e}"
+
+    # 3) 自选保存位置（主窗口刚恢复显示，稍等一下再弹，避免对话框压在窗口重绘上）
+    time.sleep(MANUAL_SHOT_SETTLE_SEC)
+    prefix = (p.get("default_name") or "").strip() or "手动截图"
+    default_name = f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.png"
+    path = screenshot_actor.ui_call(
+        lambda: screenshot_actor.ask_save_path(default_name))
+    if not path:
+        return False, "已取消保存"
+
+    try:
+        import cv2
+        if not cv2.imwrite(path, img):
+            return False, f"图片写入失败：{path}"
+    except Exception as e:
+        return False, f"保存失败：{type(e).__name__}: {e}"
+
+    var = (p.get("variable") or "").strip()
+    if var:
+        variables[var] = path
+    return True, f"手动截图已保存：{path}"
+
+
+# ---- 「图片悬浮」图片来源解析（本地路径 / 网络网址）----
+
+def _float_image_cache_dir() -> str:
+    """网络图片的本地缓存目录。
+
+    放在 TEMPLATE_DIR 下（templates/ 已被 git 忽略，且随程序目录走）。
+    注意这里是**调用时**才去读 config.TEMPLATE_DIR —— 测试用 TempConfigPaths
+    重定向目录后也能生效，不能在模块导入期就固化成常量。
+    """
+    from . import config as config_mod
+    return os.path.join(config_mod.TEMPLATE_DIR, "float_image_cache")
+
+
+def _resolve_local_image_path(raw: str) -> str:
+    """把「本地图片地址」解析成可用的绝对路径，解析不出返回 ""。
+
+    支持：绝对路径、file:// 网址、~ 与 %ENV% 环境变量、以程序目录为基准的相对路径，
+    以及模板目录（templates/）里的文件名——最后一条让人可以直接写「a.png」
+    复用已有的模板图。
+    """
+    from . import config as config_mod
+    text = str(raw or "").strip().strip('"').strip("'")
+    if not text:
+        return ""
+    if text.lower().startswith("file:"):
+        try:
+            from urllib.parse import urlparse
+            from urllib.request import url2pathname
+            parsed = urlparse(text)
+            if parsed.scheme != "file":
+                return ""
+            text = url2pathname(parsed.path)
+        except Exception:
+            return ""
+    text = os.path.expanduser(os.path.expandvars(text))
+    if os.path.isabs(text):
+        return text if os.path.isfile(text) else ""
+    candidate = os.path.join(config_mod.BASE_DIR, text)   # 相对路径按程序目录
+    if os.path.isfile(candidate):
+        return candidate
+    tpl = resolve_template_path(text, "")                 # 再按模板目录
+    return tpl if tpl and os.path.isfile(tpl) else ""
+
+
+def _cached_network_image(url: str) -> str:
+    """同一个网址已经下载过就直接复用本地文件；没有缓存返回 ""。"""
+    import hashlib
+    prefix = "url_" + hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
+    cache_dir = _float_image_cache_dir()
+    try:
+        names = os.listdir(cache_dir)
+    except OSError:
+        return ""
+    for name in names:
+        if name.startswith(prefix + "."):
+            path = os.path.join(cache_dir, name)
+            if os.path.isfile(path):
+                return path
+    return ""
+
+
+def _cache_network_image(src: str, url: str) -> str:
+    """把下载下来的临时图片挪到按 URL 命名的稳定路径。
+
+    为什么必须「挪」：http_actor 落地的是带时间戳的文件名，同一个网址每次下载
+    都换新名字，悬浮窗按路径去重的逻辑就失效了——流程重复跑会在桌面上叠出
+    一堆一模一样的窗口。改成按 URL 哈希命名后，重复悬浮同一网址会先关旧的
+    再开新的，而且第二次直接命中缓存、不再下载。
+    """
+    import hashlib
+    if not src or not os.path.isfile(src):
+        return ""
+    cache_dir = _float_image_cache_dir()
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError:
+        return src
+    ext = os.path.splitext(src)[1].lower() or ".png"
+    dst = os.path.join(cache_dir,
+                       "url_" + hashlib.md5(url.encode("utf-8")).hexdigest()[:12] + ext)
+    try:
+        os.replace(src, dst)          # 同盘原子替换，不会留半截文件
+    except OSError:
+        try:
+            import shutil
+            shutil.move(src, dst)
+        except OSError:
+            return src
+    return dst
+
+
+def _fetch_network_image(p: dict, url: str) -> tuple[str, str]:
+    """下载网络图片到本地缓存，返回 (本地路径, 错误说明)。成功时错误说明为 ""。
+
+    复用「网络请求」步骤那套传输层（标准库 urllib + 代理 + 超时），
+    result_type="image" 时它会把响应体存成图片文件并返回路径。
+    """
+    cached = _cached_network_image(url)
+    if cached:
+        return cached, ""
+    from . import http_actor
+    try:
+        timeout = float(p.get("timeout") if p.get("timeout") is not None else 10)
+    except (TypeError, ValueError):
+        timeout = 10.0
+    try:
+        result = http_actor.perform_request(
+            url=url, method="get", result_type="image", timeout=timeout,
+            use_proxy=bool(p.get("use_proxy", True)),
+            proxy=str(p.get("proxy") or "127.0.0.1:7897"))
+    except http_actor.HttpError as e:
+        return "", f"图片下载失败：{e}"
+    except Exception as e:
+        return "", f"图片下载失败：{type(e).__name__}: {e}"
+    path = _cache_network_image(str(result.get("content") or ""), url)
+    if not path:
+        return "", "图片下载失败：没取到图片数据（该网址返回的可能不是图片）"
+    return path, ""
+
+
+def run_float_image_step(p: dict, variables: dict,
+                         stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「图片悬浮」步骤：把指定图片贴到桌面最前端，**异步**返回。
+
+    这个步骤和别的步骤最大的不同是**不等用户操作**：在主线程把悬浮窗建出来、
+    显示出来，立刻返回成功，流程继续往下跑。图片就一直留在桌面上，
+    直到用户手动关闭（✕ 按钮 / Esc / 可选的「单击图片即关闭」）。
+
+    图片来源由 source_mode 决定：
+      - template：模板图（image / image_path，编辑期截图或上传的那张）；
+      - address ：图片地址，支持 $变量名 引用——即「把图片地址放进变量、运行时取用」。
+        地址既可以是本地文件（绝对路径 / file:// / 程序或模板目录相对路径），
+        也可以是 http(s) 网络图片（先下载到本地缓存再悬浮）。
+
+    也正因为是异步的，它不产出任何变量，所以 STEP_OUTPUT_FIELDS 里没有它。
+
+    QWidget/QPixmap 都不能在非主线程创建，因此窗口创建经
+    screenshot_actor.ui_call 调度到主线程；本步骤的下载/解析都在后台线程做完，
+    最后只在主线程建窗，拿到结果就返回，不阻塞等待用户关闭。
+
+    返回 (成功?, 原因)。
+    """
+    from . import overlay_actor, screenshot_actor
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+
+    mode = (p.get("source_mode") or "template").strip() or "template"
+    label = ""            # 日志里展示的名字（网络图片用网址，本地用文件名）
+    if mode == "address":
+        from .values import resolve_references
+        raw = resolve_references(str(p.get("address") or ""), variables).strip()
+        if not raw:
+            return False, "图片地址为空（若填的是变量，请确认该变量已赋值）"
+        if raw.lower().startswith(("http://", "https://")):
+            if stop is not None and stop.is_set():
+                return False, "已手动停止"
+            path, err = _fetch_network_image(p, raw)
+            if err:
+                return False, err
+            label = raw
+        else:
+            path = _resolve_local_image_path(raw)
+            if not path:
+                # 地址里还留着 $变量名，基本就是「变量没赋值」而非路径写错——
+                # 给个更贴切的提示，比丢一句「文件不存在：$img」有用得多。
+                import re
+                missing = re.search(r"\$([A-Za-z_][A-Za-z0-9_]*)", raw)
+                if missing:
+                    return False, f"图片地址里的变量未赋值：${missing.group(1)}"
+                return False, f"图片文件不存在：{raw}"
+            label = os.path.basename(path)
+    else:
+        path = resolve_template_path(p.get("image", ""), p.get("image_path", "")) or ""
+        if not path:
+            return False, "未选择悬浮图片"
+        if not os.path.isfile(path):
+            return False, f"图片文件不存在：{path}"
+        label = os.path.basename(path)
+
+    pos = (p.get("position") or "right_bottom").strip() or "right_bottom"
+    x = p.get("x")
+    y = p.get("y")
+    try:
+        scale = int(p.get("scale", 100) or 100)
+    except (TypeError, ValueError):
+        scale = 100
+    click_to_close = bool(p.get("click_to_close"))
+
+    # ui_call 返回 True/False（不把 QWidget 对象带回后台线程，避免误碰）
+    try:
+        ok = screenshot_actor.ui_call(
+            lambda: overlay_actor.show_image(
+                path, pos=pos, x=x, y=y, scale=scale,
+                click_to_close=click_to_close) is not None)
+    except Exception as e:
+        return False, f"悬浮图片失败：{type(e).__name__}: {e}"
+    if not ok:
+        return False, f"图片加载失败：{label}"
+
+    # 到这里悬浮窗已经在桌面上了，本步骤到此为止——不等用户关闭
+    return True, f"已悬浮图片（异步）：{label}"
 
 
 def run_color_pick_step(p: dict, variables: dict,

@@ -15,8 +15,8 @@
     "click_type": "single",
     "interval_ms": 100,
     "fixed_position": false,
-    "pos_x": 0,
-    "pos_y": 0,
+    "pos_x": 2171,
+    "pos_y": 309,
     "count": 0,
     "duration_sec": 0.0,
     "hotkey": "f6"
@@ -30,21 +30,23 @@
   },
   "find_tasks": [],
   "flow_groups": [
-    "测试使用"
+    "测试使用",
+    "中键菜单"
   ],
   "flow_group_seqs": {
-    "测试使用": 1
+    "测试使用": 1,
+    "中键菜单": 2
   },
   "collapsed_flow_groups": [
-    "111"
+    "111",
+    "测试使用"
   ],
   "clear_log_on_run": true,
-  "log_print_only": true,
+  "log_print_only": false,
   "collapsed_module_groups": [
     "condition",
     "drission",
     "input",
-    "logic",
     "perceive",
     "python"
   ],
@@ -74,5 +76,17 @@
     }
   ],
   "schedule_groups": [],
-  "collapsed_schedule_groups": []
+  "collapsed_schedule_groups": [],
+  "middle_menu_enabled": true,
+  "middle_menu_suppress": true,
+  "middle_menu_items": [
+    {
+      "id": "0d027897d458",
+      "label": "截图并悬浮",
+      "icon": "camera",
+      "flow_id": "79e891f0a720",
+      "flow_name": "截图并悬浮",
+      "separator_before": true
+    }
+  ]
 }

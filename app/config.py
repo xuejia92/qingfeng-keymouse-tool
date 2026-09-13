@@ -187,6 +187,7 @@ class FindTask:
 
 FLOW_STEP_TYPES = {"var": "变量", "log": "打印输出", "ocr": "文字识别",
                    "text_find": "文字查找", "wait_text": "等待文字出现", "screenshot": "截图",
+                   "manual_shot": "手动截图",
                    "find_image": "找图", "wait_image": "等待图片出现", "yolo_detect": "目标检测",
                    "click": "鼠标点击", "press": "键盘连按", "find": "找图点击",
                    "wait": "延时等待", "web": "打开关闭网页或浏览器", "http_request": "网络请求",
@@ -194,6 +195,7 @@ FLOW_STEP_TYPES = {"var": "变量", "log": "打印输出", "ocr": "文字识别"
                    "notify": "消息通知",
                    "speech": "语音播报",
                    "qq_mail": "邮件发送",
+                   "float_image": "图片悬浮",
                    "app": "打开应用",
                    "close_app": "关闭应用", "clip_set": "赋值剪贴板",
                    "clip_get": "获取剪贴板内容",
@@ -227,6 +229,7 @@ STEP_OUTPUT_FIELDS: dict[str, tuple[str, ...]] = {
     "wait_image": ("result_var", "pos_var"),
     "yolo_detect": ("variable",),
     "screenshot": ("variable",),
+    "manual_shot": ("variable",),
     "color_pick": ("variable",),
     "clip_get": ("variable",),
     "http_request": ("status_var", "headers_var", "cookie_var", "text_var"),
@@ -470,6 +473,33 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "region": "",                 # 指定区域 "x,y,w,h"（物理像素，必填）
             "save_mode": "variable",      # variable=默认保存 / choose=自选保存（弹窗）
             "variable": "",               # 截图绝对路径写入的结果变量（默认保存必填，自选保存可选）
+        }
+    if step_type == "manual_shot":
+        # 与「截图」的区别：区域和保存位置都不在编辑期预设，全部由用户运行时决定。
+        return {
+            "default_name": "",           # 保存对话框的默认文件名前缀（空=用「手动截图」）
+            "variable": "",               # 可选：截图保存的绝对路径写入该变量
+        }
+    if step_type == "float_image":
+        # 异步步骤：把图片贴在桌面最前端，随即返回、不阻塞后续流程。
+        # 图片来源二选一（source_mode）：
+        #   template —— 模板图（沿用「找图」那套参数：image=模板目录文件名 / image_path=绝对路径兜底），
+        #               编辑对话框直接复用现成的「屏幕截图选区 / 上传图片」控件；
+        #   address  —— 图片地址：本地路径或 http(s) 网址，支持 $变量名 引用
+        #               （即「用变量传入图片地址」，本地图片与网络图片都走这条）。
+        return {
+            "source_mode": "template",   # template=模板图 / address=图片地址（本地或网络）
+            "image": "",                 # 模板图文件名（templates/ 下，截屏/上传生成）
+            "image_path": "",            # 模板图绝对路径（跨目录运行时兜底）
+            "address": "",               # 图片地址：本地路径 / file:// / http(s) 网址，支持 $变量名
+            "timeout": 10.0,             # 网络图片下载超时（秒）
+            "use_proxy": True,           # 网络图片是否走代理（与「网络请求」一致，默认走本机 7897）
+            "proxy": "127.0.0.1:7897",   # 代理地址 host:port
+            "position": "right_bottom",  # 悬浮位置：right_bottom/right_top/left_top/left_bottom/center/custom
+            "x": "",                     # position=custom 时的左上角 x（物理像素）
+            "y": "",                     # position=custom 时的左上角 y（物理像素）
+            "scale": 100,                # 显示缩放百分比（10~400）
+            "click_to_close": False,     # 勾选=单击图片即关闭（默认关，靠 ✕ / Esc 关闭）
         }
     if step_type == "color_pick":
         return {
@@ -813,6 +843,18 @@ class FlowStep:
                 if p.get("save_mode") == "choose":
                     return f"截图 → 自选保存 → {var}" if var else "截图 → 自选保存"
                 return f"截图 → {var}" if var else "截图 → 默认保存"
+            if self.type == "manual_shot":
+                var = p.get("variable") or ""
+                return (f"手动截图 → 运行时框选+自选保存 → {var}" if var
+                        else "手动截图 → 运行时框选+自选保存")
+            if self.type == "float_image":
+                if (p.get("source_mode") or "template") == "address":
+                    addr = str(p.get("address") or "").strip() or "未填地址"
+                    if len(addr) > 30:
+                        addr = addr[:29] + "…"
+                    return f"图片悬浮 {addr}（异步）"
+                img = os.path.basename(p.get("image") or "") or "未选图片"
+                return f"图片悬浮 {img}（异步）"
             if self.type == "color_pick":
                 color = (p.get("color") or "").strip() or "未取色"
                 var = p.get("variable") or "未指定变量"
@@ -1089,6 +1131,64 @@ def schedule_from_dict(data: dict) -> ScheduleTask:
     )
 
 
+# ---------------- 中键菜单 ----------------
+
+@dataclass
+class MiddleMenuItem:
+    """中键菜单项：鼠标中键弹出的快捷菜单里的一个条目。
+
+    每个条目关联一个「已经实现好的流程」（cfg.flows 里某个 Flow 的 id）；
+    运行时点击该条目即运行所关联的流程。label 为空时直接显示流程名称，
+    这样流程改名后菜单文字自动跟随，无需重新编辑菜单项。
+    """
+    id: str = ""
+    label: str = ""                     # 菜单显示文本；留空 = 用所关联流程的名称
+    icon: str = ""                      # 预设图标 key（见 ui/middle_menu_icons.py）；空 = 不显示图标
+    flow_id: str = ""                   # 关联流程 id（Flow.id）
+    flow_name: str = ""                 # 冗余流程名（流程被改名/删除后兜底显示与提示）
+    separator_before: bool = False      # 本项上方是否显示一条分隔线
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = uuid.uuid4().hex[:12]
+        self.label = str(self.label or "")[:50]
+        self.icon = str(self.icon or "")[:20]
+        self.flow_id = str(self.flow_id or "")[:32]
+        self.flow_name = str(self.flow_name or "")[:50]
+        self.separator_before = bool(self.separator_before)
+
+    def display_label(self, flow: "Flow | None") -> str:
+        """解析实际显示文本：自定义名称优先；否则流程名；流程已删则退回冗余名。"""
+        custom = self.label.strip()
+        if custom:
+            return custom
+        if flow is not None:
+            return flow.name
+        return self.flow_name.strip() or "未命名菜单项"
+
+
+def middle_menu_item_from_dict(data: dict) -> MiddleMenuItem:
+    """字典 -> MiddleMenuItem；字段缺失/非法时回退默认值，不抛异常。"""
+    if not isinstance(data, dict):
+        data = {}
+    return MiddleMenuItem(
+        id=str(data.get("id") or uuid.uuid4().hex[:12]),
+        label=str(data.get("label", "") or "")[:50],
+        icon=str(data.get("icon", "") or "")[:20],
+        flow_id=str(data.get("flow_id", "") or "")[:32],
+        flow_name=str(data.get("flow_name", "") or "")[:50],
+        separator_before=bool(data.get("separator_before", False)),
+    )
+
+
+def default_middle_menu_items(flows: "list[Flow]") -> list[MiddleMenuItem]:
+    """首次启用中键菜单时的建议默认值：给每个流程各生成一个菜单项。
+
+    这样用户添加第一个流程后打开中键菜单就能直接用；之后可自由增删改。
+    """
+    return [MiddleMenuItem(flow_id=f.id, flow_name=f.name) for f in flows]
+
+
 # ---------------- 流程独立文件（flows/ 目录）与导入 / 导出 ----------------
 
 def flow_to_dict(flow: Flow, order: int = 0) -> dict:
@@ -1361,6 +1461,10 @@ class AppConfig:
     schedule_tasks: list[ScheduleTask] = field(default_factory=list)  # 定时任务
     schedule_groups: list[str] = field(default_factory=list)          # 定时任务分组（顺序即显示顺序）
     collapsed_schedule_groups: list[str] = field(default_factory=list)  # 收起的定时任务分组名
+    # 中键菜单：系统范围内按鼠标中键弹出快捷菜单，每个菜单项关联一个流程，点击即运行
+    middle_menu_enabled: bool = True             # 总开关（关闭后中键不再弹菜单）
+    middle_menu_suppress: bool = False           # 是否拦截中键（不让它落到目标窗口）
+    middle_menu_items: list[MiddleMenuItem] = field(default_factory=list)  # 菜单项（顺序即菜单顺序）
 
     # ---------- 持久化 ----------
     def save(self, save_flows: bool = True) -> None:
@@ -1545,6 +1649,13 @@ class AppConfig:
             [str(g) for g in data.get("collapsed_schedule_groups", [])
              if isinstance(g, str) and g.strip()]
             if isinstance(data.get("collapsed_schedule_groups"), list) else [])
+
+        # 中键菜单（旧配置无这些键 -> 默认开启、不拦截、空菜单项）
+        cfg.middle_menu_enabled = bool(data.get("middle_menu_enabled", True))
+        cfg.middle_menu_suppress = bool(data.get("middle_menu_suppress", False))
+        raw_items = data.get("middle_menu_items")
+        cfg.middle_menu_items = ([middle_menu_item_from_dict(it) for it in raw_items]
+                                 if isinstance(raw_items, list) else [])
 
         if ("mail_auth_code" not in data or "capture_excluded_ids" not in data
                 or "clear_log_on_run" not in data or "log_print_only" not in data

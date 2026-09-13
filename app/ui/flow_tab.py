@@ -43,9 +43,11 @@ MODULE_GROUPS = [
                                 "clip_get", "notify", "exit"]),
     # 「应用与功能」紧跟常用之后（应用打开/关闭、网页、网络请求、DeepSeek、脚本、邮件）。
     ("app_web",  "应用与功能", ["app", "close_app", "web",
-                                "http_request", "deepseek", "script", "qq_mail"]),
+                                "http_request", "deepseek", "script", "qq_mail",
+                                "float_image"]),
     ("input",    "键鼠操作",   ["click", "press", "find"]),
-    ("perceive", "目标识别",   ["ocr", "text_find", "wait_text", "screenshot", "find_image",
+    ("perceive", "目标识别",   ["ocr", "text_find", "wait_text", "screenshot",
+                                "manual_shot", "find_image",
                                 "wait_image", "yolo_detect", "color_pick"]),
     # DrissionPage 可视化网页自动化（dp_actors.py）：浏览器对象管理 + 元素操作 +
     # 标签切换 / 监听网络 / 页面截图 / 元素截图 / 上传文件 / 按变量关闭浏览器，

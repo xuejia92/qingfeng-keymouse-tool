@@ -9,6 +9,7 @@ import os
 import sys
 
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton,
                                QTabWidget, QToolTip, QVBoxLayout, QWidget)
@@ -18,11 +19,13 @@ from ..capture_report import stop as stop_capture
 from .. import hotkey_policy
 from ..hotkey_manager import HotkeyManager
 from ..keymap import hotkey_display
+from ..mouse_menu import MouseMenuWatcher
 from ..tasks import ClickTask, PressTask
 from ..updater import compare_versions, install_update
 from .clicker_tab import ClickerTab
 from .finder_tab import FinderTab
 from .flow_tab import FlowTab
+from .middle_menu_tab import MiddleMenuTab, build_menu
 from .presser_tab import PresserTab
 from .schedule_tab import ScheduleTab
 from .settings_tab import SettingsTab
@@ -96,10 +99,12 @@ class MainWindow(QMainWindow):
         self.finder_tab = FinderTab(cfg.find_tasks)
         self.flow_tab = FlowTab(cfg)
         self.schedule_tab = ScheduleTab(cfg, self.flow_tab)
+        self.middle_menu_tab = MiddleMenuTab(cfg)
         self.settings_tab = SettingsTab(cfg)
         # 自动化流程是主功能，放第一个
         tabs.addTab(self.flow_tab, "🚀 自动化流程")
         tabs.addTab(self.schedule_tab, "⏰ 定时任务")
+        tabs.addTab(self.middle_menu_tab, "📋 中键菜单")
         tabs.addTab(self.clicker_tab, "🖱 鼠标连点")
         tabs.addTab(self.presser_tab, "⌨ 键盘连按")
         tabs.addTab(self.finder_tab, "🖼 找图点击")
@@ -202,8 +207,11 @@ class MainWindow(QMainWindow):
 
         self.flow_tab.changed.connect(self._on_flow_changed)
         self.flow_tab.flowStarted.connect(self._on_flow_started)
-        # 流程增删改后，同步刷新定时任务页的流程名兜底显示
+        # 流程增删改后，同步刷新定时任务页与中键菜单页的流程名兜底显示
         self.flow_tab.changed.connect(self.schedule_tab.on_flows_changed)
+        self.flow_tab.changed.connect(self.middle_menu_tab.on_flows_changed)
+        # 中键菜单配置（菜单项 / 开关）变化：重配置监听并持久化
+        self.middle_menu_tab.changed.connect(self._on_middle_menu_changed)
         # 「每次运行清空日志」勾选状态持久化到配置
         self.log_panel.clearOnRunChanged.connect(self._on_clear_log_setting)
         # 「只显示打印输出」勾选状态持久化到配置
@@ -227,6 +235,16 @@ class MainWindow(QMainWindow):
         self.log_panel.print_only = cfg.log_print_only
 
         self._register_hotkeys()
+
+        # ---- 全局中键监听：中键抬起时在光标处弹出中键菜单 ----
+        self._middle_menu_open = False      # 正在走「弹菜单」循环，防重入
+        self._middle_menu = None            # 当前弹着的菜单（再次按中键时要关掉它）
+        self._pending_middle_pos = None     # 挂起的新位置：关掉旧菜单后据此重开
+        self.mouse_watcher = MouseMenuWatcher(self)
+        self.mouse_watcher.middleClicked.connect(self._on_middle_click)
+        self.mouse_watcher.set_suppress(cfg.middle_menu_suppress)
+        if cfg.middle_menu_enabled:
+            self.mouse_watcher.start()
 
         # ---- 运行日志面板（底部可折叠，替代原左下角悬浮窗） ----
         from ..logbus import bus, log
@@ -430,6 +448,84 @@ class MainWindow(QMainWindow):
         """有流程开始运行：勾选了「每次运行清空日志」就清空底部日志。"""
         if self.log_panel.clear_on_run:
             self.log_panel.clear()
+
+    # ---------- 中键菜单 ----------
+    def _on_middle_menu_changed(self) -> None:
+        """中键菜单配置变化：把开关同步到监听器，并触发防抖保存。"""
+        enabled = bool(self.cfg.middle_menu_enabled)
+        self.mouse_watcher.set_suppress(bool(self.cfg.middle_menu_suppress))
+        if enabled and not self.mouse_watcher.is_running():
+            if not self.mouse_watcher.start():
+                self.statusBar().showMessage("中键菜单启动失败（无法安装鼠标钩子）", 5000)
+        elif not enabled and self.mouse_watcher.is_running():
+            self.mouse_watcher.stop()
+        self._save_timer.start()
+
+    def _on_middle_click(self, x: int, y: int) -> None:
+        """全局中键抬起：在光标处弹出中键菜单，选中条目则运行对应流程。
+
+        运行在 Qt 主线程（信号由钩子线程跨线程排队过来）。若已有关闭中的模态
+        对话框则不打扰。
+
+        菜单开着时**再按一次中键不会被忽略**：以前那样直接 return，菜单位置会
+        一直卡在第一次的地方，用户得先手动关掉、再按一次才能换位置。现在改为——
+        记下这次的光标位置、关掉旧菜单（`exec` 随之返回），再在外层循环里按新
+        位置重开；选中条目即结束循环，期间挂起的按键不再理会。
+        """
+        if not self.cfg.middle_menu_enabled:
+            return
+        if self._middle_menu is not None:
+            # 已弹着菜单：记下新位置并关掉旧的；关掉会让 exec 返回，循环随即重开
+            self._pending_middle_pos = QCursor.pos()
+            self._middle_menu.close()
+            return
+        if self._middle_menu_open:      # 循环正在重开的空档（此间不跑事件循环）
+            return
+        if QApplication.activeModalWidget() is not None:
+            return
+        if not self.cfg.middle_menu_items:
+            return
+        self._middle_menu_open = True
+        self._pending_middle_pos = QCursor.pos()
+        try:
+            while self._pending_middle_pos is not None:
+                pos = self._pending_middle_pos
+                # 先清空：只有「这一轮弹窗期间」按下的中键才算是新位置
+                self._pending_middle_pos = None
+                menu = build_menu(self.cfg.middle_menu_items, self.cfg.flows, self)
+                if menu is None:
+                    self.statusBar().showMessage(
+                        "中键菜单：没有可运行的菜单项（关联流程可能已被删除）", 4000)
+                    break
+                self._middle_menu = menu
+                try:
+                    chosen = menu.exec(pos)
+                    # 必须在 deleteLater 之前把 data 取出来——菜单一删 QAction 也没了
+                    flow_id = str(chosen.data() or "") if chosen is not None else ""
+                finally:
+                    self._middle_menu = None
+                    menu.deleteLater()   # 菜单挂在 self 名下，不删会每按一次积一个
+                if not flow_id:
+                    continue             # 可能只是又被按了一次中键 → 回循环看有无新位置
+                self._run_flow_from_middle_menu(flow_id)
+                break                    # 选中条目即结束；挂起的按键不再理会
+        finally:
+            self._middle_menu = None
+            self._pending_middle_pos = None
+            self._middle_menu_open = False
+
+    def _run_flow_from_middle_menu(self, flow_id: str) -> None:
+        """运行中键菜单选中的流程：已在运行则跳过，不打断用户手动运行。"""
+        flow = next((f for f in self.cfg.flows if f.id == flow_id), None)
+        if flow is None:
+            return
+        if not flow.steps:
+            self.statusBar().showMessage(f"「{flow.name}」还没有步骤，无法运行", 5000)
+            return
+        if self.flow_tab.start_flow_if_idle(flow_id, silent=True):
+            self.statusBar().showMessage(f"中键菜单：已启动「{flow.name}」", 5000)
+        else:
+            self.statusBar().showMessage(f"「{flow.name}」已在运行中，已跳过", 4000)
 
     def _on_clear_log_setting(self, checked: bool) -> None:
         """「每次运行清空日志」勾选状态变化：持久化到配置。"""
@@ -736,7 +832,10 @@ class MainWindow(QMainWindow):
         self.hideToTrayNotice.emit()
 
     def shutdown(self) -> None:
+        from ..overlay_actor import close_all as close_floating_images
+        close_floating_images()        # 销毁还留在桌面上的悬浮图片
         stop_capture()          # 停止定时截屏上报线程
         self.schedule_tab.shutdown()   # 停止定时任务调度线程
+        self.mouse_watcher.stop()      # 卸载全局鼠标钩子
         self.stop_all()
         self.manager.unregister_all()

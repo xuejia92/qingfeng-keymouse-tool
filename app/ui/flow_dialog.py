@@ -29,11 +29,13 @@ MIME_TYPE = "application/x-qf-flow-type"
 
 _TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "text_find": "🔍",
                "wait_text": "⏳",
-               "screenshot": "📷", "find_image": "🎯", "wait_image": "👀",
+               "screenshot": "📷", "manual_shot": "📸",
+               "find_image": "🎯", "wait_image": "👀",
                "yolo_detect": "🧠",
                "color_pick": "🎨",
                "click": "🖱", "press": "⌨", "find": "🖼",
                "wait": "⏱", "web": "🌐", "http_request": "📡", "deepseek": "🤖", "script": "📜", "notify": "🔔", "speech": "🔊", "qq_mail": "📧", "app": "🚀", "close_app": "⏹",
+               "float_image": "📌",
                "clip_set": "📤", "clip_get": "📥", "py_func": "🐍",
                "if": "🔀", "elseif": "🔁", "else": "↩️", "endif": "🏁",
                "foreach": "🔄", "while": "♻️",
@@ -484,6 +486,21 @@ class StepParamsDialog(QDialog):
                 QMessageBox.warning(self, "请设置模板图",
                                     "「等待图片出现」需要先设置目标模板图（「屏幕截图选区」或「上传图片」）。")
                 return
+        # 图片悬浮：按来源分别校验——模板图模式必须有图，地址模式必须填地址
+        if self._step.type == "float_image" and getattr(self, "fi_pos", None) is not None:
+            if self.fi_mode_addr.isChecked():
+                if not self.fi_address.text().strip():
+                    QMessageBox.warning(
+                        self, "请填写图片地址",
+                        "已选择「图片地址」，请填写要悬浮的图片地址：\n"
+                        "本地路径（C:\\a.png、~/a.png）或网络网址（https://…）；\n"
+                        "也可以点下方「插入变量」选一个存着图片地址的变量。")
+                    return
+            elif not getattr(self, "_image", "") and not getattr(self, "_image_path", ""):
+                QMessageBox.warning(self, "请设置悬浮图片",
+                                    "请先「屏幕截图选区」或「上传图片」设置要悬浮在桌面的图片，\n"
+                                    "或把「图片来源」改为「图片地址」。")
+                return
         # 目标检测步骤：模型路径必填且文件必须存在；必须选择结果变量
         if self._step.type == "yolo_detect" and getattr(self, "model_path_edit", None) is not None:
             path = self.model_path_edit.text().strip()
@@ -796,6 +813,32 @@ class StepParamsDialog(QDialog):
         """保存位置二选一：自选保存时显示说明行（结果变量行两种方式都常显）。"""
         var_mode = self.save_var_radio.isChecked()
         self._shot_choose_hint_widget.setVisible(not var_mode)
+        self.adjustSize()
+
+    def _sync_float_rows(self, *_a) -> None:
+        """图片悬浮：按「图片来源」切换 模板图组 / 图片地址组，并联动自定义坐标与代理行。
+
+        - 图片来源=模板图：只显示「悬浮图片」行；=图片地址：只显示地址那一组；
+        - 「自定义坐标」行仅在「显示位置=自定义坐标」时可用；
+        - 地址组里的「代理地址」还额外受「使用系统代理」复选框控制，故单独记了行号。
+        """
+        widget = getattr(self, "_fi_xy_widget", None)
+        if widget is None:
+            return
+        widget.setEnabled(self.fi_pos.currentData() == "custom")
+
+        form = getattr(self, "_fi_form", None)
+        addr_mode = bool(getattr(self, "fi_mode_addr", None)
+                         and self.fi_mode_addr.isChecked())
+        if form is not None:
+            for row in getattr(self, "_fi_tpl_rows", ()):
+                form.setRowVisible(row, not addr_mode)
+            for row in getattr(self, "_fi_addr_rows", ()):
+                form.setRowVisible(row, addr_mode)
+            proxy_row = getattr(self, "_fi_proxy_row", -1)
+            if proxy_row >= 0:
+                form.setRowVisible(proxy_row,
+                                   addr_mode and self.fi_proxy_check.isChecked())
         self.adjustSize()
 
     # ---------- UI ----------
@@ -1185,6 +1228,182 @@ class StepParamsDialog(QDialog):
 
             self.save_var_radio.toggled.connect(self._sync_shot_save_rows)
             self._sync_shot_save_rows()
+
+        elif t == "manual_shot":
+            # 截图区域与保存位置都在运行时由用户决定，编辑期只配「默认文件名 / 结果变量」
+            self.ms_name = QLineEdit()
+            self.ms_name.setPlaceholderText("留空则用「手动截图_时间」")
+            self.ms_name.setToolTip("运行时「另存为」对话框里预填的文件名前缀，会自动补时间戳")
+            form.addRow("默认文件名", self.ms_name)
+
+            self._ms_var_widget = QWidget()
+            ms_var_row = QHBoxLayout(self._ms_var_widget)
+            ms_var_row.setContentsMargins(0, 0, 0, 0)
+            self.ms_variable = self._var_combo("（可选，不选则不写变量）")
+            self.ms_variable.setToolTip(
+                "截图保存后，把图片的绝对路径写入该变量（后续日志/剪贴板/点击等步骤可用）")
+            ms_var_row.addWidget(self.ms_variable, 1)
+            form.addRow("结果变量", self._ms_var_widget)
+            self._var_combo_hint(form)
+
+            ms_hint = QLabel(
+                "运行时依次做两件事：\n"
+                "① 隐藏本窗口、屏幕变暗，按住左键拖拽框选截图区域，双击确认（Esc 取消）；\n"
+                "② 弹出「另存为」对话框，由你选择保存位置。\n"
+                "任一环节取消，本步骤判为失败。")
+            ms_hint.setStyleSheet("color: #8a939c;")
+            ms_hint.setWordWrap(True)
+            form.addRow("", ms_hint)
+
+        elif t == "float_image":
+            # 图片来源二选一：模板图（编辑期截图/上传） 或 图片地址（本地路径 / 网络网址，支持 $变量名）
+            self._fi_form = form
+            self.fi_mode_tpl = QRadioButton("模板图")
+            self.fi_mode_tpl.setToolTip("用「屏幕截图选区」或「上传图片」选定的那张图，随流程一起保存")
+            self.fi_mode_addr = QRadioButton("图片地址")
+            self.fi_mode_addr.setToolTip(
+                "直接填图片地址：本地路径（C:\\a.png、~/a.png、file:///…）或网络网址（http/https，\n"
+                "运行时先下载再悬浮）。支持 $变量名 引用，可把地址放进变量、运行时取用。")
+            mode_row = QHBoxLayout()
+            mode_row.addWidget(self.fi_mode_tpl)
+            mode_row.addWidget(self.fi_mode_addr)
+            mode_row.addStretch(1)
+            form.addRow("图片来源", mode_row)
+
+            # ---- 模板图组（沿用「找图」那套：屏幕截图选区 / 上传图片）----
+            self._fi_tpl_rows: list[int] = []
+            img_row = QHBoxLayout()
+            self.preview = QLabel()
+            self.preview.setFixedSize(230, 150)
+            self.preview.setAlignment(Qt.AlignCenter)
+            self.preview.setStyleSheet(
+                "border: 1px solid #c9d1d9; border-radius: 6px; background: #f7f9fb;")
+            img_row.addWidget(self.preview)
+
+            side = QVBoxLayout()
+            side.setSpacing(6)
+            self.capture_btn = QPushButton("📷 屏幕截图选区")
+            self.capture_btn.setToolTip("冻结屏幕 -> 框选 -> 双击确认，截图作为悬浮图片")
+            self.capture_btn.clicked.connect(self._request_capture)
+            side.addWidget(self.capture_btn)
+            self.upload_btn = QPushButton("📁 上传图片")
+            self.upload_btn.setToolTip("从本地选择一张图片作为悬浮内容（自动复制到程序模板目录）")
+            self.upload_btn.clicked.connect(self._pick_image)
+            side.addWidget(self.upload_btn)
+            self.image_edit = QLineEdit()
+            self.image_edit.setReadOnly(True)
+            self.image_edit.setStyleSheet("color: #8a939c; border: none; background: transparent;")
+            side.addWidget(self.image_edit)
+            side.addStretch(1)
+            img_row.addLayout(side, 1)
+            form.addRow("悬浮图片", img_row)
+            self._fi_tpl_rows.append(form.rowCount() - 1)
+
+            # ---- 图片地址组（本地路径 / 网络网址）----
+            self._fi_addr_rows: list[int] = []
+            self.fi_address = QLineEdit()
+            self.fi_address.setPlaceholderText("本地路径 或 网址：C:\\a.png · ~/a.png · https://…")
+            self.fi_address.setToolTip(
+                "图片地址，支持 $变量名 引用。\n"
+                "· 本地：绝对路径、程序目录相对路径、模板目录文件名、file:/// 网址；\n"
+                "· 网络：http/https 网址，运行时先下载到本地缓存再悬浮。")
+            form.addRow("图片地址", self.fi_address)
+            self._fi_addr_rows.append(form.rowCount() - 1)
+
+            # 插入变量：选中流程变量即以 $变量名 插入地址光标处（变量只读下拉，不可手输）
+            self.fi_addr_var = QComboBox()
+            var_names = self._flow_var_names()
+            if var_names:
+                self.fi_addr_var.addItem("＋ 插入变量…", "")
+                for name in var_names:
+                    self.fi_addr_var.addItem(name, name)
+                self.fi_addr_var.setToolTip("选中流程里声明的变量，自动以 $变量名 形式插入到图片地址的光标位置")
+            else:
+                self.fi_addr_var.addItem("流程中暂无变量：先添加「变量」步骤声明", "")
+                self.fi_addr_var.setEnabled(False)
+                self.fi_addr_var.setToolTip("流程中还没有「变量」步骤；先在步骤列表添加「变量」步骤声明变量，"
+                                            "即可在这里选中插入")
+            self.fi_addr_var.currentIndexChanged.connect(self._on_fi_insert_var)
+            form.addRow("插入变量", self.fi_addr_var)
+            self._fi_addr_rows.append(form.rowCount() - 1)
+
+            self.fi_timeout = self._dspin(1, 300, " 秒")
+            self.fi_timeout.setToolTip("网络图片下载超时，默认 10 秒；仅对 http/https 地址生效")
+            form.addRow("下载超时", self.fi_timeout)
+            self._fi_addr_rows.append(form.rowCount() - 1)
+
+            self.fi_proxy_check = QCheckBox("网络图片使用系统代理")
+            self.fi_proxy_check.setToolTip("勾选后经下方代理地址下载网络图片（默认本机 Clash 127.0.0.1:7897）")
+            form.addRow("", self.fi_proxy_check)
+            self._fi_addr_rows.append(form.rowCount() - 1)
+
+            self._fi_proxy_widget = QWidget()
+            proxy_row = QHBoxLayout(self._fi_proxy_widget)
+            proxy_row.setContentsMargins(0, 0, 0, 0)
+            self.fi_proxy = QLineEdit()
+            self.fi_proxy.setPlaceholderText("127.0.0.1:7897")
+            self.fi_proxy.setToolTip("代理地址 host:port，http 与 https 都走该代理")
+            proxy_row.addWidget(self.fi_proxy)
+            form.addRow("代理地址", self._fi_proxy_widget)
+            self._fi_proxy_row = form.rowCount() - 1
+            self._fi_addr_rows.append(self._fi_proxy_row)
+            self.fi_proxy_check.toggled.connect(self._sync_float_rows)
+
+            from ..overlay_actor import (DEFAULT_SCALE, MAX_SCALE, MIN_SCALE,
+                                         POSITIONS)
+            self.fi_pos = QComboBox()
+            for value, label in POSITIONS:
+                self.fi_pos.addItem(label, value)
+            self.fi_pos.setToolTip("悬浮图片贴着桌面显示的位置（运行时用户仍可直接拖动到任意位置）")
+            form.addRow("显示位置", self.fi_pos)
+
+            # 自定义坐标：仅「显示位置 = 自定义坐标」时生效
+            self.fi_x = QSpinBox()
+            self.fi_x.setRange(-99999, 99999)
+            self.fi_y = QSpinBox()
+            self.fi_y.setRange(-99999, 99999)
+            xy_row = QHBoxLayout()
+            xy_row.addWidget(QLabel("X"))
+            xy_row.addWidget(self.fi_x, 1)
+            xy_row.addWidget(QLabel("Y"))
+            xy_row.addWidget(self.fi_y, 1)
+            self._fi_xy_widget = QWidget()
+            xy_box = QVBoxLayout(self._fi_xy_widget)
+            xy_box.setContentsMargins(0, 0, 0, 0)
+            xy_box.addLayout(xy_row)
+            form.addRow("自定义坐标", self._fi_xy_widget)
+            self.fi_pos.currentIndexChanged.connect(self._sync_float_rows)
+
+            self.fi_scale = QSpinBox()
+            self.fi_scale.setRange(MIN_SCALE, MAX_SCALE)
+            self.fi_scale.setSuffix(" %")
+            self.fi_scale.setValue(DEFAULT_SCALE)
+            self.fi_scale.setToolTip(
+                "初始显示比例，100% = 原图尺寸（默认）。\n"
+                "图片比屏幕还大时会先收敛到能完整显示，保住右上角的关闭按钮；\n"
+                "显示后用户仍可用滚轮 / +、- 手动放大缩小，按 0 还原原图尺寸。")
+            form.addRow("初始缩放", self.fi_scale)
+
+            self.fi_click_close = QCheckBox("单击图片即关闭")
+            self.fi_click_close.setToolTip(
+                "勾选后，单击悬浮图片即可关闭；默认不勾，靠右上角 ✕ 或 Esc 关闭")
+            form.addRow("", self.fi_click_close)
+
+            self.fi_mode_tpl.toggled.connect(self._sync_float_rows)
+            self._sync_float_rows()
+
+            fi_hint = QLabel(
+                "执行到本步骤时，图片会贴在桌面最前端并立即继续后续步骤（异步，不阻塞）。\n"
+                "图片来源可选「模板图」（编辑期截图/上传），也可选「图片地址」——填本地路径或\n"
+                "http/https 网址，支持 $变量名（把图片地址放进变量，运行时取用）；网络图片会先\n"
+                "下载到本地缓存，同一网址重复悬浮不重复下载、也不会叠窗。\n"
+                "图片默认按原图尺寸显示（只有比屏幕大时才先缩到能完整显示）；\n"
+                "图片会一直留着，直到手动关闭：鼠标移到图片上点右上角 ✕，或按 Esc；也可直接拖动。\n"
+                "运行时还能手动缩放：滚轮上/下 = 放大/缩小，+ / - 同理，按 0 回到原图尺寸，\n"
+                "缩放以光标位置为锚点，左上角会短暂显示当前百分比。")
+            fi_hint.setStyleSheet("color: #8a939c;")
+            fi_hint.setWordWrap(True)
+            form.addRow("", fi_hint)
 
         elif t == "color_pick":
             # 拾取结果：色块预览 + 只读颜色文本 + 「屏幕取色…」按钮
@@ -2968,6 +3187,19 @@ class StepParamsDialog(QDialog):
             form.setRowVisible(row, want.get(key, False))
         self.adjustSize()
 
+    def _on_fi_insert_var(self, index: int) -> None:
+        """图片悬浮「插入变量」：把选中变量以 $变量名 插入图片地址光标处，然后复位下拉。"""
+        if not getattr(self, "fi_addr_var", None) or not getattr(self, "fi_address", None):
+            return
+        name = self.fi_addr_var.currentData()
+        if not name:
+            return
+        self.fi_address.insert(f"${name}")   # 光标自动移到插入文本之后，便于继续输入
+        self.fi_addr_var.blockSignals(True)
+        self.fi_addr_var.setCurrentIndex(0)  # 复位到「＋ 插入变量…」占位项
+        self.fi_addr_var.blockSignals(False)
+        self.fi_address.setFocus()
+
     def _on_nt_insert_var(self, index: int) -> None:
         """消息通知「插入变量」：把选中的变量以 $变量名 插入消息内容光标处，然后复位下拉。"""
         if not getattr(self, "nt_var", None) or not getattr(self, "nt_content", None):
@@ -3184,6 +3416,40 @@ class StepParamsDialog(QDialog):
                 self.save_var_radio.setChecked(True)
             self._set_combo_value(self.shot_variable, p.get("variable", "") or "")
             self._sync_shot_save_rows()
+        elif t == "manual_shot":
+            self.ms_name.setText(p.get("default_name", "") or "")
+            self._set_combo_value(self.ms_variable, p.get("variable", "") or "")
+        elif t == "float_image":
+            self._image = p.get("image", "") or ""
+            self._image_path = p.get("image_path", "") or ""
+            self._update_preview()
+            idx = self.fi_pos.findData(p.get("position", "right_bottom") or "right_bottom")
+            self.fi_pos.setCurrentIndex(max(0, idx))
+            try:
+                self.fi_x.setValue(int(p.get("x") or 0))
+            except (TypeError, ValueError):
+                self.fi_x.setValue(0)
+            try:
+                self.fi_y.setValue(int(p.get("y") or 0))
+            except (TypeError, ValueError):
+                self.fi_y.setValue(0)
+            try:
+                self.fi_scale.setValue(int(p.get("scale", 100) or 100))
+            except (TypeError, ValueError):
+                self.fi_scale.setValue(100)
+            self.fi_click_close.setChecked(bool(p.get("click_to_close")))
+            if (p.get("source_mode") or "template") == "address":
+                self.fi_mode_addr.setChecked(True)
+            else:
+                self.fi_mode_tpl.setChecked(True)
+            self.fi_address.setText(p.get("address", "") or "")
+            try:
+                self.fi_timeout.setValue(float(p.get("timeout", 10) or 10))
+            except (TypeError, ValueError):
+                self.fi_timeout.setValue(10.0)
+            self.fi_proxy_check.setChecked(bool(p.get("use_proxy", True)))
+            self.fi_proxy.setText(p.get("proxy", "127.0.0.1:7897") or "")
+            self._sync_float_rows()
         elif t == "color_pick":
             fmt = (p.get("format") or "").strip()
             if fmt == "rgb":
@@ -3509,6 +3775,29 @@ class StepParamsDialog(QDialog):
                 "region": getattr(self, "_region", step.params.get("region", "")) or "",
                 "save_mode": "variable" if self.save_var_radio.isChecked() else "choose",
                 "variable": self._combo_value(self.shot_variable),
+            })
+        elif t == "manual_shot":
+            step.params.update({
+                "default_name": self.ms_name.text().strip(),
+                "variable": self._combo_value(self.ms_variable),
+            })
+        elif t == "float_image":
+            # 两种来源的字段都保留：切回来后原来的模板图/地址还在
+            new_image = getattr(self, "_image", "") or step.params.get("image", "") or ""
+            new_path = getattr(self, "_image_path", "") or step.params.get("image_path", "") or ""
+            step.params.update({
+                "source_mode": "address" if self.fi_mode_addr.isChecked() else "template",
+                "image": new_image,
+                "image_path": new_path,
+                "address": self.fi_address.text().strip(),
+                "timeout": round(self.fi_timeout.value(), 1),
+                "use_proxy": self.fi_proxy_check.isChecked(),
+                "proxy": self.fi_proxy.text().strip(),
+                "position": self.fi_pos.currentData() or "right_bottom",
+                "x": self.fi_x.value(),
+                "y": self.fi_y.value(),
+                "scale": self.fi_scale.value(),
+                "click_to_close": self.fi_click_close.isChecked(),
             })
         elif t == "color_pick":
             step.params.update({

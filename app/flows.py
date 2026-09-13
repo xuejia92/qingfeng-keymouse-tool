@@ -23,7 +23,9 @@ from .tasks import (run_app_step, run_click_step, run_clip_get_step,
                     run_dp_element_step, run_dp_listen_step,
                     run_dp_page_shot_step, run_dp_tab_step, run_dp_upload_step,
                     run_find_image_step,
-                    run_find_step, run_http_request_step, run_log_step,
+                    run_find_step, run_float_image_step, run_http_request_step,
+                    run_log_step,
+                    run_manual_shot_step,
                     run_notify_step,
                     run_ocr_step, run_press_step,
                     run_py_func_step, run_qq_mail_step, run_script_step,
@@ -448,6 +450,10 @@ class FlowRunner(QObject):
             return run_clip_get_step(step.params, vars.values, vars.types)
         elif step.type == "screenshot":
             return run_screenshot_step(step.params, vars.values, self._stop)
+        elif step.type == "manual_shot":
+            return run_manual_shot_step(step.params, vars.values, self._stop)
+        elif step.type == "float_image":
+            return run_float_image_step(step.params, vars.values, self._stop)
         elif step.type == "speech":
             return run_speech_step(step.params, vars.values, self._stop)
         elif step.type == "find_image":

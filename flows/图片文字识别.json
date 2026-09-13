@@ -28,6 +28,18 @@
       "continue_on_fail": false,
       "pair_id": "",
       "commented": false
+    },
+    {
+      "type": "screenshot",
+      "name": "截图",
+      "params": {
+        "region": "",
+        "save_mode": "variable",
+        "variable": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
     }
   ],
   "variables": [],
