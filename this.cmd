@@ -49,6 +49,47 @@ set "GIT=git -c "safe.directory=%REPO%""
 %GIT% rev-parse --is-inside-work-tree >nul 2>&1
 if errorlevel 1 goto :no_access
 
+rem ---------- 1.5 代理自动探测 ----------
+rem  直连连不上 GitHub 时（fetch/push 卡 20 秒然后报 Could not connect），
+rem  本机往往已经有 Clash / v2rayN 之类在监听某个端口。这里挨个试常见端口，
+rem  每个都真发一次 https://github.com 请求，只有通得过才采用，
+rem  免得把「端口开着但根本不能用」的死代理塞给 git。
+rem  只按本机端口猜，不动你的全局 git 配置；git 已经配过代理时直接跳过。
+set "PROXY_URL="
+set "PROXY_CFG="
+%GIT% config --get http.proxy >nul 2>&1
+if not errorlevel 1 set "PROXY_CFG=1"
+%GIT% config --get "http.https://github.com.proxy" >nul 2>&1
+if not errorlevel 1 set "PROXY_CFG=1"
+if defined PROXY_CFG goto :proxy_end
+
+set "CURL=%SystemRoot%\System32\curl.exe"
+if not exist "%CURL%" for /f "delims=" %%X in ('where curl 2^>nul') do if not defined CURL set "CURL=%%X"
+if not defined CURL (
+    echo     找不到 curl.exe，跳过代理探测。
+    goto :proxy_end
+)
+
+for %%P in (7897 7890 10809 10808 1080 2080 8080 8888) do (
+    if not defined PROXY_URL (
+        "%CURL%" -s -o NUL --connect-timeout 1 --max-time 6 -x "http://127.0.0.1:%%P" https://github.com
+        if not errorlevel 1 set "PROXY_URL=http://127.0.0.1:%%P"
+    )
+)
+
+if not defined PROXY_URL goto :proxy_none
+echo     已探测到本机代理 %PROXY_URL%，本次 git 操作走它。
+rem  ★ 代理参数必须连等号一起用引号包住：for /f 执行命令时会把裸的
+rem    = 变成空格（实测 for /f ('echo a=b') 得到 "a b"），
+rem    于是 git 会把 URL 当成子命令，报 "git: 'http://...' is not a git command"，
+rem    接着取分支名拿到空值，脚本就会误报「拒绝访问本目录」。
+set "GIT=%GIT% -c "http.proxy=%PROXY_URL%""
+goto :proxy_end
+
+:proxy_none
+echo     未探测到可用代理，按直连继续；连不上会在下面给出提示。
+:proxy_end
+
 rem  还没提交过的分支只有 symbolic-ref 拿得到名字
 for /f "delims=" %%b in ('%GIT% symbolic-ref --short HEAD 2^>nul') do set "BRANCH=%%b"
 if not defined BRANCH for /f "delims=" %%b in ('%GIT% rev-parse --abbrev-ref HEAD 2^>nul') do set "BRANCH=%%b"
@@ -142,7 +183,7 @@ del "%QFLS%" >nul 2>&1
 echo [警告] 连不上 GitHub，跳过同步：网络或代理问题。
 echo        本地会照常提交，稍后重新运行本脚本即可补推。
 echo        若需要走代理，执行一次：
-echo          git config --global http.proxy http://127.0.0.1:7897
+echo          git config --global "http.https://github.com.proxy" http://127.0.0.1:7897
 echo.
 goto :stage
 
@@ -216,7 +257,7 @@ goto :halt
 
 :err_push
 echo [错误] 推送失败。常见原因：
-echo        - 网络或代理不通，可先执行 git config --global http.proxy http://127.0.0.1:7897
+echo        - 网络或代理不通，可先执行 git config --global "http.https://github.com.proxy" http://127.0.0.1:7897
 echo        - GitHub 登录凭据过期，需要重新登录
 echo        - 远端有新提交，先执行 git pull --rebase origin %BRANCH%
 goto :halt
