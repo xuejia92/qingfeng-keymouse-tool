@@ -9,6 +9,7 @@ Pillow>=10.0
 pyperclip>=1.9
 pyttsx3>=2.90
 DrissionPage>=4.1
+rapidocr_onnxruntime>=1.2.3
 
 # 文字识别（可选，仅「文字识别」步骤需要）：
 # 用 RapidOCR（onnxruntime 推理版），依赖只有 onnxruntime + PP-OCR 模型，

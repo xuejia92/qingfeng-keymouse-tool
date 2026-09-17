@@ -62,8 +62,11 @@ def locate_in_region(template_bgr: np.ndarray, screen_bgr: np.ndarray,
 
 
 def load_template(path: str) -> np.ndarray | None:
-    """读取模板图，失败返回 None。"""
-    try:
-        return cv2.imread(path, cv2.IMREAD_COLOR)
-    except Exception:
-        return None
+    """读取模板图，失败返回 None。
+
+    必须走 imgio.imread：cv2.imread 打不开含中文的路径，而模板目录
+    templates/ 就在程序目录下（「清风自动化键鼠工具」），直接用 imread
+    会让所有模板都读不出来。
+    """
+    from . import imgio
+    return imgio.imread(path, cv2.IMREAD_COLOR)

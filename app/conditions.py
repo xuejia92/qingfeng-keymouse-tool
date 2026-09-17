@@ -392,29 +392,29 @@ def condition_block_indices(steps, idx: int) -> list[int]:
 def _step_defined_variables(t: str, p: dict) -> list[str]:
     """返回某步骤执行后会定义/赋值的变量名列表；不产出变量则返回空列表。
 
-    foreach 的 item_var / index_var 在循环执行后被定义（循环结束保留最后值），
-    因此也计入「后续步骤可引用」的变量，供 while 条件/其它步骤的变量校验使用。
+    一个步骤可能产出多个变量（shot_translate 同时写译文与原文；
+    foreach 的 item_var / index_var 在循环执行后被定义，循环结束保留最后值），
+    因此都计入「后续步骤可引用」的变量，供 while 条件/其它步骤的变量校验使用。
     """
     p = p or {}
-    single = {
-        "var": (p.get("name") or "").strip(),
-        "ocr": (p.get("variable") or "").strip(),
-        "text_find": (p.get("variable") or "").strip(),
-        "find_image": (p.get("variable") or "").strip(),
-        "screenshot": (p.get("variable") or "").strip(),
-        "clip_get": (p.get("variable") or "").strip(),
-        "py_func": (p.get("result_var") or "").strip(),
-    }.get(t)
-    if single:
-        return [single]
-    if t == "foreach":
-        out: list[str] = []
-        for key in ("item_var", "index_var"):
-            v = (p.get(key) or "").strip()
-            if v and v not in out:
-                out.append(v)
-        return out
-    return []
+    # 步骤类型 -> 写入的变量参数字段（按顺序）
+    keys_map = {
+        "var": ("name",),
+        "ocr": ("variable",),
+        "shot_translate": ("variable", "source_var"),
+        "text_find": ("variable",),
+        "find_image": ("variable",),
+        "screenshot": ("variable",),
+        "clip_get": ("variable",),
+        "py_func": ("result_var",),
+        "foreach": ("item_var", "index_var"),
+    }
+    out: list[str] = []
+    for key in keys_map.get(t, ()):
+        v = (p.get(key) or "").strip()
+        if v and v not in out:
+            out.append(v)
+    return out
 
 
 def defined_variables_before(steps, declared_variables, index: int) -> set[str]:

@@ -11,6 +11,7 @@ import ctypes
 import os
 import sys
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -149,6 +150,55 @@ class TestLifecycle(unittest.TestCase):
         watcher = MouseMenuWatcher()
         watcher.stop()                        # 不应抛异常
         self.assertFalse(watcher.is_running())
+
+
+class TestGilSwitchInterval(unittest.TestCase):
+    """装钩子必须先把 GIL 切换间隔降下来。
+
+    低层鼠标钩子回调是 Python，由系统在装载线程里同步调用——Windows 会等它
+    返回才继续处理鼠标输入。GIL 默认 5ms 才强制切换一次且交接不公平，主线程
+    一忙钩子线程就要等满 5ms，每条鼠标事件被拖慢 → 输入积压 → 拖动卡顿。
+    实测降到 1ms：投递延迟 16ms → 0ms，采样数 44 → 872（= 空载基线）。
+    """
+
+    def setUp(self):
+        self._orig = sys.getswitchinterval()
+
+    def tearDown(self):
+        sys.setswitchinterval(self._orig)
+
+    def test_lowers_interval_to_1ms(self):
+        from app.mouse_menu import lower_gil_switch_interval
+        sys.setswitchinterval(0.005)
+        lower_gil_switch_interval()
+        self.assertAlmostEqual(sys.getswitchinterval(), 0.001, places=6)
+
+    def test_never_raises_the_interval(self):
+        """已经是更小的值时不许调高（幂等、只下调）。"""
+        from app.mouse_menu import lower_gil_switch_interval
+        sys.setswitchinterval(0.0002)
+        lower_gil_switch_interval()
+        self.assertAlmostEqual(sys.getswitchinterval(), 0.0002, places=6)
+
+    def test_idempotent(self):
+        from app.mouse_menu import lower_gil_switch_interval
+        lower_gil_switch_interval()
+        first = sys.getswitchinterval()
+        lower_gil_switch_interval()
+        self.assertEqual(sys.getswitchinterval(), first)
+
+    def test_start_applies_it(self):
+        """start() 装钩子前必须调用它（钩子没装成功也要先降下来）。"""
+        from app.mouse_menu import MouseMenuWatcher, lower_gil_switch_interval
+        sys.setswitchinterval(0.005)
+        watcher = MouseMenuWatcher()
+        watcher._ready = mock.Mock()          # 别真等 3 秒装载超时
+        with mock.patch.object(MouseMenuWatcher, "_run", lambda self: None), \
+                mock.patch.object(MouseMenuWatcher, "is_running", lambda self: False), \
+                mock.patch("app.mouse_menu.lower_gil_switch_interval",
+                           wraps=lower_gil_switch_interval) as spy:
+            watcher.start()
+            spy.assert_called_once()
 
 
 if __name__ == "__main__":

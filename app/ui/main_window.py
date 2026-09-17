@@ -207,6 +207,9 @@ class MainWindow(QMainWindow):
 
         self.flow_tab.changed.connect(self._on_flow_changed)
         self.flow_tab.flowStarted.connect(self._on_flow_started)
+        # 拖动步骤排序只改了步骤，热键/流程名/其它页都无关：仅防抖落盘。
+        # 走 changed 会在每次拖放后重注册全部全局热键并重建两个无关页面的列表。
+        self.flow_tab.stepsChanged.connect(self._on_flow_steps_changed)
         # 流程增删改后，同步刷新定时任务页与中键菜单页的流程名兜底显示
         self.flow_tab.changed.connect(self.schedule_tab.on_flows_changed)
         self.flow_tab.changed.connect(self.middle_menu_tab.on_flows_changed)
@@ -442,6 +445,15 @@ class MainWindow(QMainWindow):
 
     def _on_flow_changed(self) -> None:
         self._register_hotkeys()
+        self._save_timer.start()
+
+    def _on_flow_steps_changed(self) -> None:
+        """仅步骤顺序/内容变化（拖动排序、步骤增删改）：只需防抖落盘。
+
+        热键只由流程的 hotkey 字段决定，左栏条目只显示流程名，定时任务页与
+        中键菜单页也只引用流程名——都与步骤无关，所以这里刻意不重注册热键、
+        也不刷新那两个页面，避免每次拖放都做一轮无用功。
+        """
         self._save_timer.start()
 
     def _on_flow_started(self) -> None:

@@ -124,8 +124,13 @@ class TestManualShotStep(unittest.TestCase):
         ask.assert_not_called()
 
     def test_write_failure_is_reported(self):
+        """写盘失败：报「图片写入失败」且不写变量。
+
+        打桩的是 app.imgio.imwrite（磁盘图片读写的统一入口），不是 cv2.imwrite——
+        cv2 在中文路径下本来就写不进去，拿它当桩会让这个用例失去意义。
+        """
         target = self._out()
-        with mock.patch("cv2.imwrite", return_value=False):
+        with mock.patch("app.imgio.imwrite", return_value=False):
             (ok, msg), _grab, _ask, _ui = self._run({"variable": ""}, save_path=target)
         self.assertFalse(ok)
         self.assertIn("写入失败", msg)

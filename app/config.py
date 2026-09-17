@@ -186,6 +186,7 @@ class FindTask:
 # ---------------- 自动化流程 ----------------
 
 FLOW_STEP_TYPES = {"var": "变量", "log": "打印输出", "ocr": "文字识别",
+                   "shot_translate": "截图谷歌翻译",
                    "text_find": "文字查找", "wait_text": "等待文字出现", "screenshot": "截图",
                    "manual_shot": "手动截图",
                    "find_image": "找图", "wait_image": "等待图片出现", "yolo_detect": "目标检测",
@@ -223,6 +224,7 @@ STEP_OUTPUT_FIELDS: dict[str, tuple[str, ...]] = {
     "var": ("name",),
     "foreach": ("item_var", "index_var"),
     "ocr": ("variable",),
+    "shot_translate": ("variable", "source_var"),
     "text_find": ("variable",),
     "wait_text": ("result_var", "pos_var"),
     "find_image": ("variable",),
@@ -266,6 +268,36 @@ VARIABLE_TYPES = {"string": "字符串", "integer": "整数", "float": "浮点�
 
 # web 步骤（打开关闭网页或浏览器）的子动作：值 -> 显示名
 WEB_ACTIONS = {"open": "打开网址", "close_tab": "关闭标签页", "close_browser": "关闭浏览器"}
+
+# 「截图谷歌翻译」步骤：语言表。代码沿用谷歌的写法（zh-CN / zh-TW），
+# 不是 ISO 639-1 的两字母形式——直接作为接口的 sl / tl 参数使用。
+# 源语言额外支持 auto（自动检测）；目标语言不能是 auto，故分成两张表。
+TRANSLATE_LANGUAGES = {
+    "auto": "自动检测",
+    "zh-CN": "中文（简体）",
+    "zh-TW": "中文（繁体）",
+    "en": "英语",
+    "ja": "日语",
+    "ko": "韩语",
+    "ru": "俄语",
+    "fr": "法语",
+    "de": "德语",
+    "es": "西班牙语",
+    "pt": "葡萄牙语",
+    "it": "意大利语",
+    "ar": "阿拉伯语",
+    "th": "泰语",
+    "vi": "越南语",
+    "id": "印尼语",
+    "ms": "马来语",
+    "hi": "印地语",
+    "tr": "土耳其语",
+    "pl": "波兰语",
+    "nl": "荷兰语",
+    "uk": "乌克兰语",
+}
+
+TRANSLATE_TARGET_LANGUAGES = {k: v for k, v in TRANSLATE_LANGUAGES.items() if k != "auto"}
 
 # 网络请求步骤：默认 User-Agent（Chrome 桌面版）
 DEFAULT_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -321,6 +353,20 @@ def default_step_params(step_type: str, clicker: "ClickerConfig | None" = None,
             "variable": "",               # 结果保存到的变量名（列表/字典）
             "lang": "ch",                 # 识别语言（RapidOCR 默认中英混合，兼容占位）
             "multi_ocr": True,            # True=多行文本列表，False=拼接字符串
+        }
+    if step_type == "shot_translate":
+        return {
+            # 无 region：截图区域在**运行时**由用户框选（见 tasks.run_shot_translate_step）
+            "source_lang": "auto",        # 源语言（auto=自动检测）
+            "target_lang": "zh-CN",       # 目标语言
+            "variable": "",               # 译文保存到的变量名
+            "source_var": "",             # 识别出的原文保存到的变量名（留空不写）
+            "merge_lines": False,         # True=多行合并为一段再翻译（更通顺）
+            "show_notify": False,         # 翻译后弹通知浮窗显示结果
+            "notify_seconds": 0.0,        # 浮窗停留秒数，<=0 表示只能手动关闭
+            "copy_clipboard": False,      # 译文复制到剪贴板
+            "timeout_sec": 10.0,          # 翻译请求超时（秒）
+            "proxy": "",                  # 代理，如 http://127.0.0.1:7890
         }
     if step_type == "text_find":
         return {
@@ -761,6 +807,12 @@ class FlowStep:
                 var = p.get("variable") or "未指定变量"
                 region = p.get("region") or "全屏"
                 return f"{region} → {var}"
+            if self.type == "shot_translate":
+                # 区域不再预设：运行时由用户框选（旧流程残留的 region 参数已忽略）
+                var = p.get("variable") or "未指定变量"
+                src = TRANSLATE_LANGUAGES.get(p.get("source_lang") or "auto", "自动检测")
+                dst = TRANSLATE_TARGET_LANGUAGES.get(p.get("target_lang") or "zh-CN", "中文（简体）")
+                return f"运行时框选截屏 · {src}→{dst} → {var}"
             if self.type == "text_find":
                 text = p.get("text") or "未填文字"
                 if len(text) > 20:
@@ -1290,15 +1342,36 @@ def _atomic_write_json(path: str, data) -> bool:
     截断的 json，下次启动 json.load 直接失败，等于用户配置全部丢失。
     os.replace 在同一卷内是原子操作——要么拿到旧文件，要么拿到新文件，
     不存在「半个文件」这种中间态。
+
+    内容与磁盘上完全一致时直接跳过落盘。原因：拖动步骤后 save() 会重写
+    flows/ 下全部流程文件 + config.json（14 次 tmp 写 + os.replace），而实际
+    只有被改动的那 1 个流程内容变了。在启用了实时防护/云同步/索引的目录里，
+    每次 os.replace 都要被扫描一遍，14 次能占住主线程数百毫秒，表现为界面卡顿。
+    先比内容再写，能把「拖一步重写 14 个文件」降到「只写真正变化的那个」。
     """
     try:
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+        if _same_as_disk(path, text):
+            return True
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write(text)
         os.replace(tmp, path)
         return True
     except OSError:
         logging.getLogger(__name__).warning("配置文件写入失败: %s", path, exc_info=True)
+        return False
+
+
+def _same_as_disk(path: str, text: str) -> bool:
+    """磁盘上的文件内容是否已与 text 相同（读不到/编码异常一律按「不同」处理）。
+
+    文本模式读取会把 CRLF 还原成 \\n，与 json.dumps 的输出可直接比较。
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read() == text
+    except (OSError, UnicodeDecodeError):
         return False
 
 

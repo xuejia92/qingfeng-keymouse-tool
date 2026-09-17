@@ -1,0 +1,44 @@
+{
+  "id": "bb3313283d5a",
+  "name": "截图谷歌翻译",
+  "group": "中键菜单",
+  "steps": [
+    {
+      "type": "shot_translate",
+      "name": "截图谷歌翻译",
+      "params": {
+        "source_lang": "auto",
+        "target_lang": "zh-CN",
+        "variable": "x",
+        "source_var": "x",
+        "merge_lines": false,
+        "show_notify": true,
+        "notify_seconds": 2.0,
+        "copy_clipboard": true,
+        "timeout_sec": 10.0,
+        "proxy": "http://127.0.0.1:7897"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "x",
+        "text": "",
+        "raw": false,
+        "show_type": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 14,
+  "order": 0
+}

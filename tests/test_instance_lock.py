@@ -232,6 +232,35 @@ class TestShowRequest(unittest.TestCase):
         self.assertEqual(f.nativeEventFilter(b"xcb_generic_event_t", addr), (False, 0))
         self.assertEqual(called, [])
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows 消息机制")
+    def test_msg_id_offset_matches_ctypes_layout(self):
+        """读消息 id 的字节偏移必须取自 ctypes 的类型描述，不能写死魔数。"""
+        from ctypes import wintypes
+        from app.instance_lock import ShowRequestFilter
+        f = ShowRequestFilter(lambda: None)
+        self.assertEqual(f._id_off, wintypes.MSG.message.offset)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows 消息机制")
+    def test_filter_hot_path_does_not_build_msg_struct(self):
+        """热路径不得再新建 MSG 结构体对象。
+
+        这个函数每条 Windows 消息都被调用一次（拖动时是海量消息），旧实现走
+        `ctypes.cast(ptr, POINTER(MSG)).contents` 每次新建一个 MSG 对象，实测
+        3.66µs/条；改成按偏移直接读后 0.26µs/条。这里钉死「不许再用 cast」。
+        """
+        import ctypes
+        from ctypes import wintypes
+        from unittest import mock
+
+        from app.instance_lock import ShowRequestFilter
+        f = ShowRequestFilter(lambda: None)
+        msg = wintypes.MSG()
+        msg.message = 999
+        addr = ctypes.addressof(msg)
+        with mock.patch.object(ctypes, "cast",
+                               side_effect=AssertionError("热路径不应调用 ctypes.cast")):
+            self.assertEqual(f.nativeEventFilter(b"windows_generic_MSG", addr), (False, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
+import unittest.mock
 
 from app import config
 from app.config import (
@@ -268,6 +269,100 @@ class TestAtomicWrite(unittest.TestCase):
             _atomic_write_json(p, {"a": 2})
             with open(p, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), {"a": 2})
+
+
+class TestSkipUnchangedWrite(unittest.TestCase):
+    """内容与磁盘一致时不得落盘。
+
+    拖动步骤后 save() 会重写 flows/ 下全部流程 + config.json，而实际只有被改动
+    的那 1 个流程变了。启用了实时防护/云同步的目录里每次 os.replace 都要被扫描
+    一遍，多余的重写会占住主线程造成界面卡顿，所以必须只写真正变化的文件。
+    """
+
+    def _write_count(self, fn):
+        """统计 fn 执行期间 os.replace 被调用了几次（即真实落盘次数）。"""
+        calls = []
+        real = os.replace
+
+        def spy(src, dst, *a, **k):
+            calls.append(dst)
+            return real(src, dst, *a, **k)
+
+        with unittest.mock.patch("app.config.os.replace", side_effect=spy):
+            fn()
+        return len(calls)
+
+    def test_identical_content_skips_disk_write(self):
+        with TempConfigPaths() as tmp:
+            p = os.path.join(tmp, "x.json")
+            _atomic_write_json(p, {"a": 1, "中文": "值"})
+            self.assertEqual(
+                self._write_count(lambda: _atomic_write_json(p, {"a": 1, "中文": "值"})), 0)
+            with open(p, encoding="utf-8") as f:      # 跳过后内容必须原样保留
+                self.assertEqual(json.load(f), {"a": 1, "中文": "值"})
+
+    def test_changed_content_still_writes(self):
+        with TempConfigPaths() as tmp:
+            p = os.path.join(tmp, "x.json")
+            _atomic_write_json(p, {"a": 1})
+            self.assertEqual(self._write_count(lambda: _atomic_write_json(p, {"a": 2})), 1)
+
+    def test_missing_file_writes(self):
+        with TempConfigPaths() as tmp:
+            p = os.path.join(tmp, "nope.json")
+            self.assertEqual(self._write_count(lambda: _atomic_write_json(p, {"a": 1})), 1)
+            self.assertTrue(os.path.exists(p))
+
+    def test_same_as_disk_missing_returns_false(self):
+        with TempConfigPaths() as tmp:
+            self.assertFalse(config._same_as_disk(os.path.join(tmp, "no.json"), "{}"))
+
+    def test_same_as_disk_corrupt_encoding_returns_false(self):
+        with TempConfigPaths() as tmp:
+            p = os.path.join(tmp, "bad.json")
+            with open(p, "wb") as f:
+                f.write(b"\xff\xfe\x00\x00garbage")
+            self.assertFalse(config._same_as_disk(p, "{}"))
+
+    def test_save_flows_dir_only_rewrites_changed_flow(self):
+        """拖动一个流程的步骤顺序：只重写该流程，其余流程文件不动。"""
+        with TempConfigPaths():
+            a = Flow(name="A", steps=[FlowStep(type="wait", params={"seconds": 1})])
+            b = Flow(name="B", steps=[FlowStep(type="wait", params={"seconds": 2})])
+            save_flows_dir([a, b])                    # 先全部落盘
+
+            b.steps.append(FlowStep(type="log", params={"text": "hi"}))
+            self.assertEqual(self._write_count(lambda: save_flows_dir([a, b])), 1)
+
+            loaded = {f.name: f for f in load_flow_files()}
+            self.assertEqual([s.type for s in loaded["B"].steps], ["wait", "log"])
+            self.assertEqual([s.type for s in loaded["A"].steps], ["wait"])
+
+    def test_save_flows_dir_noop_when_nothing_changed(self):
+        with TempConfigPaths():
+            flows = [Flow(name="A", steps=[FlowStep(type="wait", params={"seconds": 1})]),
+                     Flow(name="B", steps=[FlowStep(type="wait", params={"seconds": 2})])]
+            save_flows_dir(flows)
+            self.assertEqual(self._write_count(lambda: save_flows_dir(flows)), 0)
+
+    def test_config_save_noop_when_nothing_changed(self):
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.save()
+            self.assertEqual(self._write_count(cfg.save), 0)
+            cfg.show_hide_hotkey = "ctrl+alt+q"       # 改动后必须真的落盘
+            self.assertEqual(self._write_count(cfg.save), 1)
+
+    def test_repeated_save_preserves_content(self):
+        """跳过落盘不得让磁盘内容失真：反复 save 后读回仍与内存一致。"""
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="A", steps=[FlowStep(type="wait", params={"seconds": 3})])]
+            for _ in range(3):
+                cfg.save()
+            reloaded = AppConfig.load()
+            self.assertEqual([f.name for f in reloaded.flows], ["A"])
+            self.assertEqual(reloaded.flows[0].steps[0].params["seconds"], 3)
 
 
 class TestFlowDirRoundtrip(unittest.TestCase):

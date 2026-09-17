@@ -716,6 +716,110 @@ def run_ocr_step(p: dict, variables: dict, stop: threading.Event | None = None) 
     return True, f"已识别文字到变量 {var}（{why}）"
 
 
+def run_shot_translate_step(p: dict, variables: dict,
+                            stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「截图谷歌翻译」步骤：**运行时框选** → OCR 取字 → 谷歌翻译 → 写变量 / 展示。
+
+    截图区域**不在编辑期预设**：与「手动截图」一致，运行到本步时先让用户框选
+    （隐藏主窗口 → 全屏遮罩 → 拖拽框选 → 双击确认，Esc 取消），再对框到的区域
+    识别与翻译。用户框选期间不能预先知道要翻译哪里（网页/视频/游戏画面），
+    预设固定坐标很容易失效，所以取消 region 参数。
+
+    参数：source_lang / target_lang / variable（译文变量，必填）/
+    source_var（原文变量，可留空）/ merge_lines（多行合并为一段再翻译，译文更通顺
+    但不再与原文逐行对齐）/ show_notify + notify_seconds（通知浮窗展示结果）/
+    copy_clipboard / timeout_sec / proxy。旧流程里残留的 region 参数会被忽略。
+
+    思路参考 https://github.com/poemdistance/google-translate 的「截图翻译」，
+    但识别用本项目的 RapidOCR（而非 Tesseract），翻译见 translate_actor.py。
+
+    以下情形判失败：**用户取消框选**（Esc，不静默跳过）、OCR 不可用、
+    框选区域内没识别到文字、翻译请求失败、译文为空。识别不到文字算失败是刻意的
+    ——流程里通常先「等待文字出现」，或给本步勾选「失败后继续」。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+
+    var = (p.get("variable") or "").strip()
+    if not var:
+        return False, "未指定译文变量"
+
+    # 运行时框选要翻译的区域（遮罩是 QWidget，必须经 ui_call 调度到主线程）
+    from . import screenshot_actor
+    rect = screenshot_actor.ui_call(screenshot_actor.select_region)
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    if not rect:
+        return False, "已取消框选"
+    try:
+        x, y, w, h = (int(v) for v in rect)
+    except (TypeError, ValueError):
+        return False, f"框选区域无效：{rect!r}"
+    if w < 1 or h < 1:
+        return False, "框选区域过小"
+    region = f"{x},{y},{w},{h}"
+
+    # 1) 截图 + 文字识别（区域来自上面的框选）
+    from . import ocr as ocr_actor
+    ok, lines, why = ocr_actor.recognize(region=region, multi_ocr=True)
+    if not ok:
+        return False, why
+    lines = [str(x).strip() for x in (lines or []) if str(x).strip()]
+    if not lines:
+        return False, "未在截图区域识别到文字"
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+
+    # merge_lines：把 OCR 的多行并成一段再送翻译（换行会让接口按行独立翻译，
+    # 上下文被切断；并成一段后译文更连贯）。保留换行时译文与原文逐行对齐。
+    source_text = " ".join(lines) if p.get("merge_lines") else "\n".join(lines)
+
+    # 2) 谷歌翻译
+    from . import translate_actor
+    ok, result, why = translate_actor.translate(
+        source_text,
+        source=str(p.get("source_lang") or "auto"),
+        target=str(p.get("target_lang") or "zh-CN"),
+        timeout=p.get("timeout_sec") or 10.0,
+        proxy=str(p.get("proxy") or ""),
+    )
+    if not ok:
+        return False, why
+    translated = str((result or {}).get("text") or "").strip()
+    if not translated:
+        return False, "翻译结果为空"
+
+    # 3) 写变量：译文必写；原文变量填了才写
+    variables[var] = translated
+    src_var = (p.get("source_var") or "").strip()
+    if src_var:
+        variables[src_var] = source_text
+
+    # 4) 复制译文到剪贴板（失败不影响步骤成败——剪贴板被别的程序占用是常事）
+    clip_note = ""
+    if p.get("copy_clipboard"):
+        try:
+            pyperclip.copy(translated)
+        except Exception as e:
+            clip_note = f"；复制到剪贴板失败（{type(e).__name__}）"
+
+    # 5) 通知浮窗展示（浮窗是锦上添花，展示失败不判失败）
+    notify_note = ""
+    if p.get("show_notify"):
+        from . import notify_actor
+        try:
+            seconds = float(p.get("notify_seconds") or 0)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        body = translated if not p.get("source_var") else f"{source_text}\n\n{translated}"
+        shown = notify_actor.show_notification(body, "info", seconds, 460, "bottom")
+        if shown is None:
+            notify_note = "；通知浮窗未能显示"
+
+    extra = f"；原文已存入 {src_var}" if src_var else ""
+    return True, f"已翻译到变量 {var}（{why}）{extra}{clip_note}{notify_note}"
+
+
 def run_text_find_step(p: dict, variables: dict,
                        stop: threading.Event | None = None) -> tuple[bool, str]:
     """执行「文字查找」步骤：OCR 在屏幕/区域查找指定文字。
@@ -831,7 +935,7 @@ def run_screenshot_step(p: dict, variables: dict,
     「另存为对话框」需要主线程 UI，通过 screenshot_actor.ui_call 调度到主线程执行
     （后台线程阻塞等待结果，主线程用嵌套事件循环处理交互）。
     """
-    from . import screenshot_actor
+    from . import imgio, screenshot_actor
     if stop is not None and stop.is_set():
         return False, "已手动停止"
     save_mode = (p.get("save_mode") or "variable").strip()
@@ -842,7 +946,6 @@ def run_screenshot_step(p: dict, variables: dict,
     if save_mode != "choose" and not var:
         return False, "未指定结果变量"
 
-    import cv2  # 与 finder/capture_overlay 同一依赖，仅本步骤用到
     try:
         # 固定「指定区域」截图；region 为空时回退全屏（兼容旧版全屏配置）
         img = screenshot_actor.grab_image("region", region)
@@ -853,7 +956,9 @@ def run_screenshot_step(p: dict, variables: dict,
                 lambda: screenshot_actor.ask_save_path(default_name))
             if not path:
                 return False, "已取消保存"
-            cv2.imwrite(path, img)
+            if not imgio.imwrite(path, img):
+                return False, (f"图片写入失败：{path}"
+                               f"（{imgio.write_failure_reason(path)}）")
         else:
             path = screenshot_actor.save_jietu(img)
     except Exception as e:
@@ -890,7 +995,7 @@ def run_manual_shot_step(p: dict, variables: dict,
 
     返回 (成功?, 原因)。
     """
-    from . import screenshot_actor
+    from . import imgio, screenshot_actor
     if stop is not None and stop.is_set():
         return False, "已手动停止"
 
@@ -921,9 +1026,9 @@ def run_manual_shot_step(p: dict, variables: dict,
         return False, "已取消保存"
 
     try:
-        import cv2
-        if not cv2.imwrite(path, img):
-            return False, f"图片写入失败：{path}"
+        if not imgio.imwrite(path, img):
+            return False, (f"图片写入失败：{path}"
+                           f"（{imgio.write_failure_reason(path)}）")
     except Exception as e:
         return False, f"保存失败：{type(e).__name__}: {e}"
 

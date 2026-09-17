@@ -11,7 +11,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.ui.main_window import auto_window_size
+from app.ui.main_window import MainWindow, auto_window_size
 
 
 class TestAutoWindowSize(unittest.TestCase):
@@ -295,6 +295,36 @@ class TestLogPanel(unittest.TestCase):
         cursor = panel._text.textCursor()
         cursor.movePosition(QTextCursor.Start)
         self.assertEqual(cursor.charFormat().foreground().color().name(), "#1668a8")
+
+
+class TestFlowStepsChangedWiring(unittest.TestCase):
+    """拖动步骤排序的信号接线：只落盘，不重注册热键。
+
+    用 MainWindow.__new__ 造壳对象（同 test_middle_menu_trigger 的做法），
+    避免拉起托盘 / 调度线程 / 全局键盘钩子。
+    """
+
+    def _shell(self):
+        win = MainWindow.__new__(MainWindow)
+        calls = {"register": 0, "save": 0}
+        win._register_hotkeys = lambda: calls.__setitem__("register", calls["register"] + 1)
+        win._save_timer = mock.Mock()
+        win._save_timer.start = lambda: calls.__setitem__("save", calls["save"] + 1)
+        return win, calls
+
+    def test_steps_changed_only_starts_save(self):
+        """拖动排序：只防抖落盘；热键与步骤无关，不该重注册全局钩子。"""
+        win, calls = self._shell()
+        win._on_flow_steps_changed()
+        self.assertEqual(calls["save"], 1)
+        self.assertEqual(calls["register"], 0)
+
+    def test_flow_changed_still_registers_hotkeys(self):
+        """对照：流程级改动（改名 / 改热键 / 增删流程）仍必须重注册热键。"""
+        win, calls = self._shell()
+        win._on_flow_changed()
+        self.assertEqual(calls["register"], 1)
+        self.assertEqual(calls["save"], 1)
 
 
 if __name__ == "__main__":

@@ -208,34 +208,91 @@ def broadcast_show_request() -> bool:
     return bool(ctypes.windll.user32.PostMessageW(HWND_BROADCAST, msg, 0, 0))
 
 
-def _win_msg_id(message) -> int | None:
-    """从 native event filter 传入的 message 指针里读出 Win32 消息 id。"""
-    try:
-        import ctypes
-        from ctypes import wintypes
-        m = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
-        return int(m.message)
-    except Exception:
-        return None
+# ---- 退出请求：让 restart_watchdog 能请主程序「优雅退出」而不是硬杀 ----
+#
+# Ctrl+R 重启时如果用 TerminateProcess 硬杀，aboutToQuit 不会触发：
+# 流程开着的浏览器（DrissionPage/Chrome）会残留、配置可能写一半。
+# 这里复用上面同一套注册消息机制：看门狗广播退出消息 → 主程序收到后调用
+# QApplication.quit()，正常走 aboutToQuit（关浏览器、收尾）再退出。
+# 消息名必须与 restart_watchdog.py 里的 QUIT_MESSAGE_NAME 完全一致。
+
+_QUIT_MESSAGE_NAME = "QingFengKeyMouseTool_Quit"
+
+
+def quit_request_message_id() -> int:
+    """注册「退出」跨进程消息，返回系统内唯一 id（同名注册返回同一 id）。"""
+    if sys.platform != "win32":
+        return 0
+    import ctypes
+    return int(ctypes.windll.user32.RegisterWindowMessageW(_QUIT_MESSAGE_NAME))
+
+
+def broadcast_quit_request() -> bool:
+    """广播「退出」消息，由已在运行的实例接收后正常退出（幂等，没人监听也无副作用）。"""
+    msg = quit_request_message_id()
+    if not msg:
+        return False
+    import ctypes
+    HWND_BROADCAST = 0xFFFF
+    return bool(ctypes.windll.user32.PostMessageW(HWND_BROADCAST, msg, 0, 0))
 
 
 class ShowRequestFilter(QAbstractNativeEventFilter):
-    """监听广播的「显示主窗口」消息，命中时回调（显示并置前主窗口）。"""
+    """监听广播消息：命中「显示主窗口」就显示并置前，命中「退出」就正常退出。
 
-    def __init__(self, on_show):
+    两个消息共用同一个过滤器（都是跨进程广播、都只在主线程回调里做一件事）：
+
+    - 「显示主窗口」（show_request_message_id）：二次启动时把已运行实例唤到前台。
+    - 「退出」（quit_request_message_id）：restart_watchdog 重启前请主程序优雅退出。
+      这是可选回调——不传 on_quit 时行为和以前完全一样。
+
+    ⚠️ 这个函数会被**每一条** Windows 消息调用一次——包括拖动时 OLE 拖拽循环
+    里那一大片消息。所以它必须是全程序最便宜的 Python 函数之一：早退分支只做
+    整数比较，绝不做 bytes() / ctypes.POINTER() / 结构体实例化这些每次都要
+    分配对象的事。
+
+    原来的写法每条消息都走 `bytes(event_type)` + `_win_msg_id()` 里的
+    `ctypes.cast(ptr, POINTER(MSG)).contents`（**每次都新建一个 MSG 对象**），
+    实测 3.66 µs/条，是现在这版的 14 倍。拖动时消息量极大，主线程几乎全耗在
+    这个过滤器里。
+    """
+
+    _WIN_GENERIC = b"windows_generic_MSG"
+
+    def __init__(self, on_show, on_quit=None):
         super().__init__()
         self._on_show = on_show
+        self._on_quit = on_quit          # 为空则忽略退出请求（老调用方 behavior 不变）
         self._msg = show_request_message_id()
+        self._quit_id = quit_request_message_id()
+        # 直接按字节偏移读 MSG.message，避免每次调用新建 MSG 结构体对象。
+        # 偏移从 ctypes 的类型描述里取，不写死魔数（x64 上是 8）。
+        try:
+            from ctypes import wintypes
+            self._id_off = wintypes.MSG.message.offset
+        except Exception:
+            self._id_off = 8
 
     def nativeEventFilter(self, event_type, message):
+        show_id = self._msg
+        quit_id = self._quit_id if self._on_quit is not None else 0
+        if event_type != self._WIN_GENERIC or not (show_id or quit_id):
+            return False, 0
         try:
-            is_win_msg = bytes(event_type) == b"windows_generic_MSG"
+            import ctypes
+            got = ctypes.c_uint.from_address(int(message) + self._id_off).value
         except Exception:
-            is_win_msg = event_type == "windows_generic_MSG"
-        if self._msg and is_win_msg and _win_msg_id(message) == self._msg:
+            return False, 0
+        if show_id and got == show_id:
             try:
                 self._on_show()
             except Exception:
                 _LOG.exception("响应二次启动置前失败")
+            return True, 0
+        if quit_id and got == quit_id:
+            try:
+                self._on_quit()
+            except Exception:
+                _LOG.exception("响应退出请求失败")
             return True, 0
         return False, 0

@@ -40,11 +40,24 @@
       "continue_on_fail": false,
       "pair_id": "",
       "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "",
+        "text": "",
+        "raw": false,
+        "show_type": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
     }
   ],
   "variables": [],
   "hotkey": "",
   "loops": 1,
   "created_seq": 8,
-  "order": 10
+  "order": 11
 }

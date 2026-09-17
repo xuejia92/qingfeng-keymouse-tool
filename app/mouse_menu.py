@@ -21,6 +21,19 @@ pynput 的 mouse.Listener 只有两种选择：`suppress=True` 会把**所有**�
 钩子数据里的 LLMHF_INJECTED 标志能区分「真实硬件点击」与「SendInput 合成的
 点击」。本工具流程里的中键步骤（input_actors.click(button="middle")）属于合成
 点击，会被直接放行忽略——否则「流程点中键 → 弹菜单 → 再触发流程」会形成反馈环。
+
+拖拽期间必须让位（2026-09-15）
+------------------------------
+钩子回调是 Python 且在**系统输入通路里同步执行**，一旦抢不到 GIL 就会卡住**所有**
+鼠标输入。而本程序自己的拖拽走 OLE `DoDragDrop`：主线程在那段原生模态循环里一直
+握着 GIL、不执行 Python 字节码，GIL 没有交接点 → 钩子线程饿死 → 鼠标输入被卡住 →
+拖动冻住（实测：装钩子时一次真实拖动只能推进 2~4 个事件、单次卡 1000ms 以上；
+同一份代码不装钩子 62 个事件、间隔中位 3ms）。
+
+因此拖拽前调 `pause()` 卸掉钩子、拖完 `unpause()` 装回来（见
+`MouseMenuWatcher.suspend`）。拖动过程中左键是按着的，中键菜单本来也不可能用到。
+注意：`sys.setswitchinterval(0.001)` 那种降低 GIL 切换间隔的办法**救不了**这种
+情况——它只是字节码边界上的检查点，主线程不在跑字节码时形同不存在。
 """
 from __future__ import annotations
 
@@ -76,6 +89,40 @@ def should_suppress(msg: int, flags: int) -> bool:
     只拦中键，不碰其它鼠标事件，避免影响用户正常操作。
     """
     return msg in _MIDDLE_MESSAGES and not is_injected(flags)
+
+
+# GIL 强制切换间隔：默认 5ms 太长，见 lower_gil_switch_interval() 的说明。
+_GIL_SWITCH_INTERVAL = 0.001
+
+
+def lower_gil_switch_interval() -> None:
+    """把 GIL 强制切换间隔降到 1ms（幂等，只在需要时下调）。
+
+    为什么必须做：低层鼠标钩子的回调是 **Python**，而它由系统在装载线程里
+    **同步**调用——Windows 会一直等到回调返回才继续处理鼠标输入。钩子线程要跑
+    Python 就得抢到 GIL，而 CPython 的 GIL 默认每 5ms 才强制切换一次、交接又
+    不公平：主线程一忙（拖动时密集跑原生消息过滤 + 拖放事件），钩子线程就得
+    等满 5ms 才轮得上，于是**每一条鼠标事件都被拖慢**、输入队列持续积压。
+
+    实测（本机，注入 ±2px 鼠标移动 + 自装 WH_MOUSE_LL 量
+    `GetTickCount() - MSLLHOOKSTRUCT.time`）：
+
+    | 场景 | 采样数 | 投递延迟中位 |
+    |---|---|---|
+    | 空载 | 868 | 0 ms |
+    | 另有一个线程占着 GIL（默认 5ms 间隔） | **44** | **16 ms** |
+    | 同上，但把间隔降到 1ms | **872** | **0 ms** |
+
+    这就是「拖动时鼠标发涩、按下与松开都迟钝」的成因：拖动中 OLE 拖拽循环
+    拿不到鼠标事件（实测用户机器上单条事件最长延迟 859ms），几秒才处理十几个
+    事件；一松手主线程不再跑 Python，钩子线程恢复正常，于是「再点一下就不卡了」。
+
+    代价：GIL 切换更频繁，纯 Python 计算会略有额外开销——本程序不是 CPU 密集
+    型，可以忽略；不装钩子时（中键菜单关闭）根本不会调用这里。
+    """
+    import sys
+    if sys.getswitchinterval() > _GIL_SWITCH_INTERVAL:
+        sys.setswitchinterval(_GIL_SWITCH_INTERVAL)
 
 
 # 句柄在 64 位下是 8 字节指针，而 ctypes.windll 默认按 c_int(4 字节) 解释返回值，
@@ -136,6 +183,11 @@ class MouseMenuWatcher(QObject):
         self._lock = threading.Lock()
         self._ready = threading.Event()
         self._started_ok = False
+        # _enabled = 用户希望它开着（开关状态）；_suspended = 临时让位（见 suspend）
+        self._enabled = False
+        self._suspended = False
+        global _watcher
+        _watcher = self          # 供拖拽路径临时 pause/unpause（同一进程只有一个）
 
     # ---------- 对外接口 ----------
     def is_running(self) -> bool:
@@ -151,9 +203,55 @@ class MouseMenuWatcher(QObject):
             return self._suppress
 
     def start(self) -> bool:
+        """启用监听（用户开关打开、或启动时调用）。"""
+        self._enabled = True
+        if self._suspended:
+            return False
+        return self._ensure_running()
+
+    def stop(self) -> None:
+        """关闭监听（用户开关关闭、或退出时调用）；同时取消任何临时让位。"""
+        self._enabled = False
+        self._suspended = False
+        self._stop_thread()
+
+    def suspend(self) -> bool:
+        """**临时**卸载钩子，返回是否真的卸掉了（配对 restore）。
+
+        为什么必须有这个开关：低层鼠标钩子的回调由系统在装载线程里**同步**调用，
+        Windows 会一直等它返回才继续投递鼠标输入；而回调是 Python、必须抢到 GIL。
+        本程序自己的拖拽（OLE 的 DoDragDrop）会让**主线程连握着 GIL 待在那个原生
+        模态循环里**——那段时间主线程不执行 Python 字节码，GIL 就没有交接点，
+        钩子线程永远拿不到 GIL，于是输入被卡住、拖动冻住（实测：装着钩子时一次
+        真实拖动只能推进 2~4 个事件、单次卡 1000ms；不装钩子同一份代码 62 个事件、
+        间隔中位 3ms）。1ms 的 GIL 切换间隔救不了这种情况（那也只是字节码边界的
+        检查点）。
+
+        所以拖拽期间主动把钩子卸掉，拖完再装回来：中键菜单在拖动过程中本来也用不到
+        （那时左键按着），而输入通路立刻恢复顺畅。
+        """
+        if not self._enabled or self._suspended:
+            return False
+        self._suspended = True
+        running = self.is_running()
+        self._stop_thread()
+        return running
+
+    def restore(self) -> None:
+        """与 suspend 配对：恢复监听（用户已把开关关掉时不再恢复）。"""
+        if not self._suspended:
+            return
+        self._suspended = False
+        if self._enabled:
+            self._ensure_running()
+
+    def _ensure_running(self) -> bool:
         """启动监听线程，返回钩子是否装载成功（失败不影响程序其它功能）。"""
         if self.is_running():
             return True
+        # 装钩子前先把 GIL 切换间隔降下来，否则钩子线程会抢不到 GIL 而拖慢
+        # 整个鼠标输入通路（详见 lower_gil_switch_interval 的说明）。
+        lower_gil_switch_interval()
         self._ready.clear()
         self._started_ok = False
         self._thread = threading.Thread(target=self._run, name="MouseMenuHook",
@@ -164,8 +262,8 @@ class MouseMenuWatcher(QObject):
             log.warning("中键菜单监听未启动（低层鼠标钩子装载失败）")
         return bool(self._started_ok)
 
-    def stop(self) -> None:
-        """停止监听：向钩子线程投递退出消息并卸载钩子。"""
+    def _stop_thread(self) -> None:
+        """停止监听线程并卸载钩子。"""
         tid, self._thread_id = self._thread_id, 0
         if tid:
             try:
@@ -247,3 +345,23 @@ class MouseMenuWatcher(QObject):
         if self.suppress() and should_suppress(w_param, flags):
             return True
         return False
+
+
+# ---- 拖拽期间临时让位（详见 MouseMenuWatcher.suspend）----
+# 进程内只有一个监听器，由 MouseMenuWatcher.__init__ 登记，供拖拽路径调用。
+_watcher: "MouseMenuWatcher | None" = None
+
+
+def pause() -> bool:
+    """临时卸载全局鼠标钩子（拖动开始时调用），返回是否真的卸掉了。
+
+    拖动走 OLE 的 DoDragDrop，主线程会一直握着 GIL 待在那个原生模态循环里，
+    Python 钩子回调拿不到 GIL 就把整个鼠标输入通路卡住。拖拽期间先让位。
+    """
+    return bool(_watcher is not None and _watcher.suspend())
+
+
+def unpause() -> None:
+    """与 pause 配对（拖动结束时调用）。"""
+    if _watcher is not None:
+        _watcher.restore()

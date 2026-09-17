@@ -16,7 +16,6 @@ from __future__ import annotations
 import os
 import time
 
-import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QPen
@@ -266,7 +265,9 @@ class CaptureOverlay(QWidget):
         else:
             try:
                 path = self._save_crop(sel)
-            except Exception:
+            except Exception as e:
+                from .logbus import log
+                log(f"模板保存失败：{e}")     # 别静默吞掉，否则用户只看到「没反应」
                 self.cancelled.emit()
                 self.close()
                 return
@@ -276,7 +277,8 @@ class CaptureOverlay(QWidget):
         self.close()
 
     def _save_crop(self, sel: QRect) -> str:
-        """把窗口逻辑选区映射回物理像素并保存。"""
+        """把窗口逻辑选区映射回物理像素并保存。失败抛 OSError（由调用方提示）。"""
+        from . import imgio
         sx = self._img.shape[1] / max(self.width(), 1)
         sy = self._img.shape[0] / max(self.height(), 1)
         x0 = int(round(sel.x() * sx))
@@ -287,7 +289,10 @@ class CaptureOverlay(QWidget):
         os.makedirs(TEMPLATE_DIR, exist_ok=True)
         name = f"tpl_{time.strftime('%Y%m%d_%H%M%S')}.png"
         path = os.path.join(TEMPLATE_DIR, name)
-        cv2.imwrite(path, crop)
+        # 注意：不能直接 cv2.imwrite —— 模板目录在程序目录下（中文路径），
+        # cv2 会静默失败，用户拿到一个并不存在的模板路径。
+        if not imgio.imwrite(path, crop):
+            raise OSError(f"写入失败：{path}（{imgio.write_failure_reason(path)}）")
         return path
 
     # ---------- 调整辅助 ----------

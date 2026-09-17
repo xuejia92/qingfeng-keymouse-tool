@@ -30,6 +30,7 @@ from .tasks import (run_app_step, run_click_step, run_clip_get_step,
                     run_ocr_step, run_press_step,
                     run_py_func_step, run_qq_mail_step, run_script_step,
                     run_screenshot_step,
+                    run_shot_translate_step,
                     run_speech_step,
                     run_text_find_step,
                     run_var_step, run_wait_image_step, run_wait_text_step,
@@ -440,6 +441,8 @@ class FlowRunner(QObject):
             return run_log_step(step.params, vars.values)
         elif step.type == "ocr":
             return run_ocr_step(step.params, vars.values, self._stop)
+        elif step.type == "shot_translate":
+            return run_shot_translate_step(step.params, vars.values, self._stop)
         elif step.type == "text_find":
             return run_text_find_step(step.params, vars.values, self._stop)
         elif step.type == "wait_text":

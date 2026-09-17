@@ -46,7 +46,7 @@ MODULE_GROUPS = [
                                 "http_request", "deepseek", "script", "qq_mail",
                                 "float_image"]),
     ("input",    "键鼠操作",   ["click", "press", "find"]),
-    ("perceive", "目标识别",   ["ocr", "text_find", "wait_text", "screenshot",
+    ("perceive", "目标识别",   ["ocr", "shot_translate", "text_find", "wait_text", "screenshot",
                                 "manual_shot", "find_image",
                                 "wait_image", "yolo_detect", "color_pick"]),
     # DrissionPage 可视化网页自动化（dp_actors.py）：浏览器对象管理 + 元素操作 +
@@ -89,6 +89,7 @@ def _clone_flow(flow: Flow) -> Flow:
 
 class FlowTab(QWidget):
     changed = Signal()               # 流程配置增删改
+    stepsChanged = Signal()          # 仅步骤顺序/内容变化：只需落盘，不必刷新其它页
     runningStateChanged = Signal()   # 任一流程运行状态变化
     flowStarted = Signal()           # 有流程开始运行（含单步执行），供主窗口清空日志
 
@@ -796,7 +797,10 @@ class FlowTab(QWidget):
                                                        self.cfg.presser))
             flow.steps.insert(row, step)
         self._reload_steps()
-        self.changed.emit()
+        # 拖入模块只动了 flow.steps：发 stepsChanged 即可（只落盘）。
+        # 走 changed 会连带重注册全部全局热键、并重建定时任务页/中键菜单页的列表，
+        # 那些页面只显示流程名，与步骤无关 —— 每次拖入白花十几毫秒（2026-09-15）。
+        self.stepsChanged.emit()
 
     def _insert_block_pair(self, flow: Flow, open_type: str, row: int):
         """把起始块（if/foreach/while）与其结束标记成对插入到 row 位置。
@@ -896,7 +900,10 @@ class FlowTab(QWidget):
                 flow.steps[:] = original
                 self._status_msg("不能把步骤拖出循环/条件块边界：" + errors[0], 6000)
             else:
-                self.changed.emit()
+                # 拖动只改了步骤顺序：流程名/分组/热键/轮数都没变，左栏条目也不显示
+                # 步骤，所以只需触发落盘。走 changed 会连带重注册全部全局热键并重建
+                # 定时任务页、中键菜单页的列表——那部分对拖动排序毫无意义。
+                self.stepsChanged.emit()
             self._reload_steps()
         QTimer.singleShot(0, apply)
 
@@ -923,7 +930,9 @@ class FlowTab(QWidget):
                 if repair_web_pairs(flow.steps):
                     self._status_msg("已解除旧的网页配对标记（网页步骤现已独立）", 4000)
                 self._reload_steps()
-                self.changed.emit()
+                # 步骤参数只写进 flow.steps：发 stepsChanged（只落盘 + 重绘右栏）。
+                # 步骤名不参与任何其它页面的显示，无需重注册热键或刷新那两个页面。
+                self.stepsChanged.emit()
 
         dlg.finished.connect(_finished)
         dlg.show()
@@ -969,7 +978,7 @@ class FlowTab(QWidget):
             del flow.steps[row]
         repair_web_pairs(flow.steps)   # 兼容遗留：删除后即时清理残留的网页配对标记
         self._reload_steps()
-        self.changed.emit()
+        self.stepsChanged.emit()       # 只删了步骤：不必刷新热键与其它页面（同上）
 
     def _confirm_del_step(self, flow, row) -> bool:
         """删除步骤前的确认弹窗。
@@ -1089,7 +1098,7 @@ class FlowTab(QWidget):
         step = flow.steps[row]
         step.commented = not step.commented
         self._reload_steps()
-        self.changed.emit()
+        self.stepsChanged.emit()       # 只改了步骤的注释位：同上
 
     # ---------- 区域框选链（步骤参数对话框 -> 主窗口隐藏 -> 遮罩 -> 回写） ----------
     def _capture_region_for_step(self, dlg: StepParamsDialog):

@@ -19,6 +19,7 @@ from app.config import (AppConfig, AUTO_STEP_TYPES, FLOW_STEP_TYPES, Flow, FlowS
                         default_step_params)
 from app.conditions import validate_condition_structure
 from app.ui import flow_tab as flow_tab_mod
+from app.ui.flow_dialog import StepRunDelegate
 from app.ui.flow_tab import (BRANCH_TYPES, INDENT_UNIT, MODULE_GROUPS, FlowTab)
 from tests._env import TempConfigPaths
 
@@ -895,18 +896,41 @@ class TestLoopBlockOrderRollback(_LoopFlowMixin, unittest.TestCase):
         self.assertEqual(changed, [])          # 未触发 changed（不落盘脏数据）
 
     def test_reorder_within_block_applies(self):
-        """块内交换步骤顺序合法：应用新顺序并触发 changed。"""
+        """块内交换步骤顺序合法：应用新顺序，且只发 stepsChanged。
+
+        拖动排序只改了步骤，流程名/分组/热键都没变，所以刻意不发 changed——
+        发了会让主窗口重注册全部全局热键并重建定时任务页、中键菜单页的列表，
+        每次拖放都白做一轮（曾导致拖动明显发顿）。
+        """
         self.flow.steps = [FlowStep(type="foreach"), FlowStep(type="click"),
                            FlowStep(type="press"), FlowStep(type="endForeach")]
         self.tab._reload_steps()
         changed = []
+        steps_changed = []
         self.tab.changed.connect(lambda: changed.append(1))
+        self.tab.stepsChanged.connect(lambda: steps_changed.append(1))
         self._set_list_order([0, 2, 1, 3])     # 交换 click / press
         self.tab._on_order_changed()
         self._pump()
         self.assertEqual(self._types(),
                          ["foreach", "press", "click", "endForeach"])
-        self.assertEqual(len(changed), 1)
+        self.assertEqual(len(steps_changed), 1)
+        self.assertEqual(changed, [])
+
+    def test_reorder_breaking_boundary_emits_nothing(self):
+        """回滚路径不得发任何信号，否则会拿未落盘的脏顺序去覆盖配置。"""
+        self.flow.steps = [FlowStep(type="foreach"), FlowStep(type="wait"),
+                           FlowStep(type="endForeach"), FlowStep(type="wait")]
+        self.tab._reload_steps()
+        changed = []
+        steps_changed = []
+        self.tab.changed.connect(lambda: changed.append(1))
+        self.tab.stepsChanged.connect(lambda: steps_changed.append(1))
+        self._set_list_order([2, 0, 1, 3])
+        self.tab._on_order_changed()
+        self._pump()
+        self.assertEqual(changed, [])
+        self.assertEqual(steps_changed, [])
 
 
 class TestLoopStepDialogs(unittest.TestCase):
@@ -1140,6 +1164,466 @@ class TestCloseAppFailCheckbox(unittest.TestCase):
         dlg.continue_box.setChecked(True)
         dlg.apply_to(step)
         self.assertTrue(step.continue_on_fail)
+
+
+def _start_drag_distance() -> int:
+    from PySide6.QtWidgets import QApplication
+    return QApplication.startDragDistance()
+
+
+class TestModuleButtonDragGuard(unittest.TestCase):
+    """模块按钮起拖的两个前置条件：超过系统拖拽阈值 + 同一时刻只允许一次拖拽。
+
+    为什么必须有互斥：drag.exec() 在落点不接受本 MIME 时会**立刻返回**，而鼠标
+    还按着；原来每次 mouseMove 都会新建一个 QDrag 再走一遍 OLE DoDragDrop
+    （每次几十毫秒的 COM 初始化），鼠标划过模块面板/流程树上方时被反复触发，
+    表现为「按下拖动、松开鼠标都卡」。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from app.ui import flow_dialog
+        self.drag_calls = []
+
+        class FakeDrag:
+            def __init__(self, source):
+                self.source = source
+                self.mime = None
+                self.actions = None
+                self.drag_calls.append(self)
+
+            def setMimeData(self, mime):
+                self.mime = mime
+
+            def exec(self, actions):
+                self.actions = actions
+                return actions
+
+        FakeDrag.drag_calls = self.drag_calls
+        patcher = mock.patch.object(flow_dialog, "QDrag", FakeDrag)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.btn = flow_dialog.ModuleButton("click", "鼠标点击")
+        self.mime_type = flow_dialog.MIME_TYPE
+
+    def _press(self, x=10, y=10):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QEvent
+        self.btn.mousePressEvent(QMouseEvent(
+            QEvent.MouseButtonPress, QPointF(x, y), QPointF(x, y),
+            Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+
+    def _move(self, x, y):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QEvent
+        self.btn.mouseMoveEvent(QMouseEvent(
+            QEvent.MouseMove, QPointF(x, y), QPointF(x, y),
+            Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+
+    def _release(self, x=10, y=10):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QEvent
+        self.btn.mouseReleaseEvent(QMouseEvent(
+            QEvent.MouseButtonRelease, QPointF(x, y), QPointF(x, y),
+            Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+
+    def test_move_without_press_does_not_drag(self):
+        """没按下过左键就移动：不起拖（原来会起拖）。"""
+        self._move(200, 200)
+        self.assertEqual(len(self.drag_calls), 0)
+
+    def test_small_jitter_does_not_drag(self):
+        """按下后只抖 1~2px：不起拖，按钮还能正常点。"""
+        self._press(10, 10)
+        self._move(11, 11)
+        self._move(12, 11)
+        self.assertEqual(len(self.drag_calls), 0)
+
+    def test_move_beyond_threshold_starts_one_drag(self):
+        """超过系统拖拽阈值：起拖一次，MIME 携带该模块的步骤类型。"""
+        self._press(10, 10)
+        self._move(10 + _start_drag_distance() + 5, 10)
+        self.assertEqual(len(self.drag_calls), 1)
+        data = bytes(self.drag_calls[0].mime.data(self.mime_type)).decode()
+        self.assertEqual(data, "click")
+
+    def test_no_second_drag_while_button_still_held(self):
+        """exec 返回后鼠标仍按着：后续移动不得再起拖（原来每次都起拖）。"""
+        self._press(10, 10)
+        self._move(100, 10)
+        self.assertEqual(len(self.drag_calls), 1)
+        for x in range(110, 200, 10):
+            self._move(x, 10)
+        self.assertEqual(len(self.drag_calls), 1)
+
+    def test_new_press_allows_new_drag(self):
+        """松手再按下：允许再起一次拖（互斥标记必须被复位）。"""
+        self._press(10, 10)
+        self._move(100, 10)
+        self._release(100, 10)
+        self._move(150, 10)                    # 未按下，不该起拖
+        self.assertEqual(len(self.drag_calls), 1)
+        self._press(10, 10)
+        self._move(100, 10)
+        self.assertEqual(len(self.drag_calls), 2)
+
+
+class TestDragHintRepaintScope(_TempPathsMixin, unittest.TestCase):
+    """拖动插入辅助线只重绘「窄带」，不再整表重绘。
+
+    为什么要有这条：辅助线只有 3px 高，旧实现每次都把整个视口（12 行）标脏，
+    实测 8ms/次；拖动时鼠标每跨一行就触发一次，是拖动发顿的主要绘制开销。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp_enter()
+        self.cfg = AppConfig()
+        self.cfg.flow_groups = []
+        self.cfg.collapsed_flow_groups = []
+        self.cfg.collapsed_module_groups = []
+        self.cfg.flows = [Flow(name="拖动流程", steps=[
+            FlowStep(type="wait", params=default_step_params("wait")) for _ in range(6)])]
+        self.tab = FlowTab(self.cfg)
+        self.tab.resize(1000, 700)
+        self.tab.show()
+        self._app.processEvents()
+        self.sl = self.tab.step_list
+        self.assertEqual(self.sl.count(), 6)
+
+    def tearDown(self):
+        self.tab.hide()
+        self._temp_exit()
+
+    def _hint_at(self, row: int):
+        """模拟鼠标拖到第 row 行的**下半行**（落点应插到该行之后，即 row+1）。"""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QDragMoveEvent
+        rect = self.sl.visualItemRect(self.sl.item(row))
+        y = rect.center().y() + max(1, rect.height() // 4)   # 明确落在下半行
+        mime = self.sl.model().mimeData([self.sl.model().index(0, 0)])
+        ev = QDragMoveEvent(QPoint(40, y), Qt.MoveAction, mime,
+                            Qt.LeftButton, Qt.NoModifier)
+        ev.setDropAction(Qt.MoveAction)
+        return ev
+
+    def test_hint_rect_is_thin_strip(self):
+        """脏区高度 7px、宽度铺满，远小于整个视口。"""
+        for row in (0, 3, self.sl.count()):
+            r = self.sl._hint_rect(row)
+            self.assertEqual(r.height(), 7, f"row={row} 应只标脏 7px 高")
+            self.assertEqual(r.width(), self.sl.viewport().width())
+            self.assertLess(r.height(), self.sl.viewport().height() / 10)
+
+    def test_hint_rect_none_is_empty(self):
+        """没有辅助线时不标脏任何区域。"""
+        self.assertTrue(self.sl._hint_rect(None).isNull())
+
+    def test_hint_y_matches_painted_line(self):
+        """paintEvent 画的 y 必须与 _hint_y 一致，否则窄带会画到别处。"""
+        for row in range(self.sl.count()):
+            self.assertEqual(self.sl._hint_y(row),
+                             self.sl.visualItemRect(self.sl.item(row)).top())
+        last = self.sl.count()
+        self.assertEqual(self.sl._hint_y(last),
+                         self.sl.visualItemRect(self.sl.item(last - 1)).bottom() + 1)
+
+    def test_hint_y_empty_list(self):
+        self.sl.clear()
+        self.assertEqual(self.sl._hint_y(0), 6)
+
+    def test_update_hint_repaints_only_old_and_new_rows(self):
+        """换行只重绘旧线与新线所在的两条窄带，不整表重绘。"""
+        painted = []
+        with mock.patch.object(self.sl, "_repaint_hint",
+                               side_effect=lambda row: painted.append(row)):
+            self.sl._update_drop_hint(self._hint_at(1))     # 第一次：无旧线
+            self.assertEqual(painted, [None, 2])
+            painted.clear()
+            self.sl._update_drop_hint(self._hint_at(4))     # 第二次：2 -> 5
+            self.assertEqual(painted, [2, 5])
+
+    def test_same_row_does_not_repaint(self):
+        """落点行没变就不重绘（鼠标在同一条缝里抖动不该刷屏）。"""
+        self.sl._drop_row_hint = 2
+        painted = []
+        with mock.patch.object(self.sl, "_repaint_hint",
+                               side_effect=lambda row: painted.append(row)):
+            self.sl._update_drop_hint(self._hint_at(1))     # 仍是插到第 2 行
+            self.assertEqual(painted, [])
+
+    def test_clear_hint_repaints_old_strip(self):
+        """离开/落下时把旧线那条窄带擦掉。"""
+        self.sl._drop_row_hint = 3
+        painted = []
+        with mock.patch.object(self.sl, "_repaint_hint",
+                               side_effect=lambda row: painted.append(row)):
+            self.sl._clear_drop_hint()
+        self.assertEqual(painted, [3])
+        self.assertIsNone(self.sl._drop_row_hint)
+
+
+class TestHoverRepaintScope(_TempPathsMixin, unittest.TestCase):
+    """悬停高亮只重绘那一行的「▶ 执行」按钮矩形，不再整表重绘。
+
+    悬停只改按钮配色，而旧实现每次换行都 `viewport().update()`（整表 8ms）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp_enter()
+        self.cfg = AppConfig()
+        self.cfg.flow_groups = []
+        self.cfg.collapsed_flow_groups = []
+        self.cfg.collapsed_module_groups = []
+        self.cfg.flows = [Flow(name="悬停流程", steps=[
+            FlowStep(type="wait", params=default_step_params("wait")) for _ in range(5)])]
+        self.tab = FlowTab(self.cfg)
+        self.tab.resize(1000, 700)
+        self.tab.show()
+        self._app.processEvents()
+        self.sl = self.tab.step_list
+        self.assertEqual(self.sl.count(), 5)
+
+    def tearDown(self):
+        self.tab.hide()
+        self._temp_exit()
+
+    def _move_to_row(self, row: int):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+        rect = self.sl.visualItemRect(self.sl.item(row))
+        y = rect.center().y()
+        self.sl.mouseMoveEvent(QMouseEvent(
+            QEvent.MouseMove, QPointF(40, y), QPointF(40, y),
+            Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+
+    def test_button_rect_is_small(self):
+        """按钮矩形远小于整个视口——这是「只重绘它」值得做的前提。"""
+        rect = StepRunDelegate.button_rect(self.sl.visualItemRect(self.sl.item(0)))
+        self.assertEqual((rect.width(), rect.height()),
+                         (StepRunDelegate.BTN_W, StepRunDelegate.BTN_H))
+        self.assertLess(rect.width() * rect.height(),
+                        self.sl.viewport().width() * self.sl.viewport().height() / 50)
+
+    def test_hover_change_repaints_only_two_rows(self):
+        painted = []
+        with mock.patch.object(self.sl, "_repaint_run_button",
+                               side_effect=lambda row: painted.append(row)):
+            self._move_to_row(1)
+            self.assertEqual(painted, [-1, 1])
+            painted.clear()
+            self._move_to_row(3)
+            self.assertEqual(painted, [1, 3])
+
+    def test_same_row_does_not_repaint(self):
+        self.sl._hover_row = 2
+        painted = []
+        with mock.patch.object(self.sl, "_repaint_run_button",
+                               side_effect=lambda row: painted.append(row)):
+            self._move_to_row(2)
+        self.assertEqual(painted, [])
+
+    def test_leave_repaints_old_row_only(self):
+        from PySide6.QtCore import QEvent
+        self.sl._hover_row = 2
+        painted = []
+        with mock.patch.object(self.sl, "_repaint_run_button",
+                               side_effect=lambda row: painted.append(row)):
+            self.sl.leaveEvent(QEvent(QEvent.Leave))
+        self.assertEqual(painted, [2])
+        self.assertEqual(self.sl._hover_row, -1)
+
+    def test_repaint_run_button_ignores_bad_rows(self):
+        """越界行 / 占位空行不标脏（占位行没有 UserRole，不画按钮）。"""
+        from PySide6.QtWidgets import QListWidgetItem
+        for row in (-1, 99, None):
+            self.sl._repaint_run_button(row)      # 不应抛异常
+        self.sl.clear()
+        self.sl.addItem(QListWidgetItem("（流程为空：把上方模块拖进来）"))
+        self.sl._repaint_run_button(0)            # 占位行：不标脏
+
+
+class TestStepSizeHintCache(_TempPathsMixin, unittest.TestCase):
+    """行尺寸必须缓存。
+
+    为什么：stepView 上挂了 QSS，走样式表的 `QStyledItemDelegate.sizeHint`
+    单次数百微秒；而拖动时 QListView 会**反复**重算行几何（插入位置、
+    visualRect、indexAt 都要用）。不缓存时实测每次鼠标移动 13.98ms
+    （同样部件去掉样式表/委托只要 0.04ms），输入通路被拖住 → 拖动卡顿。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp_enter()
+        self.cfg = AppConfig()
+        self.cfg.flow_groups = []
+        self.cfg.collapsed_flow_groups = []
+        self.cfg.collapsed_module_groups = []
+        self.cfg.flows = [Flow(name="尺寸流程", steps=[
+            FlowStep(type="wait", params=default_step_params("wait")) for _ in range(4)])]
+        self.tab = FlowTab(self.cfg)
+        self.tab.resize(1000, 700)
+        self.tab.show()
+        self._app.processEvents()
+        self.sl = self.tab.step_list
+        self.assertEqual(self.sl.count(), 4)
+
+    def tearDown(self):
+        self.tab.hide()
+        self._temp_exit()
+
+    def _opt(self):
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        opt = QStyleOptionViewItem()
+        opt.widget = self.sl
+        opt.rect = self.sl.viewport().rect()
+        return opt
+
+    def test_size_hint_reuses_cache_for_every_row(self):
+        """缓存生效后，任何一行都直接返回缓存值，不再向样式表求尺寸。"""
+        from PySide6.QtCore import QSize
+        d = StepRunDelegate(self.sl)
+        sentinel = QSize(321, 45)          # 明显不是真实行尺寸
+        d._size_cache = sentinel
+        for i in range(self.sl.count()):
+            self.assertEqual(d.sizeHint(self._opt(), self.sl.model().index(i, 0)),
+                             sentinel)
+
+    def test_cached_size_equals_uncached(self):
+        """缓存不能改变结果：和直接问样式表拿到的尺寸一致。"""
+        from PySide6.QtWidgets import QStyledItemDelegate
+        d = StepRunDelegate(self.sl)
+        opt = self._opt()
+        idx = self.sl.model().index(0, 0)
+        cached = d.sizeHint(opt, idx)
+        d.invalidate_size_cache()
+        self.assertEqual(cached, QStyledItemDelegate.sizeHint(d, opt, idx))
+
+    def test_invalidate_clears_cache(self):
+        d = StepRunDelegate(self.sl)
+        d.sizeHint(self._opt(), self.sl.model().index(0, 0))
+        self.assertIsNotNone(d._size_cache)
+        d.invalidate_size_cache()
+        self.assertIsNone(d._size_cache)
+
+    def test_uniform_item_sizes_enabled(self):
+        """所有行等高 → 打开 uniformItemSizes，让 QListView 复用首行尺寸。"""
+        self.assertTrue(self.sl.uniformItemSizes())
+
+    def test_font_and_style_change_invalidate_cache(self):
+        """字体/样式变了行高会变，必须让委托重算。
+
+        注意：不能断言「缓存变成 None」——`super().event()` 处理完这类事件后
+        QListView 往往立刻重新布局并再次调用 sizeHint，缓存马上又被填上。
+        这里直接盯「invalidate_size_cache 被调用了」。
+        """
+        from PySide6.QtCore import QEvent
+        d = self.sl.itemDelegate()
+        calls = []
+        with mock.patch.object(d, "invalidate_size_cache",
+                               side_effect=lambda: calls.append(1)):
+            self.sl.event(QEvent(QEvent.FontChange))
+            self.sl.event(QEvent(QEvent.StyleChange))
+        self.assertEqual(len(calls), 2)
+
+
+class TestStepOnlyEditsEmitStepsChanged(_TempPathsMixin, unittest.TestCase):
+    """纯步骤改动只发 stepsChanged、不发 changed（性能约定，2026-09-15）。
+
+    为什么要钉这条：发 changed 会让主窗口重注册全部全局热键，并重建定时任务页、
+    中键菜单页的列表（实测十几毫秒），而那两个页面只显示流程名、与步骤无关。
+    拖动排序一直遵守这条；本类把「拖入模块 / 删步骤 / 切注释 / 改步骤参数」也钉上，
+    避免以后顺手写回 changed 又让每次操作白做一轮。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp_enter()
+        self.cfg = AppConfig()
+        self.cfg.collapsed_module_groups = []
+        flow = Flow(name="计数流程")
+        flow.steps = [FlowStep(type="wait", params=default_step_params("wait")),
+                      FlowStep(type="log", params=default_step_params("log"))]
+        self.cfg.flows = [flow]
+        self.tab = FlowTab(self.cfg)          # 构造时自动选中唯一流程
+        self.flow = self.cfg.flows[0]
+        self.changed = []
+        self.steps_changed = []
+        self.tab.changed.connect(lambda: self.changed.append(1))
+        self.tab.stepsChanged.connect(lambda: self.steps_changed.append(1))
+
+    def tearDown(self):
+        self._temp_exit()
+
+    def test_drag_in_module_emits_only_steps_changed(self):
+        self.tab._on_step_dropped("wait", 1)
+        self.assertEqual([s.type for s in self.flow.steps], ["wait", "wait", "log"])
+        self.assertEqual(self.steps_changed, [1])
+        self.assertEqual(self.changed, [])
+
+    def test_delete_step_emits_only_steps_changed(self):
+        self.tab.step_list.setCurrentRow(0)
+        with mock.patch.object(FlowTab, "_confirm_del_step", return_value=True):
+            self.tab._del_step()
+        self.assertEqual([s.type for s in self.flow.steps], ["log"])
+        self.assertEqual(self.steps_changed, [1])
+        self.assertEqual(self.changed, [])
+
+    def test_toggle_comment_emits_only_steps_changed(self):
+        self.tab.step_list.setCurrentRow(0)
+        self.tab._toggle_comment_step()
+        self.assertTrue(self.flow.steps[0].commented)
+        self.assertEqual(self.steps_changed, [1])
+        self.assertEqual(self.changed, [])
+
+    def test_edit_step_param_emits_only_steps_changed(self):
+        """改步骤参数只动 flow.steps：走 stepsChanged，不刷新热键与其它页面。"""
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.flow_dialog import StepParamsDialog
+        self.tab.step_list.setCurrentRow(1)
+        # 参数校验若不合格会弹模态框，offscreen 下会挂住 —— 一律替换成空 mock
+        with mock.patch.object(QMessageBox, "warning"), \
+                mock.patch.object(QMessageBox, "information"), \
+                mock.patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            self.tab._edit_step_param()
+            dlgs = self.tab.findChildren(StepParamsDialog)
+            self.assertTrue(dlgs, "参数对话框未打开")
+            dlgs[-1].accept()                 # 非模态：accept 触发 finished 保存
+        self.assertEqual(self.steps_changed, [1])
+        self.assertEqual(self.changed, [])
+
+    def test_flow_level_change_still_emits_changed(self):
+        """对照组：流程/分组级改动必须照旧发 changed（其它页面要按名字刷新）。"""
+        with mock.patch.object(AppConfig, "save"):
+            self.cfg.flow_groups = ["甲", "乙"]
+            self.tab._pin_group("乙")
+        self.assertEqual(self.cfg.flow_groups, ["乙", "甲"])
+        self.assertEqual(self.changed, [1])
+        self.assertEqual(self.steps_changed, [])
 
 
 if __name__ == "__main__":

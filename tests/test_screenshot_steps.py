@@ -83,13 +83,13 @@ class TestRunScreenshotStep(unittest.TestCase):
         grab.assert_called_once_with("region", "")
 
     def test_choose_mode(self):
-        """自选保存：ui_call 弹窗得到路径，cv2 写该路径，并把路径写入结果变量。"""
+        """自选保存：ui_call 弹窗得到路径，经 imgio 写该路径，并把路径写入结果变量。"""
         user_path = r"D:\pics\my.png"
         img = _img()
         variables = {}
         with mock.patch.object(screenshot_actor, "grab_image", return_value=img), \
              mock.patch.object(screenshot_actor, "ui_call", return_value=user_path) as ui, \
-             mock.patch("cv2.imwrite") as imw:
+             mock.patch("app.imgio.imwrite", return_value=True) as imw:
             ok, why = run_screenshot_step(dict(PARAMS, save_mode="choose", variable="shot"),
                                           variables)
         self.assertTrue(ok)
@@ -97,6 +97,15 @@ class TestRunScreenshotStep(unittest.TestCase):
         imw.assert_called_once_with(user_path, img)
         self.assertEqual(variables["shot"], user_path)
         self.assertIn(user_path, why)
+
+    def test_choose_mode_write_failure(self):
+        """自选保存写盘失败：步骤失败，不写变量也不谎报成功。"""
+        with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()), \
+             mock.patch.object(screenshot_actor, "ui_call", return_value=r"D:\pics\my.png"), \
+             mock.patch("app.imgio.imwrite", return_value=False):
+            ok, why = run_screenshot_step(dict(PARAMS, save_mode="choose", variable="shot"), {})
+        self.assertFalse(ok)
+        self.assertIn("写入失败", why)
 
     def test_choose_cancelled(self):
         """自选保存被取消：步骤失败。"""
@@ -120,7 +129,7 @@ class TestRunScreenshotStep(unittest.TestCase):
         variables = {}
         with mock.patch.object(screenshot_actor, "grab_image", return_value=_img()), \
              mock.patch.object(screenshot_actor, "ui_call", return_value=user_path), \
-             mock.patch("cv2.imwrite"):
+             mock.patch("app.imgio.imwrite", return_value=True):
             ok, why = run_screenshot_step(dict(PARAMS, save_mode="choose", variable=""),
                                           variables)
         self.assertTrue(ok)

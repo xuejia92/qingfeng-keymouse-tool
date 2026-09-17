@@ -4,18 +4,6 @@
   "group": "测试使用",
   "steps": [
     {
-      "type": "var",
-      "name": "变量",
-      "params": {
-        "name": "aaa",
-        "type": "string",
-        "default_value": ""
-      },
-      "continue_on_fail": false,
-      "pair_id": "",
-      "commented": false
-    },
-    {
       "type": "deepseek",
       "name": "DeepSeek 对话",
       "params": {
@@ -47,11 +35,23 @@
       "continue_on_fail": false,
       "pair_id": "",
       "commented": false
+    },
+    {
+      "type": "var",
+      "name": "变量",
+      "params": {
+        "name": "aaa",
+        "type": "string",
+        "default_value": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
     }
   ],
   "variables": [],
   "hotkey": "",
   "loops": 1,
   "created_seq": 7,
-  "order": 9
+  "order": 1
 }

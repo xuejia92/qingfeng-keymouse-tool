@@ -38,16 +38,15 @@
     "中键菜单": 2
   },
   "collapsed_flow_groups": [
-    "111",
-    "测试使用"
+    "111"
   ],
   "clear_log_on_run": true,
-  "log_print_only": false,
+  "log_print_only": true,
   "collapsed_module_groups": [
+    "app_web",
     "condition",
     "drission",
     "input",
-    "perceive",
     "python"
   ],
   "module_group_titles": {},
@@ -86,6 +85,14 @@
       "icon": "camera",
       "flow_id": "79e891f0a720",
       "flow_name": "截图并悬浮",
+      "separator_before": true
+    },
+    {
+      "id": "4f104280bae4",
+      "label": "截图谷歌翻译",
+      "icon": "target",
+      "flow_id": "bb3313283d5a",
+      "flow_name": "截图谷歌翻译",
       "separator_before": true
     }
   ]

@@ -17,7 +17,6 @@ import os
 import threading
 import time
 
-import cv2
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
 
@@ -132,12 +131,15 @@ def grab_image(mode: str, region: str = "") -> np.ndarray:
 def save_jietu(img: np.ndarray) -> str:
     """保存截图到 <程序目录>/templates/jietu/（目录不存在自动创建）。
 
-    文件名：截图_yyyyMMdd_HHmmss.png。返回绝对路径。
+    文件名：截图_yyyyMMdd_HHmmss.png。返回绝对路径；**写盘失败抛 OSError**
+    （不再像以前那样默默返回一个并不存在的路径，让流程误以为保存成功）。
     """
+    from . import imgio
     os.makedirs(JIETU_DIR, exist_ok=True)
     name = f"截图_{time.strftime('%Y%m%d_%H%M%S')}.png"
     path = os.path.join(JIETU_DIR, name)
-    cv2.imwrite(path, img)
+    if not imgio.imwrite(path, img):
+        raise OSError(f"写入失败：{path}（{imgio.write_failure_reason(path)}）")
     return path
 
 

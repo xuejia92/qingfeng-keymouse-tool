@@ -8,17 +8,20 @@ from __future__ import annotations
 import os
 import subprocess
 
-from PySide6.QtCore import Qt, QPoint, QRect, Signal, QMimeData
+from PySide6.QtCore import Qt, QEvent, QPoint, QRect, Signal, QMimeData
 from PySide6.QtGui import QColor, QDrag, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
+                               QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
                                QPlainTextEdit, QPushButton, QRadioButton, QSpinBox,
                                QStyle, QStyledItemDelegate, QStyleOptionViewItem,
                                QToolTip, QVBoxLayout, QWidget)
 
-from ..config import VARIABLE_TYPES, WEB_ACTIONS, Flow, FlowStep
+from ..config import (TRANSLATE_LANGUAGES, TRANSLATE_TARGET_LANGUAGES,
+                      VARIABLE_TYPES, WEB_ACTIONS, Flow, FlowStep)
 from .. import hotkey_policy
+from .. import mouse_menu
 from ..conditions import check_condition_variables
 from ..dp_actors import (DP_ELE_ACTIONS, DP_LISTEN_ACTIONS, DP_LOCATORS,
                          DP_MATCHES, DP_TAB_MODES)
@@ -27,7 +30,7 @@ from .hotkey_edit import HotkeyEdit
 
 MIME_TYPE = "application/x-qf-flow-type"
 
-_TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "text_find": "🔍",
+_TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "shot_translate": "🌏", "text_find": "🔍",
                "wait_text": "⏳",
                "screenshot": "📷", "manual_shot": "📸",
                "find_image": "🎯", "wait_image": "👀",
@@ -48,22 +51,59 @@ _TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "text_find": "🔍",
 
 
 class ModuleButton(QPushButton):
-    """可拖拽的模块按钮：拖动时携带步骤类型 MIME。"""
+    """可拖拽的模块按钮：拖动时携带步骤类型 MIME。
+
+    起拖必须同时满足两个条件，缺一个都会让「按住拖动」卡住界面：
+    1. 位移超过系统拖拽阈值（QApplication.startDragDistance()）。原来只要鼠标
+       一动（哪怕 1px 抖动）就起拖，按钮几乎点不动。
+    2. 当前没有正在进行的拖拽（_dragging 互斥）。drag.exec() 在落点不接受本
+       MIME 时会**立刻返回**，而鼠标还按着——下一次 mouseMove 又会新建一个
+       QDrag 再走一遍 OLE DoDragDrop（每次几十毫秒的 COM 初始化）。鼠标在
+       模块面板/流程树上方划过时会被反复触发，表现为按下与松开鼠标都卡。
+    """
 
     def __init__(self, step_type: str, text: str, parent=None):
         super().__init__(f"{_TYPE_ICONS[step_type]} {text}", parent)
         self._type = step_type
         self.setToolTip("拖到左侧步骤列表中")
+        self._press_pos = None
+        self._dragging = False
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._press_pos = ev.position()
+        super().mousePressEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        self._press_pos = None
+        super().mouseReleaseEvent(ev)
 
     def mouseMoveEvent(self, ev):
-        if ev.buttons() & Qt.LeftButton:
+        if (self._dragging or self._press_pos is None
+                or not (ev.buttons() & Qt.LeftButton)):
+            super().mouseMoveEvent(ev)
+            return
+        moved = (ev.position() - self._press_pos).manhattanLength()
+        if moved < QApplication.startDragDistance():
+            super().mouseMoveEvent(ev)
+            return
+        self._dragging = True
+        try:
             drag = QDrag(self)
             mime = QMimeData()
             mime.setData(MIME_TYPE, self._type.encode())
             drag.setMimeData(mime)
-            drag.exec(Qt.CopyAction)
-        else:
-            super().mouseMoveEvent(ev)
+            # 拖拽期间让出全局鼠标钩子，否则钩子的 Python 回调抢不到 GIL
+            # 会把整条鼠标输入通路卡住（详见 mouse_menu.pause）
+            paused = mouse_menu.pause()
+            try:
+                drag.exec(Qt.CopyAction)
+            finally:
+                if paused:
+                    mouse_menu.unpause()
+        finally:
+            self._dragging = False
+            self._press_pos = None      # 松手后必须重新按下才能再起拖
 
 
 class StepRunDelegate(QStyledItemDelegate):
@@ -78,6 +118,39 @@ class StepRunDelegate(QStyledItemDelegate):
     def __init__(self, list_view, parent=None):
         super().__init__(parent)
         self._list = list_view
+        self._size_cache = None      # 行尺寸缓存，见 sizeHint
+
+    def sizeHint(self, option, index):
+        """行尺寸只向样式表问一次，之后复用（**这是拖动不卡的关键**）。
+
+        为什么必须缓存：stepView 上挂了 QSS（`QListWidget#stepView::item
+        { height: 38px; }`），只要走了样式表，`QStyledItemDelegate.sizeHint`
+        每次调用都要重新解析样式规则算内容尺寸，单次数百微秒。而拖动时
+        QListView 会**反复**重算行几何——算插入位置、visualRect、indexAt 都要用，
+        于是每一次鼠标移动都要重算十几行。
+
+        实测（真实 SendInput 拖动，量的是 SetCursorPos 单次耗时，空闲基准 0.011ms）：
+
+        | 部件 | 每次鼠标移动 |
+        |---|---|
+        | 带样式表 + 本委托（缓存前） | **13.98 ms** |
+        | 同样的部件去掉样式表/委托 | 0.04 ms |
+        | 朴素 QListWidget | 0.03 ms |
+
+        也就是说：输入通路被这个 sizeHint 拖住了，拖动时鼠标事件成串积压
+        （实测最长延迟 859ms），表现就是「按下拖动、松开鼠标都卡」。
+
+        所有行等高（高度由 QSS 统一指定），缓存一次即正确；字体/样式变化时由
+        StepList 调用 invalidate_size_cache() 重算。
+        """
+        size = self._size_cache
+        if size is None:
+            size = self._size_cache = super().sizeHint(option, index)
+        return size
+
+    def invalidate_size_cache(self) -> None:
+        """字体或样式变了要重算行高（由 StepList 在收到对应事件时调用）。"""
+        self._size_cache = None
 
     @classmethod
     def button_rect(cls, item_rect: QRect) -> QRect:
@@ -137,9 +210,21 @@ class StepList(QListWidget):
         self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.setDefaultDropAction(Qt.MoveAction)
+        # 所有行等高（高度由 QSS 统一指定）：让 QListView 复用首行尺寸，
+        # 拖动时不再逐行问 sizeHint（配合 StepRunDelegate.sizeHint 的缓存，
+        # 把「每次鼠标移动 14ms」拉回 0.04ms 量级）。
+        self.setUniformItemSizes(True)
         self._drop_row_hint: int | None = None
         self._hover_row = -1
         self._press_run_row: int | None = None
+
+    def event(self, ev):
+        # 字体/样式变化会让缓存的行高失效，清掉让委托重算一次
+        if ev.type() in (QEvent.FontChange, QEvent.StyleChange):
+            delegate = self.itemDelegate()
+            if isinstance(delegate, StepRunDelegate):
+                delegate.invalidate_size_cache()
+        return super().event(ev)
 
     # ---------- 「▶ 执行」单步按钮 ----------
     def _run_btn_rect_at(self, pos):
@@ -176,15 +261,47 @@ class StepList(QListWidget):
         idx = self.indexAt(ev.position().toPoint())
         row = idx.row() if idx.isValid() else -1
         if row != self._hover_row:
+            old = self._hover_row
             self._hover_row = row
-            self.viewport().update()
+            # 悬停只影响那一行右侧「▶ 执行」按钮的配色，整视口重绘是浪费：
+            # 实测整表 8ms/次，而只重绘两个按钮矩形 <0.1ms。
+            self._repaint_run_button(old)
+            self._repaint_run_button(row)
         super().mouseMoveEvent(ev)
 
     def leaveEvent(self, ev):
         if self._hover_row != -1:
+            old = self._hover_row
             self._hover_row = -1
-            self.viewport().update()
+            self._repaint_run_button(old)
         super().leaveEvent(ev)
+
+    def _repaint_run_button(self, row) -> None:
+        if row is None or row < 0 or row >= self.count():
+            return
+        item = self.item(row)
+        if item is None or item.data(Qt.UserRole) is None:
+            return
+        rect = StepRunDelegate.button_rect(self.visualItemRect(item))
+        # 按钮描边/圆角各留 1px 余量
+        self.viewport().update(rect.adjusted(-2, -2, 2, 2))
+
+    def startDrag(self, supported_actions):
+        """内部拖动排序：拖动期间临时卸掉全局鼠标钩子（见 mouse_menu.pause）。
+
+        拖动走 OLE 的 DoDragDrop，主线程在这段原生模态循环里一直握着 GIL、
+        且不执行 Python 字节码 —— 而全局鼠标钩子的回调是 Python、必须拿到 GIL
+        才能返回，Windows 又要等它返回才继续投递鼠标输入。两者互锁，表现就是
+        拖动冻住（实测：装钩子时一次真实拖动只推进 2~4 个事件、单次卡 1000ms
+        以上；同一份代码不装钩子 62 个事件、间隔中位 3ms）。拖动期间左键按着，
+        中键菜单本来也用不到，先让位给输入通路。
+        """
+        paused = mouse_menu.pause()
+        try:
+            super().startDrag(supported_actions)
+        finally:
+            if paused:
+                mouse_menu.unpause()
 
     # QListWidget 默认只接受模型数据/URL 格式，自定义 MIME 必须显式放行
     def _accepted(self, ev) -> bool:
@@ -210,8 +327,9 @@ class StepList(QListWidget):
 
     def _clear_drop_hint(self):
         if self._drop_row_hint is not None:
+            old = self._drop_row_hint
             self._drop_row_hint = None
-            self.viewport().update()
+            self._repaint_hint(old)
 
     def _update_drop_hint(self, ev):
         """记录插入位置：落点在条目上半行插到其前，下半行插到其后。"""
@@ -222,8 +340,33 @@ class StepList(QListWidget):
             if ev.position().y() > rect.center().y():
                 row += 1
         if row != self._drop_row_hint:
+            old = self._drop_row_hint
             self._drop_row_hint = row
-            self.viewport().update()
+            # 只重绘「旧线所在窄带」和「新线所在窄带」：辅助线只有 3px 高，
+            # 却原来每次都把整个视口（12 行）标脏重画。拖动时鼠标每跨一行就
+            # 触发一次，整表重绘实测 6.8ms/次，拖动过程因此明显发顿。
+            self._repaint_hint(old)
+            self._repaint_hint(row)
+
+    def _hint_y(self, row: int) -> int:
+        """辅助线所在的 y 坐标（paintEvent 与局部重绘共用，必须保持一致）。"""
+        if self.count() == 0:
+            return 6
+        if row >= self.count():
+            return self.visualItemRect(self.item(self.count() - 1)).bottom() + 1
+        return self.visualItemRect(self.item(row)).top()
+
+    def _hint_rect(self, row):
+        """辅助线需要重绘的窄带（线宽 3，上下各留 2px 余量）。"""
+        if row is None:
+            return QRect()
+        y = self._hint_y(row)
+        return QRect(0, y - 3, self.viewport().width(), 7)
+
+    def _repaint_hint(self, row) -> None:
+        r = self._hint_rect(row)
+        if not r.isEmpty():
+            self.viewport().update(r)
 
     def _drop_row(self, ev) -> int:
         if self._drop_row_hint is not None:
@@ -259,11 +402,7 @@ class StepList(QListWidget):
         from PySide6.QtGui import QColor, QPainter, QPen
         p = QPainter(self.viewport())
         w = self.viewport().width()
-        if self.count() == 0 or row >= self.count():
-            y = (self.visualItemRect(self.item(self.count() - 1)).bottom() + 1
-                 if self.count() else 6)
-        else:
-            y = self.visualItemRect(self.item(row)).top()
+        y = self._hint_y(row)
         p.setPen(QPen(QColor(0, 145, 255), 3))
         p.drawLine(6, y, w - 6, y)
         p.setBrush(QColor(0, 145, 255))
@@ -1071,6 +1210,73 @@ class StepParamsDialog(QDialog):
             self.ocr_variable.setToolTip("识别结果保存到该变量（多行=列表，单行=字符串）")
             form.addRow("结果变量", self.ocr_variable)
             self._var_combo_hint(form)
+
+        elif t == "shot_translate":
+            # 区域不预设：与「手动截图」一致，运行时由用户框选（2026-09-15 改）
+            region_hint = QLabel("截图区域不预设：运行到这一步会先隐藏本窗口，"
+                                 "由你直接在屏幕上框选要翻译的位置（Esc 取消）。")
+            region_hint.setStyleSheet("color: #8a939c;")
+            region_hint.setWordWrap(True)
+            form.addRow("", region_hint)
+
+            lang_row = QHBoxLayout()
+            self.st_source = QComboBox()
+            for k, v in TRANSLATE_LANGUAGES.items():
+                self.st_source.addItem(v, k)
+            self.st_source.setToolTip("识别文字的源语言；不确定就保持「自动检测」")
+            self.st_target = QComboBox()
+            for k, v in TRANSLATE_TARGET_LANGUAGES.items():
+                self.st_target.addItem(v, k)
+            self.st_target.setToolTip("译文语言")
+            lang_row.addWidget(self.st_source, 1)
+            lang_row.addWidget(QLabel("→"))
+            lang_row.addWidget(self.st_target, 1)
+            form.addRow("翻译语言", lang_row)
+
+            self.st_merge = QCheckBox("多行合并为一段后再翻译（译文更通顺，但不再与原文逐行对齐）")
+            self.st_merge.setToolTip("不勾选：保留换行，译文与原文逐行对应（适合字幕、菜单）；\n"
+                                     "勾选：整块并成一段再翻译，上下文完整、译文更连贯（适合整段文字）")
+            form.addRow("", self.st_merge)
+
+            self.st_notify = QCheckBox("翻译后弹出通知浮窗显示结果")
+            self.st_notify.setToolTip("浮窗置顶但不抢焦点，文字可选中复制；不影响流程继续执行")
+            self.st_notify.toggled.connect(
+                lambda on: self.st_notify_sec.setEnabled(on))
+            form.addRow("", self.st_notify)
+            self.st_notify_sec = self._dspin(0, 600, " 秒")
+            self.st_notify_sec.setSpecialValueText("0 = 只能手动关闭")
+            self.st_notify_sec.setEnabled(False)
+            form.addRow("浮窗停留", self.st_notify_sec)
+
+            self.st_clip = QCheckBox("把译文复制到剪贴板")
+            form.addRow("", self.st_clip)
+
+            # 结果变量放最后：下拉选择已有变量（由「变量」步骤声明）
+            self.st_variable = self._var_combo("（译文变量）")
+            self.st_variable.setToolTip("译文保存到该变量（字符串）")
+            form.addRow("译文变量", self.st_variable)
+            self.st_source_var = self._var_combo("（不保存原文）")
+            self.st_source_var.setToolTip("识别出的原文也存一份到该变量；留空则不保存。\n"
+                                          "填了原文变量时，通知浮窗会同时显示原文与译文。")
+            form.addRow("原文变量", self.st_source_var)
+            self._var_combo_hint(form)
+
+            self.st_timeout = self._dspin(1, 120, " 秒")
+            self.st_timeout.setValue(10)
+            self.st_timeout.setToolTip("单次翻译请求的超时时间；超时后会自动重试一轮")
+            form.addRow("请求超时", self.st_timeout)
+
+            self.st_proxy = QLineEdit()
+            self.st_proxy.setPlaceholderText("如 http://127.0.0.1:7890（留空 = 直连）")
+            self.st_proxy.setToolTip("本机无法直连谷歌时填写；不带 http:// 会自动补上")
+            form.addRow("代理", self.st_proxy)
+
+            hint = QLabel("需要 RapidOCR 才能识别文字：pip install rapidocr_onnxruntime\n"
+                          "翻译走谷歌的免密接口，无需申请 API Key。\n"
+                          "区域内没识别到文字时本步判失败，可勾选下方的「失败后继续」。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
 
         elif t == "text_find":
             self.tf_text = QLineEdit()
@@ -2772,8 +2978,8 @@ class StepParamsDialog(QDialog):
 
         root.addLayout(form)
 
-        if t in ("find", "web", "close_app"):
-            # find/web 默认不勾（失败终止）；close_app 默认勾选（关闭失败不弹提示、继续跑）
+        if t in ("find", "web", "close_app", "shot_translate"):
+            # find/web/shot_translate 默认不勾（失败终止）；close_app 默认勾选（关闭失败不弹提示、继续跑）
             if t == "close_app":
                 text = "运行失败后继续运行后续流程"
                 tip = ("勾选（默认）：本步关闭失败时不弹出任何提示窗口，跳过本步继续执行后续步骤；\n"
@@ -3392,6 +3598,19 @@ class StepParamsDialog(QDialog):
             self.ocr_lang.setCurrentIndex(max(0, self.ocr_lang.findData(p.get("lang", "ch"))))
             self.ocr_multi.setChecked(bool(p.get("multi_ocr", True)))
             self._set_region_text(p.get("region", "") or "")
+        elif t == "shot_translate":
+            # 无区域回填：截图区域运行时由用户框选
+            self._set_combo_value(self.st_source, p.get("source_lang", "") or "auto")
+            self._set_combo_value(self.st_target, p.get("target_lang", "") or "zh-CN")
+            self.st_merge.setChecked(bool(p.get("merge_lines")))
+            self.st_notify.setChecked(bool(p.get("show_notify")))
+            self.st_notify_sec.setValue(float(p.get("notify_seconds", 0) or 0))
+            self.st_notify_sec.setEnabled(self.st_notify.isChecked())
+            self.st_clip.setChecked(bool(p.get("copy_clipboard")))
+            self._set_combo_value(self.st_variable, p.get("variable", "") or "")
+            self._set_combo_value(self.st_source_var, p.get("source_var", "") or "")
+            self.st_timeout.setValue(float(p.get("timeout_sec", 10) or 10))
+            self.st_proxy.setText(p.get("proxy", "") or "")
         elif t == "text_find":
             self.tf_text.setText(p.get("text", "") or "")
             self._set_region_text(p.get("region", "") or "")
@@ -3752,6 +3971,22 @@ class StepParamsDialog(QDialog):
                 "multi_ocr": self.ocr_multi.isChecked(),
                 "region": getattr(self, "_region", step.params.get("region", "")) or "",
             })
+        elif t == "shot_translate":
+            # 区域已改为运行时框选：顺手清掉旧流程残留的 region，避免留个看不懂的死参数
+            step.params.pop("region", None)
+            step.params.update({
+                "source_lang": self._combo_value(self.st_source) or "auto",
+                "target_lang": self._combo_value(self.st_target) or "zh-CN",
+                "variable": self._combo_value(self.st_variable),
+                "source_var": self._combo_value(self.st_source_var),
+                "merge_lines": self.st_merge.isChecked(),
+                "show_notify": self.st_notify.isChecked(),
+                "notify_seconds": round(self.st_notify_sec.value(), 1),
+                "copy_clipboard": self.st_clip.isChecked(),
+                "timeout_sec": round(self.st_timeout.value(), 1),
+                "proxy": self.st_proxy.text().strip(),
+            })
+            step.continue_on_fail = self.continue_box.isChecked()
         elif t == "text_find":
             step.params.update({
                 "text": self.tf_text.text().strip(),

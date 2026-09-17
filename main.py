@@ -102,8 +102,10 @@ def main() -> int:
     window = MainWindow(cfg, manager)
     tray = TrayIcon(window)
     tray.show()
-    # 二次启动置前：监听广播消息，收到后显示主窗口（隐藏到托盘时也能唤醒）
-    _show_filter = ShowRequestFilter(window.show_window)
+    # 二次启动置前 + 响应看门狗的重启：监听广播消息。收到「显示」就显示主窗口
+    # （隐藏到托盘时也能唤醒）；收到「退出」走正常退出流程——aboutToQuit 会关掉
+    # 流程残留的浏览器、收尾线程，而不是被 TerminateProcess 硬杀。
+    _show_filter = ShowRequestFilter(window.show_window, on_quit=app.quit)
     app.installNativeEventFilter(_show_filter)
     start_capture(lambda: cfg)   # 定时截屏 + 邮箱上报后台线程
     if autostart:
