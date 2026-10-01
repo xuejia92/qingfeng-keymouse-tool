@@ -34,11 +34,43 @@
       "continue_on_fail": false,
       "pair_id": "",
       "commented": false
+    },
+    {
+      "type": "shutdown",
+      "name": "定时关机",
+      "params": {
+        "trigger_mode": "condition",
+        "at_time": "",
+        "at_time_if_passed": "next_day",
+        "count_hours": 0,
+        "count_minutes": 0,
+        "count_seconds": 20,
+        "cond_mode": "text",
+        "image": "",
+        "image_path": "",
+        "confidence": 0.85,
+        "text": "13914905231",
+        "tolerance": 0.8,
+        "region": "63,1319,136,59",
+        "interval_sec": 1.0,
+        "cond_timeout_sec": 0.0,
+        "hold_sec": 0.0,
+        "power_action": "lock",
+        "warn_sec": 20,
+        "warn_overlay": true,
+        "warn_overlay_font_size": 16,
+        "force_close_apps": true,
+        "dry_run": true
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
     }
   ],
   "variables": [],
   "hotkey": "",
   "loops": 1,
   "created_seq": 14,
-  "order": 0
+  "async_run": false,
+  "order": 1
 }

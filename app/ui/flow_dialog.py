@@ -1,15 +1,16 @@
 """流程编辑相关控件：可拖模块按钮、步骤列表、步骤参数对话框、流程元信息对话框。
 
 编排主界面在 FlowTab 的右栏完成（拖入 / 排序 / 双击改参数）；
-FlowMetaDialog 只负责流程名 / 运行轮数 / 启停热键。
+FlowMetaDialog 只负责流程名 / 运行轮数 / 执行方式（同步排队 / 异步并行）/ 启停热键。
 """
 from __future__ import annotations
 
 import os
 import subprocess
 
-from PySide6.QtCore import Qt, QEvent, QPoint, QRect, Signal, QMimeData
-from PySide6.QtGui import QColor, QDrag, QFont, QPainter, QPen, QPixmap
+from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QTimer, Signal, QMimeData
+from PySide6.QtGui import (QColor, QDrag, QFont, QKeySequence, QPainter, QPen,
+                           QPixmap)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
@@ -18,19 +19,33 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QStyle, QStyledItemDelegate, QStyleOptionViewItem,
                                QToolTip, QVBoxLayout, QWidget)
 
-from ..config import (TRANSLATE_LANGUAGES, TRANSLATE_TARGET_LANGUAGES,
-                      VARIABLE_TYPES, WEB_ACTIONS, Flow, FlowStep)
+from ..config import (ASYNC_MARK, ASYNC_TIP, PRESS_HOLD_DEFAULT_MS,
+                      POWER_ACTIONS, SHUTDOWN_TRIGGER_MODES, STATUS_LOG_LEVEL_LABELS,
+                      STATUS_LOG_LEVELS,
+                      TRANSLATE_LANGUAGES,
+                      TRANSLATE_TARGET_LANGUAGES, VARIABLE_TYPES, WEB_ACTIONS,
+                      WHILE_ITER_INTERVAL_DEFAULT_SEC,
+                      Flow, FlowStep, format_duration, parse_at_time,
+                      shutdown_countdown_seconds)
 from .. import hotkey_policy
 from .. import mouse_menu
 from ..conditions import check_condition_variables
 from ..dp_actors import (DP_ELE_ACTIONS, DP_LISTEN_ACTIONS, DP_LOCATORS,
                          DP_MATCHES, DP_TAB_MODES)
 from ..web_actors import LAUNCH_MODES, TAB_SCOPES
+from . import theme
+from .frameless import FramelessDialog
 from .hotkey_edit import HotkeyEdit
+from .widgets import polish_form, set_variant
 
 MIME_TYPE = "application/x-qf-flow-type"
 
-_TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "shot_translate": "🌏", "text_find": "🔍",
+# item 上存放「还没设置的必填参数」提示列表的自定义 role：
+# 列表渲染时由 FlowTab 写入，委托读取后给该行画红框（同时用作 tooltip）。
+_STEP_MISSING_ROLE = Qt.UserRole + 1
+
+_TYPE_ICONS = {"var": "📦", "log": "📄", "status_log": "🖥",
+               "ocr": "🔎", "shot_translate": "🌏", "text_find": "🔍",
                "wait_text": "⏳",
                "screenshot": "📷", "manual_shot": "📸",
                "find_image": "🎯", "wait_image": "👀",
@@ -39,10 +54,11 @@ _TYPE_ICONS = {"var": "📦", "log": "📄", "ocr": "🔎", "shot_translate": "�
                "click": "🖱", "press": "⌨", "find": "🖼",
                "wait": "⏱", "web": "🌐", "http_request": "📡", "deepseek": "🤖", "script": "📜", "notify": "🔔", "speech": "🔊", "qq_mail": "📧", "app": "🚀", "close_app": "⏹",
                "float_image": "📌",
+               "shutdown": "🔌",
                "clip_set": "📤", "clip_get": "📥", "py_func": "🐍",
                "if": "🔀", "elseif": "🔁", "else": "↩️", "endif": "🏁",
-               "foreach": "🔄", "while": "♻️",
-               "endForeach": "🏁", "endWhile": "🏁",
+               "foreach": "🔄", "for": "🔢", "while": "♻️",
+               "endForeach": "🏁", "endFor": "🏁", "endWhile": "🏁",
                "break": "🛑", "continue": "⏭️", "exit": "🔚",
                "dp_browser": "🖥", "dp_element": "🧩", "dp_tab": "🗂",
                "dp_listen": "🎧", "dp_page_shot": "📸", "dp_ele_shot": "🎞",
@@ -107,13 +123,16 @@ class ModuleButton(QPushButton):
 
 
 class StepRunDelegate(QStyledItemDelegate):
-    """在步骤行右侧绘制「▶ 执行」单步按钮。
+    """在步骤行右侧绘制「▶ 执行」单步按钮，并给「必填参数没填」的步骤画红框。
 
     按钮跟随行绘制（拖拽排序、增删步骤时自动跟随，不会像 setItemWidget 那样丢失）；
     点击检测由 StepList 完成，命中后发射 stepRunRequested 信号。
+    红框由 FlowTab 渲染列表时写入 item 的 `_STEP_MISSING_ROLE`（缺失项列表）触发。
     """
 
-    BTN_W, BTN_H, RIGHT_GAP = 58, 22, 8
+    # 「▶ 执行」按钮尺寸：步骤行高改成 28px（= FLOW_ROW_H，与左右栏一致）后，
+    # 按钮跟着收小一圈，免得在行里挤得慌（2026-10-01）。
+    BTN_W, BTN_H, RIGHT_GAP = 54, 20, 8
 
     def __init__(self, list_view, parent=None):
         super().__init__(parent)
@@ -164,25 +183,35 @@ class StepRunDelegate(QStyledItemDelegate):
         super().paint(painter, opt, index)
         if index.data(Qt.UserRole) is None:      # 空流程占位行不画按钮
             return
+        # 「必填参数没填」的步骤：整行描一圈红框（列表渲染时写进 _STEP_MISSING_ROLE）
+        if index.data(_STEP_MISSING_ROLE):
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(QColor(theme.token("danger")), 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(option.rect.adjusted(1, 1, -1, -1), 6, 6)
+            painter.restore()
         r = self.button_rect(option.rect)
         enabled = bool(option.state & QStyle.State_Enabled)
         pressed = getattr(self._list, "_press_run_row", None) == index.row()
         hovered = getattr(self._list, "_hover_row", -1) == index.row()
         if pressed:
-            bg, border, text = QColor("#1668a8"), QColor("#125a92"), QColor("white")
+            bg, border, text = QColor(theme.token("primary")), QColor(theme.token("primary_pressed")), QColor("white")
         elif not enabled:
-            bg, border, text = QColor("#f2f3f5"), QColor("#d8dee4"), QColor("#a7afb8")
+            bg, border, text = QColor(theme.token("hover_bg")), QColor(theme.token("border")), QColor(theme.token("text_muted"))
         elif hovered:
-            bg, border, text = QColor("#e8f1fa"), QColor("#8ab8d8"), QColor("#125a92")
+            bg, border, text = QColor(theme.token("primary_soft")), QColor(theme.token("primary_hover")), QColor(theme.token("primary_pressed"))
         else:
-            bg, border, text = QColor("#ffffff"), QColor("#b9d3e8"), QColor("#1668a8")
+            bg, border, text = QColor(theme.token("card_bg")), QColor(theme.token("primary_hover")), QColor(theme.token("primary"))
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(QPen(border, 1))
         painter.setBrush(bg)
         painter.drawRoundedRect(r, 4, 4)
         f = painter.font()
-        f.setPointSizeF(8.5)
+        # 字号跟随全局字体百分比，但**不得超过按钮高度**：按钮尺寸是固定像素
+        #（BTN_H，行高只有 30px，跟着字号长大会顶出行外），所以取小值兜住。
+        f.setPointSizeF(min(theme.scaled_pt(8.5), self.BTN_H * 0.55))
         painter.setFont(f)
         painter.setPen(text)
         painter.drawText(r, Qt.AlignCenter, "▶ 执行")
@@ -203,12 +232,17 @@ class StepList(QListWidget):
     stepDropped = Signal(str, int)   # (步骤类型, 插入行)
     orderChanged = Signal()
     stepRunRequested = Signal(int)   # 单步执行：步骤行号
+    copyRequested = Signal()         # Ctrl+C：复制选中步骤（逻辑在 FlowTab）
+    pasteRequested = Signal()        # Ctrl+V：粘贴到当前行之后（逻辑在 FlowTab）
+    undoRequested = Signal()         # Ctrl+Z：撤销上一步操作（逻辑在 FlowTab）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        # 支持 Ctrl 点选 / Shift 范围多选：多选后可一次删除多个步骤（2026-09-26 用户要求）。
+        # 内部拖拽排序不受影响；块结构完整性由删除时的校验与排序后的回滚兜底。
+        self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.setDefaultDropAction(Qt.MoveAction)
         # 所有行等高（高度由 QSS 统一指定）：让 QListView 复用首行尺寸，
         # 拖动时不再逐行问 sizeHint（配合 StepRunDelegate.sizeHint 的缓存，
@@ -225,6 +259,23 @@ class StepList(QListWidget):
             if isinstance(delegate, StepRunDelegate):
                 delegate.invalidate_size_cache()
         return super().event(ev)
+
+    def keyPressEvent(self, ev):      # noqa: N802（Qt 命名）
+        # Ctrl+C / Ctrl+V / Ctrl+Z：复制 / 粘贴 / 撤销。只在焦点落在这个列表时才拦，
+        # 不抢其它输入框的常规快捷键；真正的逻辑在 FlowTab（本类只管交互）。
+        if ev.matches(QKeySequence.Copy):
+            self.copyRequested.emit()
+            ev.accept()
+            return
+        if ev.matches(QKeySequence.Paste):
+            self.pasteRequested.emit()
+            ev.accept()
+            return
+        if ev.matches(QKeySequence.Undo):
+            self.undoRequested.emit()
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
 
     # ---------- 「▶ 执行」单步按钮 ----------
     def _run_btn_rect_at(self, pos):
@@ -411,8 +462,8 @@ class StepList(QListWidget):
         p.drawPolygon([QPoint(w - 2, y - 6), QPoint(w - 2, y + 6), QPoint(w - 12, y)])
 
 
-class FlowMetaDialog(QDialog):
-    """新建/编辑流程：流程名、所属分组、运行轮数、启停热键。
+class FlowMetaDialog(FramelessDialog):
+    """新建/编辑流程：流程名、所属分组、运行轮数、执行方式、启停热键。
 
     groups 为 None 时不显示分组行（外部未提供分组列表的场景）。
     """
@@ -427,7 +478,8 @@ class FlowMetaDialog(QDialog):
         self._fill(flow)
 
     def _build(self):
-        form = QFormLayout(self)
+        # 表单留白走统一节奏（与设置页同一组间距常量），各弹窗/页面的疏密才一致
+        form = polish_form(QFormLayout(self.body()))
         self.name_edit = QLineEdit()
         form.addRow("流程名称", self.name_edit)
         if self._groups:
@@ -440,6 +492,21 @@ class FlowMetaDialog(QDialog):
         self.loops_spin.setRange(0, 9999)
         self.loops_spin.setSpecialValueText("0 = 无限循环")
         form.addRow("运行轮数", self.loops_spin)
+        # 执行方式：默认同步（排队依次执行），勾选后异步（不排队、可与其它流程并行）
+        self.async_check = QCheckBox("异步执行")
+        self.async_check.setToolTip(
+            "不勾（默认）：同步执行——按先后顺序排队，同一时刻只跑一个流程。\n"
+            "若启动时有别的流程正在运行，本流程会排到队尾，等前面跑完自动开始。\n\n"
+            "勾选：异步执行——无需排队，立即开始，可与其它流程并行运行。\n"
+            "适合各干各的、互不干扰的流程（如定时抓数据）；\n"
+            "两个流程都要操作鼠标键盘时建议仍用同步，避免互相抢输入。")
+        form.addRow("执行方式", self.async_check)
+        self.async_hint = QLabel()
+        self.async_hint.setWordWrap(True)
+        self.async_hint.setStyleSheet("color: #8a939c;")
+        form.addRow("", self.async_hint)
+        self.async_check.toggled.connect(self._refresh_async_hint)
+        self._refresh_async_hint()
         self.hotkey_edit = HotkeyEdit()
         self.hotkey_edit.setMaximumWidth(220)
         self.hotkey_edit.set_conflict_checker(
@@ -453,12 +520,24 @@ class FlowMetaDialog(QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
 
+    def _refresh_async_hint(self):
+        """执行方式说明随勾选状态变化：让用户一眼看懂「排队」还是「并行」。"""
+        if self.async_check.isChecked():
+            self.async_hint.setText(
+                "当前：异步执行 —— 运行时不排队，立即开始，可与其它流程并行运行。")
+        else:
+            self.async_hint.setText(
+                "当前：同步执行（默认）—— 运行时按先后顺序排队；"
+                "若已有流程在运行，本流程排到队尾，等前面结束后自动开始。")
+
     def _fill(self, flow: Flow):
         self.name_edit.setText(flow.name)
         if self._groups:
             idx = self.group_combo.findData(flow.group)
             self.group_combo.setCurrentIndex(max(0, idx))
         self.loops_spin.setValue(int(flow.loops))
+        self.async_check.setChecked(bool(flow.async_run))
+        self._refresh_async_hint()
         self.hotkey_edit.set_hotkey(flow.hotkey)
 
     def apply_to(self, flow: Flow) -> None:
@@ -466,10 +545,11 @@ class FlowMetaDialog(QDialog):
         if self._groups:
             flow.group = self.group_combo.currentData() or ""
         flow.loops = self.loops_spin.value()
+        flow.async_run = self.async_check.isChecked()
         flow.hotkey = self.hotkey_edit.hotkey()
 
 
-class ProcessPickerDialog(QDialog):
+class ProcessPickerDialog(FramelessDialog):
     """选择正在运行的进程（供「关闭应用」「打开应用」用）。
 
     每条显示「应用名 — 进程名 — 窗口标题」，窗口标题用于区分多开实例；
@@ -485,7 +565,7 @@ class ProcessPickerDialog(QDialog):
                             else "选择要带出的进程")
         self.setMinimumSize(460, 500)
 
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout(self.body())
         top_row = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("输入关键字过滤（进程名 / 应用名 / 窗口标题）…")
@@ -568,7 +648,7 @@ class ProcessPickerDialog(QDialog):
         return data.get("name", "") if data else ""
 
 
-class StepParamsDialog(QDialog):
+class StepParamsDialog(FramelessDialog):
     """按步骤类型编辑参数。"""
 
     regionCaptureRequested = Signal()    # find 步骤点"框选区域"
@@ -787,6 +867,22 @@ class StepParamsDialog(QDialog):
                     "--remote-debugging-port=端口号 → 确定，再用该端口启动浏览器；\n"
                     "这里的端口必须与 --remote-debugging-port 后面的数字一致（如 9333）。")
                 return
+        # 「打开浏览器」：调试端口留空=不带端口（兼容旧流程），填了就必须合法（1~65535）
+        if self._step.type == "dp_browser" and getattr(self, "dpb_port", None) is not None:
+            raw = self.dpb_port.text().strip()
+            if raw:
+                try:
+                    port = int(raw)
+                except ValueError:
+                    port = -1
+                if not (0 < port <= 65535):
+                    QMessageBox.warning(
+                        self, "调试端口不合法",
+                        "调试端口必须是 1~65535 之间的整数（默认 9333）。\n\n"
+                        "「接管已打开的浏览器」会连到该端口的浏览器；其它打开方式则给\n"
+                        "新启动的浏览器设上这个端口（等价 --remote-debugging-port）。\n"
+                        "确实不想带端口就把这一栏清空。")
+                    return
         # if / elseif / while：条件必填，且引用的变量必须已在此分支之前定义
         if self._step.type in ("if", "elseif", "while") and getattr(self, "cond_edit", None) is not None:
             cond = self.cond_edit.text().strip()
@@ -811,6 +907,23 @@ class StepParamsDialog(QDialog):
             if not self._combo_value(self.foreach_items):
                 QMessageBox.warning(self, "请选择数据源",
                                     "请选择要遍历的数据源变量（其值须为列表/字典/字符串）。")
+                return
+        # for：结束值必填、循环变量名必填、步长不能为 0
+        if self._step.type == "for" and getattr(self, "for_stop", None) is not None:
+            if not self._combo_value(self.for_stop):
+                QMessageBox.warning(self, "请填写结束值",
+                                    "「for 循环」需要知道数到哪个数为止：请填写「结束值」\n"
+                                    "（包含它本身，例如起始 1、结束 10 → 循环 10 轮）。")
+                return
+            if not self.for_var.text().strip():
+                QMessageBox.warning(self, "请填写循环变量名",
+                                    "「for 循环」需要把当前数值写入一个变量，请填写变量名。")
+                return
+            step_txt = self._combo_value(self.for_step) or "1"
+            if step_txt.strip() in ("0", "+0", "-0"):
+                QMessageBox.warning(self, "步长不能为 0",
+                                    "步长为 0 时循环永远数不到结束值，请填写非 0 的步长"
+                                    "（负数表示倒数）。")
                 return
         # DrissionPage「打开浏览器」：浏览器变量必填
         if self._step.type == "dp_browser" and getattr(self, "dpb_var", None) is not None:
@@ -868,6 +981,35 @@ class StepParamsDialog(QDialog):
                 QMessageBox.warning(self, "请填写切换条件",
                                     "请填写标签序号 / 标题 / 网址（新建标签时不需要）。")
                 return
+        # 定时关机：按触发方式校验必填项，避免「配完了却永远触发不了」
+        if self._step.type == "shutdown" and getattr(self, "sd_mode", None) is not None:
+            mode = self.sd_mode.currentData()
+            if mode == "at_time" and parse_at_time(self.sd_time.text()) is None:
+                QMessageBox.warning(self, "请填写关机时间",
+                                    "「指定时间点」需要填 24 小时制的时刻，如 23:30 / 7:05。")
+                return
+            if mode == "countdown":
+                secs = shutdown_countdown_seconds({
+                    "count_hours": self.sd_hours.value(),
+                    "count_minutes": self.sd_minutes.value(),
+                    "count_seconds": self.sd_seconds.value()})
+                if secs <= 0:
+                    QMessageBox.warning(self, "请设置倒计时时长",
+                                        "倒计时的「时 / 分 / 秒」至少填一项且大于 0。\n"
+                                        "例如只想等 10 分钟，就填 0 时 10 分 0 秒。")
+                    return
+            if mode == "condition":
+                if self.sd_cond_mode.currentData() == "text":
+                    if not self.sd_text.text().strip():
+                        QMessageBox.warning(self, "请填写目标文字",
+                                            "「条件触发 · 出现指定文字」需要填写要等待出现的文字"
+                                            "（可用 $变量名 引用）。")
+                        return
+                elif not (getattr(self, "_image", "") or getattr(self, "_image_path", "")):
+                    QMessageBox.warning(self, "请设置目标图片",
+                                        "「条件触发 · 出现指定图片」需要先「屏幕截图选区」"
+                                        "或「上传图片」设置目标图片。")
+                    return
         super().accept()
 
     def _flow_context(self):
@@ -980,10 +1122,89 @@ class StepParamsDialog(QDialog):
                                    addr_mode and self.fi_proxy_check.isChecked())
         self.adjustSize()
 
+    def _sync_shutdown_rows(self, *_a) -> None:
+        """定时关机：按「触发方式」显隐对应配置行，再刷新底部说明。
+
+        时间点组 = 关机时间 + 已过该时刻；倒计时组 = 时/分/秒；
+        条件组 = 触发条件 +（图片组 或 文字组）+ 检测参数（区域/间隔/最长等待/连续保持）。
+        「触发后执行」区不随触发方式变化，始终显示。
+        """
+        form = getattr(self, "_sd_form", None)
+        if form is None:
+            return
+        mode = self.sd_mode.currentData()
+        cond_mode = self.sd_cond_mode.currentData()
+        for row in getattr(self, "_sd_time_rows", ()):
+            form.setRowVisible(row, mode == "at_time")
+        for row in getattr(self, "_sd_count_rows", ()):
+            form.setRowVisible(row, mode == "countdown")
+        for row in getattr(self, "_sd_cond_rows", ()):
+            form.setRowVisible(row, mode == "condition")
+        for row in getattr(self, "_sd_img_rows", ()):
+            form.setRowVisible(row, mode == "condition" and cond_mode == "image")
+        for row in getattr(self, "_sd_text_rows", ()):
+            form.setRowVisible(row, mode == "condition" and cond_mode == "text")
+        for row in getattr(self, "_sd_common_rows", ()):
+            form.setRowVisible(row, mode == "condition")
+        self._sync_shutdown_overlay()
+        self.adjustSize()
+
+    def _sync_shutdown_overlay(self) -> None:
+        """同步「屏幕倒计时浮层」两项的可用状态，并刷新底部说明。
+
+        提醒倒计时为 0（立即执行）时压根没有提醒期，浮层无从显示，整组置灰；
+        未勾选浮层时字号无意义，单独置灰。
+        """
+        if getattr(self, "sd_overlay", None) is not None:
+            has_warn = self.sd_warn.value() > 0
+            self.sd_overlay.setEnabled(has_warn)
+            self.sd_overlay_size.setEnabled(has_warn and self.sd_overlay.isChecked())
+        self._refresh_shutdown_hint()
+
+    def _refresh_shutdown_hint(self) -> None:
+        """刷新「定时关机」底部说明：把当前配置读成一句人话，减少配错触发时机。"""
+        if getattr(self, "sd_hint", None) is None:
+            return
+        mode = self.sd_mode.currentData()
+        act = POWER_ACTIONS.get(self.sd_action.currentData(), "关机")
+        secs = shutdown_countdown_seconds({
+            "count_hours": self.sd_hours.value(),
+            "count_minutes": self.sd_minutes.value(),
+            "count_seconds": self.sd_seconds.value(),
+        })
+        warn = self.sd_warn.value()
+        if warn > 0:
+            tail = f"触发后先提醒 {warn} 秒（期间可取消）再执行{act}。"
+            if (getattr(self, "sd_overlay", None) is not None
+                    and self.sd_overlay.isChecked()):
+                tail += f"屏幕上会显示「{warn} 秒后{act}」的大号红色倒计时" \
+                        f"（{self.sd_overlay_size.value()} pt）。"
+        else:
+            tail = f"触发后立即执行{act}。"
+        if mode == "at_time":
+            txt = (f"等到当天 {self.sd_time.text().strip() or 'HH:MM'} 执行；" + tail)
+        elif mode == "countdown":
+            txt = f"本步骤开始执行后 {format_duration(secs)} 触发；" + tail
+        else:
+            what = "指定图片出现" if self.sd_cond_mode.currentData() == "image" else "指定文字出现"
+            txt = f"持续检测屏幕，{what}且条件满足后触发；" + tail
+        if self.sd_dry.isChecked():
+            txt += "\n当前为演练模式：到点只写日志，不会真的关机 / 重启 / 睡眠。"
+        if warn > 0:
+            txt += "\n提醒倒计时期间按 Esc 键即可取消，也可以随时点流程「停止」；"
+        else:
+            txt += "\n整个等待过程都可以随时点流程「停止」取消；"
+        self.sd_hint.setText(txt + "都不会在系统里留下挂着的关机计划。")
+
     # ---------- UI ----------
     def _build(self, step: FlowStep):
-        root = QVBoxLayout(self)
-        form = QFormLayout()
+        # 步骤编辑弹窗的排版：表单留白走统一节奏（与设置页共用 widgets.polish_form），
+        # 弹窗自己再留一圈 6px 外边距（表单另有 12px 内边距，合计与改造前一致），
+        # 底部按钮行不再是「贴边的一整条」。
+        root = QVBoxLayout(self.body())
+        root.setContentsMargins(6, 8, 6, 10)
+        root.setSpacing(8)
+        form = polish_form(QFormLayout())
         p = step.params
         t = step.type
 
@@ -1070,6 +1291,32 @@ class StepParamsDialog(QDialog):
             hint.setWordWrap(True)
             form.addRow("", hint)
 
+        elif t == "for":
+            self.for_var = QLineEdit("i")
+            self.for_var.setToolTip("每轮把当前数值写入该变量（循环结束保留最后一个值）；"
+                                    "循环体内各步骤可直接引用它")
+            form.addRow("循环变量名", self.for_var)
+            self.for_start = self._var_combo("起始值（含）")
+            self.for_start.setToolTip("从哪个数开始数，支持表达式：1、$n、len($arr)-1、"
+                                      "int($s) 等。默认 1")
+            form.addRow("起始值", self.for_start)
+            self.for_stop = self._var_combo("结束值（含）")
+            self.for_stop.setToolTip("数到这个数为止（**包含它**）：起始 1、结束 10 → 变量依次"
+                                     " 1、2、…、10 共 10 轮。\n支持表达式：10、$n、len($arr) 等")
+            form.addRow("结束值", self.for_stop)
+            self.for_step = self._var_combo("步长")
+            self.for_step.setToolTip("每次增加多少；填负数表示倒数（如 起始 10、结束 0、步长 -1）。\n"
+                                     "不能为 0")
+            form.addRow("步长", self.for_step)
+            self._var_combo_hint(form)
+            hint = QLabel("「for 循环」按次数循环：从「起始值」数到「结束值」（两头都算），每轮把当前数值\n"
+                          "写入「循环变量名」，再执行 for 与「for 循环结束」之间的步骤。\n"
+                          "三个值都支持表达式（$变量 等）。\n"
+                          "例：起始 1、结束 10、步长 1 → 循环 10 轮，变量依次为 1、2、3、…、10。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
         elif t == "while":
             self.cond_edit = QLineEdit()
             self.cond_edit.setPlaceholderText("例如：i < 3；直接填 true 可无限循环")
@@ -1080,8 +1327,15 @@ class StepParamsDialog(QDialog):
                                       "break 中断或手动停止（无 break 时达上限自动终止）。\n"
                                       "引用变量需已在此循环之前定义。")
             form.addRow("循环条件", self.cond_edit)
+            self.while_interval = self._dspin(0.0, 3600.0, " 秒")
+            self.while_interval.setToolTip(
+                "每轮循环体执行完、条件重新成立时，先等这么久再开始下一轮（默认 0.1 秒）。\n"
+                "作用是让条件恒真的循环有个喘息，避免满速空转刷日志、吃 CPU。\n"
+                "填 0 = 不等（需要最快轮询时用）；等待期间点「停止」会立刻中断。")
+            form.addRow("迭代间隔", self.while_interval)
             hint = QLabel("「while 循环」在条件成立时反复执行 while 与「while 循环结束」之间的步骤，\n"
-                          "直到条件不成立。循环体内可用 break 中断；请在体内修改条件引用的变量，\n"
+                          "直到条件不成立。每轮之间默认等待 0.1 秒（可在上面改，填 0 不等待）；\n"
+                          "循环体内可用 break 中断；请在体内修改条件引用的变量，\n"
                           "否则会一直循环（达到上限会自动终止）。")
             hint.setStyleSheet("color: #8a939c;")
             hint.setWordWrap(True)
@@ -1090,6 +1344,13 @@ class StepParamsDialog(QDialog):
         elif t == "endForeach":
             hint = QLabel("「Foreach 循环结束」是随 foreach 自动生成的结构标记，与 foreach 成对出现，"
                           "无需配置；删除 foreach 时会同步删除。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+
+        elif t == "endFor":
+            hint = QLabel("「for 循环结束」是随 for 自动生成的结构标记，与 for 成对出现，"
+                          "无需配置；删除 for 时会同步删除。")
             hint.setStyleSheet("color: #8a939c;")
             hint.setWordWrap(True)
             form.addRow("", hint)
@@ -1153,6 +1414,28 @@ class StepParamsDialog(QDialog):
                           "勾选「原始输出」后不加时间戳、不自动换行，内容原样显示；\n"
                           "勾选「显示变量的 Python 类型」后，每个变量的值后显示类型名（如 (str)/(int)/(list)）。")
             hint.setStyleSheet("color: #8a939c;")
+            form.addRow("", hint)
+
+        elif t == "status_log":
+            self.status_log_text = QLineEdit()
+            self.status_log_text.setPlaceholderText(
+                "要输出的内容，可用 $变量名 引用；\\n 换行、\\b 空格")
+            self.status_log_text.setToolTip(
+                "内容输出到屏幕上的「运行状态浮层」（透明控制台），不是主窗口底部日志。\n"
+                "支持 $变量名 引用；字面量 \\n 会转成换行、\\b 转成空格。")
+            form.addRow("输出内容", self.status_log_text)
+            self.status_log_level = QComboBox()
+            for key in STATUS_LOG_LEVELS:
+                self.status_log_level.addItem(STATUS_LOG_LEVEL_LABELS[key], key)
+            self.status_log_level.setToolTip(
+                "消息级别：浮层里按级别用不同颜色显示（普通 / 警告 / 错误），\n"
+                "三级颜色可在设置页「运行状态浮层 → 状态日志」里改。")
+            form.addRow("消息级别", self.status_log_level)
+            hint = QLabel("输出到「运行状态浮层」（屏幕上的透明控制台），不写主窗口日志面板。\n"
+                          "浮层的字体、字号、三级颜色与最多显示行数在设置页配置；\n"
+                          "流程全部结束后浮层会再停留一会儿，方便看清最后几条消息。")
+            hint.setStyleSheet("color: #8a939c;")
+            hint.setWordWrap(True)
             form.addRow("", hint)
 
         elif t == "clip_set":
@@ -1611,6 +1894,254 @@ class StepParamsDialog(QDialog):
             fi_hint.setWordWrap(True)
             form.addRow("", fi_hint)
 
+        elif t == "shutdown":
+            # 「定时关机」：触发方式三选一（指定时间点 / 倒计时 / 条件触发），
+            # 切换时只显隐对应配置行；「触发后执行」区对所有触发方式都生效。
+            self._sd_form = form
+            self.sd_mode = QComboBox()
+            for value, label in SHUTDOWN_TRIGGER_MODES.items():
+                self.sd_mode.addItem(label, value)
+            self.sd_mode.setToolTip(
+                "指定时间点：等到当天 HH:MM 执行（今天该时刻已过时按下一行决定顺延次日还是判失败）\n"
+                "倒计时：从本步骤开始执行起，经过指定 时/分/秒 后执行\n"
+                "条件触发：屏幕上出现指定图片或文字后执行")
+            form.addRow("触发方式", self.sd_mode)
+
+            # ---- ① 指定时间点 ----
+            self._sd_time_rows: list[int] = []
+            self.sd_time = QLineEdit()
+            self.sd_time.setPlaceholderText("23:30")
+            self.sd_time.setToolTip(
+                "24 小时制的时刻，如 23:30 / 7:05。\n"
+                "想「现在立刻关机」用「倒计时」填 0 秒更直接；\n"
+                "想每天固定时刻关机，可用「定时任务」按点触发本流程。")
+            form.addRow("关机时间", self.sd_time)
+            self._sd_time_rows.append(form.rowCount() - 1)
+
+            self.sd_time_passed = QComboBox()
+            self.sd_time_passed.addItem("等到次日同一时刻", "next_day")
+            self.sd_time_passed.addItem("直接判失败", "fail")
+            self.sd_time_passed.setToolTip(
+                "运行到本步骤时今天这个时刻已经过去了怎么办：\n"
+                "顺延 = 继续等到明天该时刻；判失败 = 本步骤直接失败（可勾「失败继续」跳过）")
+            form.addRow("已过该时刻", self.sd_time_passed)
+            self._sd_time_rows.append(form.rowCount() - 1)
+
+            # ---- ② 倒计时 ----
+            self._sd_count_rows: list[int] = []
+            self.sd_hours = QSpinBox()
+            self.sd_hours.setRange(0, 999)
+            self.sd_hours.setSuffix(" 时")
+            self.sd_minutes = QSpinBox()
+            self.sd_minutes.setRange(0, 59)
+            self.sd_minutes.setSuffix(" 分")
+            self.sd_seconds = QSpinBox()
+            self.sd_seconds.setRange(0, 59)
+            self.sd_seconds.setSuffix(" 秒")
+            for w in (self.sd_hours, self.sd_minutes, self.sd_seconds):
+                w.setToolTip("三者之和必须大于 0；等待期间点流程「停止」即取消")
+            count_row = QHBoxLayout()
+            count_row.addWidget(self.sd_hours, 1)
+            count_row.addWidget(self.sd_minutes, 1)
+            count_row.addWidget(self.sd_seconds, 1)
+            form.addRow("倒计时", count_row)
+            self._sd_count_rows.append(form.rowCount() - 1)
+
+            # ---- ③ 条件触发 ----
+            self._sd_cond_rows: list[int] = []
+            self.sd_cond_mode = QComboBox()
+            self.sd_cond_mode.addItem("出现指定图片", "image")
+            self.sd_cond_mode.addItem("出现指定文字", "text")
+            self.sd_cond_mode.setToolTip("判定方式：模板匹配找图 / OCR 文字识别，与"
+                                         "「等待图片出现」「等待文字出现」完全一致")
+            form.addRow("触发条件", self.sd_cond_mode)
+            self._sd_cond_rows.append(form.rowCount() - 1)
+
+            # 图片组：模板图（编辑期截图/上传），沿用「找图」那套控件
+            self._sd_img_rows: list[int] = []
+            img_row = QHBoxLayout()
+            self.preview = QLabel()
+            self.preview.setFixedSize(230, 150)
+            self.preview.setAlignment(Qt.AlignCenter)
+            self.preview.setStyleSheet(
+                "border: 1px solid #c9d1d9; border-radius: 6px; background: #f7f9fb;")
+            img_row.addWidget(self.preview)
+            side = QVBoxLayout()
+            side.setSpacing(6)
+            self.capture_btn = QPushButton("📷 屏幕截图选区")
+            self.capture_btn.setToolTip("冻结屏幕 -> 框选 -> 双击确认，截图作为触发用的目标图片")
+            self.capture_btn.clicked.connect(self._request_capture)
+            side.addWidget(self.capture_btn)
+            self.upload_btn = QPushButton("📁 上传图片")
+            self.upload_btn.setToolTip("从本地选一张图片作为目标（自动复制到程序模板目录）")
+            self.upload_btn.clicked.connect(self._pick_image)
+            side.addWidget(self.upload_btn)
+            self.image_edit = QLineEdit()
+            self.image_edit.setReadOnly(True)
+            self.image_edit.setStyleSheet("color: #8a939c; border: none; background: transparent;")
+            side.addWidget(self.image_edit)
+            side.addStretch(1)
+            img_row.addLayout(side, 1)
+            form.addRow("目标图片", img_row)
+            self._sd_img_rows.append(form.rowCount() - 1)
+
+            self.sd_confidence = QDoubleSpinBox()
+            self.sd_confidence.setRange(0.5, 0.99)
+            self.sd_confidence.setSingleStep(0.01)
+            self.sd_confidence.setDecimals(2)
+            self.sd_confidence.setValue(0.85)
+            self.sd_confidence.setToolTip("模板匹配置信度 0.5~0.99：越低越宽松、越容易误判，"
+                                          "总也匹配不上就适当调低")
+            form.addRow("匹配置信度", self.sd_confidence)
+            self._sd_img_rows.append(form.rowCount() - 1)
+
+            # 文字组
+            self._sd_text_rows: list[int] = []
+            self.sd_text = QLineEdit()
+            self.sd_text.setPlaceholderText("例如：下载完成（支持 $变量名）")
+            self.sd_text.setToolTip("要等到出现的文字，支持 $变量名 引用（运行时取变量里的文字）")
+            form.addRow("目标文字", self.sd_text)
+            self._sd_text_rows.append(form.rowCount() - 1)
+
+            self.sd_tolerance = QDoubleSpinBox()
+            self.sd_tolerance.setRange(0.0, 1.0)
+            self.sd_tolerance.setSingleStep(0.05)
+            self.sd_tolerance.setDecimals(2)
+            self.sd_tolerance.setValue(0.8)
+            self.sd_tolerance.setToolTip("近似匹配容错度 0~1：1=整行完全一致才算命中，"
+                                         "越小越宽松（OCR 偶有错字时调低）")
+            form.addRow("匹配容错度", self.sd_tolerance)
+            self._sd_text_rows.append(form.rowCount() - 1)
+
+            # 图片 / 文字共用的检测参数
+            self._sd_common_rows: list[int] = []
+            region_row = QHBoxLayout()
+            self.region_edit = QLineEdit()
+            self.region_edit.setReadOnly(True)
+            self.region_edit.setToolTip("左上角 x,y 与宽高；空=全屏（整个虚拟桌面）")
+            pick_region = QPushButton("框选区域…")
+            pick_region.clicked.connect(self._request_region)
+            pick_region.setToolTip("隐藏本窗口后框选检测区域（与找图/文字识别区域一致）")
+            clear_region = QPushButton("恢复全屏")
+            clear_region.clicked.connect(lambda: self._set_region_text(None))
+            region_row.addWidget(self.region_edit, 1)
+            region_row.addWidget(pick_region)
+            region_row.addWidget(clear_region)
+            form.addRow("检测区域", region_row)
+            self._sd_common_rows.append(form.rowCount() - 1)
+
+            manual_row = QHBoxLayout()
+            self.manual_edit = QLineEdit()
+            self.manual_edit.setPlaceholderText("左上x,左上y,右下x,右下y（如 100,200,400,500）")
+            self.manual_edit.setToolTip("直接输入矩形区域左上角与右下角坐标，4 个数字逗号分隔")
+            apply_btn = QPushButton("应用")
+            apply_btn.setToolTip("解析输入坐标并设为检测区域")
+            apply_btn.clicked.connect(self._apply_manual_region)
+            manual_row.addWidget(self.manual_edit, 1)
+            manual_row.addWidget(apply_btn)
+            form.addRow("坐标输入", manual_row)
+            self._sd_common_rows.append(form.rowCount() - 1)
+
+            self.sd_interval = QDoubleSpinBox()
+            self.sd_interval.setRange(0.05, 60.0)
+            self.sd_interval.setSingleStep(0.1)
+            self.sd_interval.setDecimals(1)
+            self.sd_interval.setSuffix(" 秒")
+            self.sd_interval.setToolTip("两次检测之间的间隔；越短越灵敏，CPU 占用也越高")
+            form.addRow("检测间隔", self.sd_interval)
+            self._sd_common_rows.append(form.rowCount() - 1)
+
+            self.sd_timeout = QDoubleSpinBox()
+            self.sd_timeout.setRange(0.0, 86400.0)
+            self.sd_timeout.setSingleStep(1.0)
+            self.sd_timeout.setDecimals(0)
+            self.sd_timeout.setSpecialValueText("一直等")
+            self.sd_timeout.setSuffix(" 秒")
+            self.sd_timeout.setToolTip("最长等待时间；0=一直检测到条件出现为止，超过则本步骤判失败")
+            form.addRow("最长等待", self.sd_timeout)
+            self._sd_common_rows.append(form.rowCount() - 1)
+
+            self.sd_hold = QDoubleSpinBox()
+            self.sd_hold.setRange(0.0, 3600.0)
+            self.sd_hold.setSingleStep(1.0)
+            self.sd_hold.setDecimals(0)
+            self.sd_hold.setSpecialValueText("一出现就触发")
+            self.sd_hold.setSuffix(" 秒")
+            self.sd_hold.setToolTip("条件需连续成立这么久才触发，防止一闪而过的画面误触发；"
+                                    "0=只要检测到就立刻触发")
+            form.addRow("连续保持", self.sd_hold)
+            self._sd_common_rows.append(form.rowCount() - 1)
+
+            # ---- 触发后执行（三种触发方式共用）----
+            self.sd_action = QComboBox()
+            for value, label in POWER_ACTIONS.items():
+                self.sd_action.addItem(label, value)
+            self.sd_action.setToolTip("触发后执行的电源动作；睡眠/锁定由系统电源策略决定是否生效")
+            form.addRow("执行动作", self.sd_action)
+
+            self.sd_warn = QSpinBox()
+            self.sd_warn.setRange(0, 600)
+            self.sd_warn.setSuffix(" 秒")
+            self.sd_warn.setSpecialValueText("立即执行")
+            self.sd_warn.setToolTip(
+                "触发后先提醒这么久再执行；提醒期间点流程「停止」或直接按 Esc 键即可取消。\n"
+                "命令只在倒计时结束的一刻才发出，所以「取消」不会在系统里留下挂着的关机计划。\n"
+                "0 = 触发后立刻执行（此时没有提醒期，Esc 取消也不生效）。")
+            form.addRow("提醒倒计时", self.sd_warn)
+
+            # 屏幕下方的大号红色倒计时浮层（只在提醒倒计时期间显示）
+            from ..power_overlay import (DEFAULT_FONT_SIZE as _ov_default,
+                                         MAX_FONT_SIZE as _ov_max,
+                                         MIN_FONT_SIZE as _ov_min)
+            self.sd_overlay = QCheckBox("提醒期间在屏幕下方显示大号红色倒计时")
+            self.sd_overlay.setToolTip(
+                "勾选后，从进入「提醒倒计时」那一刻起，屏幕下方居中弹出一行大号红字\n"
+                "（如「15 秒后关机」），随剩余秒数实时刷新，执行 / 取消后自动消失。\n"
+                "浮层自己会写着「按 Esc 键取消」——倒计时期间按 Esc 即可反悔。\n"
+                "浮层是置顶 + 鼠标穿透的：不抢焦点、也不挡鼠标，只起提醒作用。\n"
+                "「提醒倒计时」填 0（立即执行）时没有提醒期，本项自动失效。")
+            form.addRow("", self.sd_overlay)
+
+            self.sd_overlay_size = QSpinBox()
+            self.sd_overlay_size.setRange(_ov_min, _ov_max)
+            self.sd_overlay_size.setSingleStep(4)
+            self.sd_overlay_size.setValue(_ov_default)
+            self.sd_overlay_size.setSuffix(" pt")
+            self.sd_overlay_size.setToolTip(
+                f"倒计时主文字号（{_ov_min}~{_ov_max} pt），默认 {_ov_default} pt。\n"
+                "浮层宽度随字号自动撑开并保持底部居中，字号大到超出屏幕也没关系。")
+            form.addRow("浮层字号", self.sd_overlay_size)
+
+            self.sd_force = QCheckBox("强制关闭未保存的程序")
+            self.sd_force.setToolTip(
+                "勾选后给关机/重启命令加 /f：直接结束阻塞关机的程序（未保存内容会丢失）。\n"
+                "不勾时若某个程序弹「是否保存」挡住，系统会一直卡在那里关不掉。\n"
+                "对「睡眠 / 锁定屏幕」无效。")
+            form.addRow("", self.sd_force)
+
+            self.sd_dry = QCheckBox("演练模式（只写日志，不真正执行）")
+            self.sd_dry.setToolTip("勾选后到点只在日志里写「本应执行××」，不会真的关机，"
+                                   "用来先验证触发时机和条件是否配对了。")
+            form.addRow("", self.sd_dry)
+
+            self.sd_hint = QLabel()
+            self.sd_hint.setStyleSheet("color: #8a939c;")
+            self.sd_hint.setWordWrap(True)
+            form.addRow("", self.sd_hint)
+
+            self.sd_mode.currentIndexChanged.connect(self._sync_shutdown_rows)
+            self.sd_cond_mode.currentIndexChanged.connect(self._sync_shutdown_rows)
+            self.sd_action.currentIndexChanged.connect(self._sync_shutdown_rows)
+            self.sd_dry.toggled.connect(self._sync_shutdown_rows)
+            # 浮层两项：提醒 0 秒时没有提醒期 → 整组失效；勾选与否决定字号是否可调
+            self.sd_warn.valueChanged.connect(lambda *_: self._sync_shutdown_overlay())
+            self.sd_overlay.toggled.connect(lambda *_: self._sync_shutdown_overlay())
+            # 时间/倒计时只影响底部说明文案，不必重排整张表单（adjustSize 有开销）
+            self.sd_time.textChanged.connect(lambda *_: self._refresh_shutdown_hint())
+            for _w in (self.sd_hours, self.sd_minutes, self.sd_seconds):
+                _w.valueChanged.connect(lambda *_: self._refresh_shutdown_hint())
+            self._sync_shutdown_rows()
+
         elif t == "color_pick":
             # 拾取结果：色块预览 + 只读颜色文本 + 「屏幕取色…」按钮
             self._pick_rgb = None        # 拾取到的颜色 (r, g, b)，取色/回填后非空
@@ -2020,9 +2551,12 @@ class StepParamsDialog(QDialog):
             self.count = self._spin(0, 999_999_999)
             self.count.setSpecialValueText("0 = 无限（流程中按 1 次执行）")
             form.addRow("按压次数", self.count)
-            self.duration = self._dspin(0, 604800, " 秒")
-            self.duration.setSpecialValueText("0 = 不限")
-            form.addRow("持续时长", self.duration)
+            self.hold = self._spin(0, 60_000, " 毫秒")
+            self.hold.setToolTip(
+                "每一次按下后按住多久再松开（默认 50 毫秒）。\n"
+                "太短有些程序/游戏一帧都扫不到，太长会被当成「长按」；\n"
+                "填 0 = 按下即松开；按几次由上面的「按压次数」决定。")
+            form.addRow("每次按住", self.hold)
             self._build_background_row(form)
 
         elif t == "find":
@@ -2178,8 +2712,12 @@ class StepParamsDialog(QDialog):
             self.attach_port_edit.setPlaceholderText("如 9333")
             self.attach_port_edit.setToolTip(
                 "接管端口：与浏览器快捷方式里 --remote-debugging-port 后面的数字一致。\n"
-                "设置方法：浏览器图标右键 → 属性 → 「目标」末尾加空格后填 "
-                "--remote-debugging-port=9333 → 确定，再用此端口启动浏览器。")
+                "⚠️ Chrome 136 起，默认用户目录上开调试端口会被官方禁止——快捷方式\n"
+                "「目标」必须同时带上独立的用户目录才生效，正确写法：\n"
+                "  \"chrome路径\" --remote-debugging-port=9333 --user-data-dir=\"D:\\ChromeDebug\"\n"
+                "（这样启动的浏览器可与日常 Chrome 同开，登录状态会记住。）\n"
+                "验证端口是否开了：用该浏览器访问 http://127.0.0.1:9333/json/version，\n"
+                "能看到一段 JSON 即可接管。")
             self._web_row(form, "attach_port", "接管端口", self.attach_port_edit)
 
             self.tab_target_combo = QComboBox()
@@ -2756,9 +3294,14 @@ class StepParamsDialog(QDialog):
             form.addRow("打开方式", self.dpb_mode)
 
             self.dpb_port = QLineEdit()
-            self.dpb_port.setPlaceholderText("如 9333")
-            self.dpb_port.setToolTip("接管端口：与浏览器 --remote-debugging-port 后面的数字一致")
-            form.addRow("接管端口", self.dpb_port)
+            self.dpb_port.setPlaceholderText("默认 9333")
+            self.dpb_port.setToolTip(
+                "浏览器调试端口（等价命令行 --remote-debugging-port=9333）：\n"
+                "· 「接管已打开的浏览器」：连到该端口上已经开着的浏览器；\n"
+                "· 其它打开方式：给新启动的浏览器设上这个端口——之后别的步骤/流程\n"
+                "  可以直接接管它，也方便用浏览器自带的开发者工具调试。\n"
+                "留空 = 不带端口（兼容旧流程）。")
+            form.addRow("调试端口", self.dpb_port)
             self._dpb_port_row = (form, form.rowCount() - 1)
 
             self.dpb_url = QLineEdit()
@@ -2771,9 +3314,24 @@ class StepParamsDialog(QDialog):
             self.dpb_timeout = self._dspin(1, 300, " 秒")
             form.addRow("加载超时", self.dpb_timeout)
 
-            hint = QLabel("「打开浏览器」启动/接管一个浏览器，并把浏览器对象保存到上方变量；\n"
-                          "后续「元素操作 / 切换标签 / 监听 / 截图 / 上传」都从这个变量取浏览器，\n"
-                          "串成一条可视化自动化链路。")
+            hint = QLabel(
+                "「打开浏览器」启动/接管一个浏览器，并把浏览器对象保存到上方变量；\n"
+                "后续「元素操作 / 切换标签 / 监听 / 截图 / 上传」都从这个变量取浏览器，\n"
+                "串成一条可视化自动化链路。\n"
+                "\n"
+                "◆ 接管已打开的浏览器（Chrome 136+ 必看）\n"
+                "Chrome 136 起官方禁止在「默认用户目录」上开调试端口：快捷方式里只加\n"
+                "--remote-debugging-port=9333 会被 Chrome 静默忽略（命令行带了也没用），\n"
+                "必须同时指定独立的用户目录。快捷方式「目标」的正确写法：\n"
+                "  \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\"\n"
+                "      --remote-debugging-port=9333 --user-data-dir=\"D:\\ChromeDebug\"\n"
+                "（路径按你的安装位置调整；也可以把这一行写进 .bat 双击运行。）这样启动\n"
+                "的浏览器可以和日常 Chrome 同时开着（不同用户目录互不冲突），登录状态\n"
+                "也会记住。\n"
+                "· 验证端口是否真的开了：用那个浏览器访问\n"
+                "  http://127.0.0.1:9333/json/version，能看到一段 JSON 就可以接管。\n"
+                "· 不想手动启动？把「打开方式」改成「前台显示」，程序会自己启动一个\n"
+                "  带 9333 端口的浏览器（用户目录在临时文件夹，环境干净）。")
             hint.setStyleSheet("color: #8a939c;")
             hint.setWordWrap(True)
             form.addRow("", hint)
@@ -3345,11 +3903,15 @@ class StepParamsDialog(QDialog):
         self.adjustSize()
 
     def _sync_dpb_rows(self) -> None:
-        """「打开浏览器」：接管端口行只在「接管已打开的浏览器」时显示。"""
+        """「打开浏览器」：调试端口行始终显示。
+
+        端口对两种模式都有效（attach 用它定位接管目标；自启模式用它给浏览器设
+        --remote-debugging-port），所以不再按模式隐藏（2026-09-27 起默认 9333）。
+        """
         if not getattr(self, "_dpb_port_row", None):
             return
         form, row = self._dpb_port_row
-        form.setRowVisible(row, self.dpb_mode.currentData() == "attach")
+        form.setRowVisible(row, True)
         self.adjustSize()
 
     def _sync_dpe_rows(self) -> None:
@@ -3567,6 +4129,15 @@ class StepParamsDialog(QDialog):
                 return str(data)
         return text
 
+    @staticmethod
+    def _num(value, default: float = 0.0) -> float:
+        """配置里的数字回填到 SpinBox 时先安全转 float（缺字段/脏数据用默认值，
+        避免旧流程文件里少一个键就整张对话框构造失败）。"""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
     # ---------- 数据 ----------
     def _fill(self, step: FlowStep):
         p = step.params
@@ -3575,12 +4146,22 @@ class StepParamsDialog(QDialog):
             self.var_name.setText(p.get("name", "") or "")
             self.var_type.setCurrentIndex(max(0, self.var_type.findData(p.get("type", "string"))))
             self.var_default.setText(str(p.get("default_value", "") or ""))
-        elif t in ("if", "elseif", "while"):
+        elif t in ("if", "elseif"):
             self.cond_edit.setText(p.get("condition", "") or "")
+        elif t == "while":
+            self.cond_edit.setText(p.get("condition", "") or "")
+            # 缺字段时回退到配置里的默认间隔（别写死数字，免得与 config 漂移）
+            self.while_interval.setValue(
+                self._num(p.get("interval_sec"), WHILE_ITER_INTERVAL_DEFAULT_SEC))
         elif t == "foreach":
             self._set_combo_value(self.foreach_items, p.get("items", "") or "")
             self.foreach_item_var.setText(p.get("item_var", "item") or "")
             self.foreach_index_var.setText(p.get("index_var", "index") or "")
+        elif t == "for":
+            self.for_var.setText(p.get("var", "i") or "")
+            self._set_combo_value(self.for_start, p.get("start", "1") or "")
+            self._set_combo_value(self.for_stop, p.get("stop", "") or "")
+            self._set_combo_value(self.for_step, p.get("step", "1") or "")
         elif t == "exit":
             self._set_combo_value(self.exit_var, p.get("variable", "") or "")
         elif t == "log":
@@ -3588,6 +4169,11 @@ class StepParamsDialog(QDialog):
             self.log_text.setText(p.get("text", "") or "")
             self.raw_check.setChecked(bool(p.get("raw")))
             self.show_type_check.setChecked(bool(p.get("show_type")))
+        elif t == "status_log":
+            self.status_log_text.setText(p.get("text", "") or "")
+            self.status_log_level.setCurrentIndex(max(
+                0, self.status_log_level.findData(p.get("level", "normal")
+                                                 or "normal")))
         elif t == "clip_set":
             self._set_combo_value(self.clip_name, p.get("name", "") or "")
             self.clip_text.setText(p.get("text", "") or "")
@@ -3669,6 +4255,37 @@ class StepParamsDialog(QDialog):
             self.fi_proxy_check.setChecked(bool(p.get("use_proxy", True)))
             self.fi_proxy.setText(p.get("proxy", "127.0.0.1:7897") or "")
             self._sync_float_rows()
+        elif t == "shutdown":
+            self.sd_mode.setCurrentIndex(max(0, self.sd_mode.findData(
+                p.get("trigger_mode") or "countdown")))
+            self.sd_cond_mode.setCurrentIndex(max(0, self.sd_cond_mode.findData(
+                p.get("cond_mode") or "image")))
+            self.sd_time.setText(str(p.get("at_time") or ""))
+            self.sd_time_passed.setCurrentIndex(max(0, self.sd_time_passed.findData(
+                p.get("at_time_if_passed") or "next_day")))
+            self.sd_hours.setValue(int(self._num(p.get("count_hours"), 0)))
+            self.sd_minutes.setValue(int(self._num(p.get("count_minutes"), 0)))
+            self.sd_seconds.setValue(int(self._num(p.get("count_seconds"), 0)))
+            self._image = p.get("image", "") or ""
+            self._image_path = p.get("image_path", "") or ""
+            self._update_preview()
+            self.sd_confidence.setValue(self._num(p.get("confidence"), 0.85))
+            self.sd_text.setText(str(p.get("text") or ""))
+            self.sd_tolerance.setValue(self._num(p.get("tolerance"), 0.8))
+            self._set_region_text(p.get("region", "") or "")
+            self.sd_interval.setValue(self._num(p.get("interval_sec"), 1.0))
+            self.sd_timeout.setValue(self._num(p.get("cond_timeout_sec"), 0.0))
+            self.sd_hold.setValue(self._num(p.get("hold_sec"), 0.0))
+            self.sd_action.setCurrentIndex(max(0, self.sd_action.findData(
+                p.get("power_action") or "shutdown")))
+            self.sd_warn.setValue(int(self._num(p.get("warn_sec"), 30)))
+            self.sd_force.setChecked(bool(p.get("force_close_apps", True)))
+            self.sd_dry.setChecked(bool(p.get("dry_run")))
+            # 旧流程没有这两个键：默认沿用当前界面的值（= 显示浮层 + 默认字号）
+            self.sd_overlay.setChecked(bool(p.get("warn_overlay", True)))
+            self.sd_overlay_size.setValue(int(self._num(
+                p.get("warn_overlay_font_size"), self.sd_overlay_size.value())))
+            self._sync_shutdown_rows()
         elif t == "color_pick":
             fmt = (p.get("format") or "").strip()
             if fmt == "rgb":
@@ -3712,6 +4329,15 @@ class StepParamsDialog(QDialog):
             self.preview_spin.setValue(float(p.get("preview_duration", 1.0) or 1.0))
             self.preview_spin.setEnabled(self.preview_check.isChecked())
         elif t == "click":
+            # 按键 / 点击方式 / 点击间隔必须在这里回填：_build 里那三行的初值只在
+            # 「对话框刚构造」时有效，_fill 才是编辑已存在步骤时的唯一数据来源。
+            # 之前漏了 interval_ms，"改完点击间隔、再次编辑"又会退回默认 20ms
+            # （2026-09-22 修；press/find 等分支本来就回填了 interval_ms）。
+            self.btn_combo.setCurrentIndex(
+                max(0, self.btn_combo.findData(p.get("mouse_button", "left"))))
+            self.type_combo.setCurrentIndex(
+                max(0, self.type_combo.findData(p.get("click_type", "single"))))
+            self.interval.setValue(int(p.get("interval_ms", 20)))
             pv = (p.get("pos_var") or "").strip()
             if p.get("fixed_position"):
                 if pv:
@@ -3731,7 +4357,8 @@ class StepParamsDialog(QDialog):
             self.keys_edit.set_hotkey(p.get("keys", "space"))
             self.interval.setValue(int(p.get("interval_ms", 100)))
             self.count.setValue(int(p.get("count", 1)))
-            self.duration.setValue(float(p.get("duration_sec", 0)))
+            # 每次按下的按住时长（旧的「持续时长」duration_sec 语义已废弃，不再回填）
+            self.hold.setValue(int(p.get("hold_ms", PRESS_HOLD_DEFAULT_MS) or 0))
             self._fill_background(p)
         elif t == "find":
             self._image = p.get("image", "") or ""
@@ -3940,13 +4567,23 @@ class StepParamsDialog(QDialog):
                 "type": self.var_type.currentData(),
                 "default_value": self.var_default.text(),
             })
-        elif t in ("if", "elseif", "while"):
+        elif t in ("if", "elseif"):
             step.params.update({"condition": self.cond_edit.text().strip()})
+        elif t == "while":
+            step.params.update({"condition": self.cond_edit.text().strip(),
+                                "interval_sec": float(self.while_interval.value())})
         elif t == "foreach":
             step.params.update({
                 "items": self._combo_value(self.foreach_items),
                 "item_var": self.foreach_item_var.text().strip() or "item",
                 "index_var": self.foreach_index_var.text().strip() or "index",
+            })
+        elif t == "for":
+            step.params.update({
+                "var": self.for_var.text().strip() or "i",
+                "start": self._combo_value(self.for_start) or "1",
+                "stop": self._combo_value(self.for_stop),
+                "step": self._combo_value(self.for_step) or "1",
             })
         elif t == "exit":
             step.params.update({"variable": self._combo_value(self.exit_var)})
@@ -3956,6 +4593,11 @@ class StepParamsDialog(QDialog):
                 "text": self.log_text.text(),
                 "raw": self.raw_check.isChecked(),
                 "show_type": self.show_type_check.isChecked(),
+            })
+        elif t == "status_log":
+            step.params.update({
+                "text": self.status_log_text.text(),
+                "level": self.status_log_level.currentData() or "normal",
             })
         elif t == "clip_set":
             step.params.update({
@@ -4034,6 +4676,33 @@ class StepParamsDialog(QDialog):
                 "scale": self.fi_scale.value(),
                 "click_to_close": self.fi_click_close.isChecked(),
             })
+        elif t == "shutdown":
+            # 三种触发方式的字段全部保存：切换触发方式来回改，原来填的不会被清掉
+            step.params.update({
+                "trigger_mode": self.sd_mode.currentData() or "countdown",
+                "at_time": self.sd_time.text().strip(),
+                "at_time_if_passed": self.sd_time_passed.currentData() or "next_day",
+                "count_hours": self.sd_hours.value(),
+                "count_minutes": self.sd_minutes.value(),
+                "count_seconds": self.sd_seconds.value(),
+                "cond_mode": self.sd_cond_mode.currentData() or "image",
+                "image": getattr(self, "_image", "") or step.params.get("image", "") or "",
+                "image_path": (getattr(self, "_image_path", "")
+                               or step.params.get("image_path", "") or ""),
+                "confidence": round(self.sd_confidence.value(), 2),
+                "text": self.sd_text.text().strip(),
+                "tolerance": round(self.sd_tolerance.value(), 2),
+                "region": getattr(self, "_region", step.params.get("region", "")) or "",
+                "interval_sec": round(self.sd_interval.value(), 2),
+                "cond_timeout_sec": round(self.sd_timeout.value(), 1),
+                "hold_sec": round(self.sd_hold.value(), 1),
+                "power_action": self.sd_action.currentData() or "shutdown",
+                "warn_sec": self.sd_warn.value(),
+                "warn_overlay": self.sd_overlay.isChecked(),
+                "warn_overlay_font_size": self.sd_overlay_size.value(),
+                "force_close_apps": self.sd_force.isChecked(),
+                "dry_run": self.sd_dry.isChecked(),
+            })
         elif t == "color_pick":
             step.params.update({
                 "color": self._color_text(),
@@ -4094,7 +4763,8 @@ class StepParamsDialog(QDialog):
             step.params.update({
                 "keys": self.keys_edit.hotkey(),
                 "interval_ms": self.interval.value(),
-                "count": self.count.value(), "duration_sec": self.duration.value(),
+                "count": self.count.value(),
+                "hold_ms": self.hold.value(),      # 每次按下的按住时长（毫秒）
             })
             self._apply_background(step)
         elif t == "find":
@@ -4516,3 +5186,150 @@ class StepParamsDialog(QDialog):
         if getattr(self, "cp_fmt_rgb", None) is not None and self.cp_fmt_rgb.isChecked():
             return f"{r},{g},{b}"
         return f"#{r:02X}{g:02X}{b:02X}"
+
+
+class GroupRunDialog(FramelessDialog):
+    """流程分组编辑页（2026-09-22）。
+
+    一个分组里的流程在这里看全：⚡ 标出异步执行的，右侧显示运行/排队状态；
+    底部可「整组运行」「运行全部异步流程」，并给后者设一个全局热键。
+
+    只做界面与状态展示——执行/重命名都回调 host（FlowTab），
+    免得 flow_dialog 反向 import flow_tab 造成循环导入。
+    """
+
+    REFRESH_MS = 800     # 运行/排队状态由流程线程改变，这里定时刷新
+
+    def __init__(self, host, group: str, parent=None):
+        super().__init__(parent)
+        self.host = host
+        self.group = group
+        self.setWindowTitle(f"编辑分组：{group or '未分组'}")
+        self.setMinimumWidth(500)
+        self._build()
+        self._refresh()
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.REFRESH_MS)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start()
+
+    # ---------- 界面 ----------
+    def _build(self) -> None:
+        root = QVBoxLayout(self.body())
+        root.setSpacing(10)
+
+        self.title = QLabel()
+        self.title.setWordWrap(True)
+        root.addWidget(self.title)
+
+        hint = QLabel("⚡ = 勾选了「异步执行」的流程：点运行后同时并行执行；"
+                      "其余流程依次排队（一次只跑一个）。\n"
+                      "「运行本组异步流程」按钮只启动本组的异步流程；"
+                      "给它设了热键后，左栏分组标题会显示（快捷键），再按一下停止本组的异步流程。")
+        hint.setStyleSheet("color: #8a939c;")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        self.list = QListWidget()
+        self.list.setSelectionMode(QListWidget.NoSelection)
+        self.list.setToolTip("⚡ = 异步执行（可并行）；条目右侧显示「运行中 / 排队第 N 位」")
+        root.addWidget(self.list, 1)
+
+        run_row = QHBoxLayout()
+        self.run_async_btn = QPushButton("⚡ 运行本组异步流程")
+        self.run_async_btn.setToolTip("本组内勾选了「异步执行」的流程一起并行启动"
+                                      "（与下面设置的热键等效）")
+        self.run_async_btn.clicked.connect(lambda: self.host.run_group_async(self.group))
+        set_variant(self.run_async_btn, "primary")
+        run_row.addWidget(self.run_async_btn)
+        self.run_group_btn = QPushButton("▶ 运行本组全部流程")
+        self.run_group_btn.setToolTip("本组内所有流程：异步的同时并行，其余排队依次运行")
+        self.run_group_btn.clicked.connect(lambda: self.host.run_group(self.group))
+        run_row.addWidget(self.run_group_btn)
+        run_row.addStretch(1)
+        root.addLayout(run_row)
+
+        hk_row = QHBoxLayout()
+        hk_row.addWidget(QLabel("本组热键（运行本组异步流程）"))
+        self.group_hotkey_edit = HotkeyEdit()
+        self.group_hotkey_edit.setMaximumWidth(190)
+        self.group_hotkey_edit.setToolTip(
+            "按一下运行本组勾选「异步执行」的全部流程；\n"
+            "本组有异步流程在跑时再按一下 = 全部停止（同步流程不受影响）；\n"
+            "留空 = 不启用。设好后分组标题会显示（快捷键）。")
+        self.group_hotkey_edit.set_conflict_checker(
+            lambda hk: hotkey_policy.check(hk, f"group_run:{self.group}"))
+        self.group_hotkey_edit.set_hotkey(self.host.group_hotkey(self.group))
+        self.group_hotkey_edit.hotkeyChanged.connect(self._on_group_hotkey_changed)
+        hk_row.addWidget(self.group_hotkey_edit)
+
+        def _clear_group_hk():
+            self.group_hotkey_edit.set_hotkey("")     # 只刷新显示（该调用不发信号）
+            self._on_group_hotkey_changed("")         # 再走一遍写回逻辑
+
+        clear_group_btn = QPushButton("清除")
+        clear_group_btn.setToolTip("清空 = 本分组不设热键（仍可用上面的按钮手动运行）")
+        clear_group_btn.clicked.connect(_clear_group_hk)
+        hk_row.addWidget(clear_group_btn)
+        hk_row.addStretch(1)
+        root.addLayout(hk_row)
+
+        # 「运行所有分组的异步流程」是**全局**热键，已放到「⚙ 设置」页——放在这里会被
+        # 当成「本分组的热键」，而它在每个分组页面都显示同一个值，看着像串值
+        # （2026-09-22 用户反馈）。本页只保留上面那行「运行本组全部流程」。
+
+        bottom = QHBoxLayout()
+        self.rename_btn = QPushButton("✎ 重命名分组…")
+        self.rename_btn.setToolTip("改名后组内流程自动跟随，排序位置不变")
+        self.rename_btn.clicked.connect(self._on_rename)
+        bottom.addWidget(self.rename_btn)
+        bottom.addStretch(1)
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        bottom.addWidget(close_btn)
+        root.addLayout(bottom)
+
+    # ---------- 状态 ----------
+    def _refresh(self) -> None:
+        """刷新流程列表与状态（流程可能在别处被启动/排队，所以定时重画）。"""
+        flows = self.host.flows_in_group(self.group)
+        n_async = sum(1 for f in flows if f.async_run)
+        self.title.setText(f"分组「{self.group or '未分组'}」共 {len(flows)} 个流程，"
+                           f"其中 {n_async} 个异步执行（可同时运行）")
+        self.list.clear()
+        for f in flows:
+            status = self.host.flow_status_text(f)
+            text = f"{ASYNC_MARK if f.async_run else '　'} {f.name}"
+            if status:
+                text += f"　—　{status}"
+            item = QListWidgetItem(text)
+            item.setToolTip(ASYNC_TIP if f.async_run
+                            else "同步执行：与其它流程互斥，遇忙排队")
+            if status == "运行中":
+                item.setForeground(QColor(theme.token("run_marker")))
+            elif status:
+                item.setForeground(QColor(theme.token("primary")))
+            self.list.addItem(item)
+        self.run_group_btn.setEnabled(bool(flows))
+        self.run_async_btn.setEnabled(any(f.async_run for f in flows))
+
+    # ---------- 行为 ----------
+    def _on_group_hotkey_changed(self, hotkey: str) -> None:
+        """写回本分组的运行热键：host 负责刷新左栏标题的括号 + 主窗口重注册热键。"""
+        self.host.set_group_hotkey(self.group, hotkey)
+
+    def _on_rename(self) -> None:
+        """重命名分组：交给 host 处理（改名会同步迁移流程归属与创建序号）。"""
+        self._timer.stop()
+        if self.host.rename_group_interactive(self.group):
+            self.accept()      # 分组名变了：旧标题/内容已失效，关掉让用户重开
+        else:
+            self._timer.start()
+
+    def accept(self) -> None:
+        self._timer.stop()     # 别让定时器在关闭后继续跑（测试里尤其要紧）
+        super().accept()
+
+    def reject(self) -> None:
+        self._timer.stop()
+        super().reject()

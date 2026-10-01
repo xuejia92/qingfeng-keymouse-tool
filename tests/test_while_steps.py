@@ -17,9 +17,15 @@ from app.flows import FlowRunner, FlowVariableStore
 
 
 def _run(flow):
+    """跑一轮流程。while 迭代间隔强制 0：否则每个用例都要真等 1 秒/轮。
+
+    注意不能只 patch config.WHILE_ITER_INTERVAL_DEFAULT_SEC —— FlowStep 构造时
+    已把默认的 interval_sec=1.0 并进了步骤参数，得让解析函数直接返回 0。
+    """
     runner = FlowRunner(flow)
     runner.vars = FlowVariableStore(flow)
-    reason = runner._run_once()
+    with mock.patch("app.flows.while_iter_interval", return_value=0.0):
+        reason = runner._run_once()
     return runner, reason
 
 

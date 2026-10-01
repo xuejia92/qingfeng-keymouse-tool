@@ -21,7 +21,7 @@
       "params": {
         "script_type": "python",
         "source": "text",
-        "content": "print(123)",
+        "content": "from datetime import datetime\nprint(123)\nprint(456)\nprint(datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\"))",
         "path": "C:/Users/Administrator/Desktop/aaa.cmd",
         "encoding": "utf-8",
         "window_mode": "hidden",
@@ -51,5 +51,6 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 9,
-  "order": 5
+  "async_run": false,
+  "order": 8
 }

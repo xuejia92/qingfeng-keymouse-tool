@@ -9,11 +9,12 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
 
 from ..config import FindTask, resolve_template_path
 from .. import hotkey_policy
+from .frameless import FramelessDialog
 from .hotkey_edit import HotkeyEdit
 from .widgets import StopConditionGroup
 
 
-class FindTaskDialog(QDialog):
+class FindTaskDialog(FramelessDialog):
     # 点击"框选区域"：对话框已自隐藏，主窗口也应隐藏后再启动遮罩
     regionCaptureRequested = Signal()
     # 点击"重新截图选区"：同上，完成后经 set_template_image 回写新模板
@@ -31,7 +32,7 @@ class FindTaskDialog(QDialog):
         self._fill(task)
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.body())
         form = QFormLayout()
         form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
 

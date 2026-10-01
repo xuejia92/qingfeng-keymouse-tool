@@ -17,7 +17,13 @@
 """
 from __future__ import annotations
 
+import os
 import threading
+
+# Clash/V2Ray 等系统代理会把发往 127.0.0.1 的 CDP 请求也代理走（实测返回 502），
+# 导致 DrissionPage 的连接探测误判「浏览器不可用」。进程级禁掉对回环地址的代理。
+os.environ["NO_PROXY"] = "127.0.0.1,localhost," + os.environ.get("NO_PROXY", "")
+os.environ["no_proxy"] = os.environ["NO_PROXY"]
 
 _LOCK = threading.RLock()
 _browser = None            # Chromium 实例
@@ -79,15 +85,21 @@ def is_available() -> tuple[bool, str]:
     return True, ""
 
 
-def _build_options(mode: str):
+def _build_options(mode: str, local_port: int | None = None):
     """按启动模式构造 ChromiumOptions。
 
     front（前台显示）：默认最大化窗口，方便用户直接看到页面；
     headless / background：不干扰屏幕，也不最大化（最大化对无头无意义）。
     attach 模式不在此构造（它直接 Chromium(端口) 接管，见 get_browser）。
+
+    local_port 非空时给浏览器设上调试端口（等价命令行 `--remote-debugging-port=N`）：
+    这样**自启**的浏览器也会开放该端口，之后别的步骤/流程可以直接接管它，也方便用
+    浏览器开发者工具调试。见「打开浏览器」步骤的「调试端口」（默认 9333）。
     """
     _, ChromiumOptions, _ = _import_drission()
     co = ChromiumOptions()
+    if local_port:
+        co.set_local_port(int(local_port))
     if mode == "headless":
         co.headless(True)
     elif mode == "background":
@@ -100,7 +112,11 @@ def _build_options(mode: str):
 
 
 def _parse_attach_port(attach_port) -> int:
-    """解析接管端口：合法返回 int，否则抛 ValueError（带人话原因）。"""
+    """解析浏览器调试端口：合法返回 int，否则抛 ValueError（带人话原因）。
+
+    接管模式用它定位要连接的浏览器；自启模式用它给浏览器设
+    `--remote-debugging-port`（默认 9333，见 config 的 dp_browser 默认参数）。
+    """
     if attach_port in (None, ""):
         raise ValueError("未填写接管端口")
     try:
@@ -110,6 +126,34 @@ def _parse_attach_port(attach_port) -> int:
     if not (0 < port <= 65535):
         raise ValueError(f"接管端口超出范围（1~65535）：{port}")
     return port
+
+
+# 接管失败时的完整提示（含两个最常见的坑：Chrome 136+ 忽略默认目录上的调试端口、
+# 单实例吃掉带端口的启动；用户能照着自救）
+_ATTACH_FAIL_TIP = (
+    "接管失败：端口 {port} 上没有正在运行的浏览器。\n\n"
+    "最常见的两个原因：\n"
+    "① Chrome 136 起，官方禁止在「默认用户目录」上开调试端口——快捷方式只加\n"
+    "   --remote-debugging-port={port} 会被 Chrome 静默忽略（命令行里带了也没用），\n"
+    "   必须同时指定独立的用户目录。桌面已为你生成「Chrome调试模式({port}).bat」，\n"
+    "   双击它启动即可，等价命令行：\n"
+    "   chrome.exe --remote-debugging-port={port} --user-data-dir=\"D:\\ChromeDebug\"\n"
+    "   （这个浏览器可以和日常 Chrome 同时开着，互不影响。）\n"
+    "② Chrome 是单实例的：不带独立用户目录时，带端口的启动会被已开的 Chrome\n"
+    "   「吃掉」（新进程立刻退出），端口并没有打开。\n\n"
+    "验证端口是否真的开了：用那个浏览器访问 http://127.0.0.1:{port}/json/version，\n"
+    "能看到一段 JSON 就说明可以接管。\n\n"
+    "或者把「打开方式」改成「前台显示」，让程序自己启动一个带该端口的浏览器（最省事）。")
+
+
+def _port_has_browser(port: int) -> bool:
+    """端口上是否有浏览器调试服务在监听（连得上 CDP 端口就算）。"""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0):
+            return True
+    except OSError:
+        return False
 
 
 def _address_matches_port(address: str, port: int) -> bool:
@@ -148,7 +192,9 @@ def get_browser(mode: str = DEFAULT_MODE, attach_port=None):
     """取浏览器实例；没有或已失效就按 mode 建立。线程安全。
 
     mode 只在首次建立时生效，已有实例时沿用（见模块 docstring）：
-    - front/headless/background：用 ChromiumOptions 启动新浏览器；
+    - front/headless/background：用 ChromiumOptions 启动新浏览器，
+      并把 attach_port（调试端口，默认 9333）一并设上——自启的浏览器也开放该端口，
+      之后可以接管它、也方便调试；
     - attach：接管「已用 --remote-debugging-port=N 手动打开」的浏览器，
       等价于 Chromium(N)（文档：端口空闲时也会在该端口自动启动一个）。
       接管中的实例仍允许被之后的 open 步骤沿用（不重复开进程）。
@@ -158,7 +204,11 @@ def get_browser(mode: str = DEFAULT_MODE, attach_port=None):
     """
     global _browser, _mode
     with _LOCK:
-        port = _parse_attach_port(attach_port) if mode == "attach" else None
+        # 端口对所有模式都有效：接管模式是"连到哪"，自启模式是"开放哪个调试端口"。
+        # 留空表示不带端口（兼容旧流程）；填了非法值一律报错，别让步骤跑出意外行为。
+        port = None
+        if attach_port not in (None, ""):
+            port = _parse_attach_port(attach_port)
         if _browser is not None and not _browser_alive():
             _reset_browser()
         if _browser is not None:
@@ -174,12 +224,20 @@ def get_browser(mode: str = DEFAULT_MODE, attach_port=None):
                 _reset_browser()
             else:
                 return _browser
-        Chromium, _, _ = _import_drission()
+        Chromium, ChromiumOptions, _ = _import_drission()
         if mode == "attach":
-            _browser = Chromium(port)   # 接管该端口已有浏览器；空闲则自动启动
+            # 接管 = 只连不启：端口上没有浏览器就**明确报错**，绝不静默自启。
+            # ⚠️ DrissionPage 的 Chromium(端口) 在端口空闲时会自动启动一个新浏览器，
+            # 这正是「明明选了接管却开了新窗口」的根因（2026-09-27 用户报的 bug）。
+            # 先自己探测一遍给友好文案，再用 existing_only(True) 兜底（即便探测误判，
+            # DrissionPage 也不会再自启）。
+            if not _port_has_browser(port):
+                raise ValueError(_ATTACH_FAIL_TIP.format(port=port))
+            co = ChromiumOptions().set_local_port(port).existing_only(True)
+            _browser = Chromium(co)
             _mode = "attach"
             return _browser
-        _browser = Chromium(_build_options(mode))
+        _browser = Chromium(_build_options(mode, local_port=port))
         _mode = mode
         return _browser
 
@@ -251,6 +309,8 @@ def open_url(url: str, mode: str = DEFAULT_MODE, new_tab: bool = False,
         try:
             browser = (get_browser(mode) if mode != "attach"
                        else get_browser(mode, attach_port))
+        except ValueError as e:
+            return False, str(e)      # 接管失败等我们自己抛的、文案已完整的提示
         except Exception as e:
             return False, f"浏览器启动失败：{type(e).__name__}: {e}"
 
@@ -281,6 +341,8 @@ def open_url(url: str, mode: str = DEFAULT_MODE, new_tab: bool = False,
                     tab.get(url, timeout=max(float(timeout or 0), 1.0))
             except Exception as e:
                 return False, f"打开失败：{type(e).__name__}: {e}"
+        except ValueError as e:
+            return False, str(e)
         except Exception as e:
             return False, f"打开失败：{type(e).__name__}: {e}"
 

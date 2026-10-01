@@ -1,7 +1,7 @@
 """app/hotkey_policy.py 的热键冲突检测测试。
 
 集中校验所有「可设置快捷键」的地方不会重复设置同一个组合键：
-show_hide / stop_all / clicker / presser / find_task:<id> / flow:<id>。
+show_hide / stop_all / clicker / presser / middle_menu / find_task:<id> / flow:<id>。
 """
 from __future__ import annotations
 
@@ -33,6 +33,29 @@ class TestCollectHotkeys(unittest.TestCase):
         self.assertEqual(slots["clicker"], "f6")
         self.assertEqual(slots["presser"], "f7")
 
+    def test_collects_middle_menu_slot(self):
+        """中键菜单的快捷键也进统一冲突表，否则可能与其它热键撞车。"""
+        cfg = _build_cfg()
+        cfg.middle_menu_hotkey = "ctrl+alt+m"
+        by_slot = {s: (label, hk) for s, label, hk in
+                   hotkey_policy.collect_hotkeys(cfg)}
+        self.assertEqual(by_slot["middle_menu"][1], "ctrl+alt+m")
+        self.assertIn("中键菜单", by_slot["middle_menu"][0])
+
+    def test_middle_menu_unset_is_skipped(self):
+        cfg = _build_cfg()
+        cfg.middle_menu_hotkey = ""
+        slots = [s for s, _l, _h in hotkey_policy.collect_hotkeys(cfg)]
+        self.assertNotIn("middle_menu", slots)
+
+    def test_conflict_with_middle_menu(self):
+        cfg = _build_cfg()
+        cfg.middle_menu_hotkey = "ctrl+alt+m"
+        self.assertIn("中键菜单",
+                      hotkey_policy.find_hotkey_conflict("ctrl+alt+m", cfg))
+        self.assertIsNone(hotkey_policy.find_hotkey_conflict(
+            "ctrl+alt+m", cfg, exclude_slot="middle_menu"))
+
     def test_collects_find_task_and_flow_slots(self):
         cfg = _build_cfg()
         by_slot = {s: (label, hk) for s, label, hk in
@@ -48,6 +71,7 @@ class TestCollectHotkeys(unittest.TestCase):
         cfg = AppConfig()  # flows 默认空
         cfg.show_hide_hotkey = ""
         cfg.stop_all_hotkey = ""
+        cfg.group_hotkeys = {}         # 分组热键（2026-09-22）：空字典 = 无槽位
         cfg.clicker = ClickerConfig(hotkey="")
         cfg.presser = PresserConfig(hotkey="")
         cfg.flows = [Flow(name="无热键流程", hotkey="")]
@@ -111,7 +135,8 @@ class TestCheck(unittest.TestCase):
 
     def test_detects_conflict_after_set_config(self):
         hotkey_policy.set_config(_build_cfg())
-        self.assertEqual(hotkey_policy.check("f6"), "鼠标连点")
+        self.assertEqual(hotkey_policy.check("f6"),
+                         "该热键已被「鼠标连点」占用，请换一个组合")
 
     def test_respects_exclude_slot(self):
         hotkey_policy.set_config(_build_cfg())
@@ -122,6 +147,19 @@ class TestCheck(unittest.TestCase):
         self.assertIsNotNone(hotkey_policy.check("f6"))
         hotkey_policy.set_config(None)
         self.assertIsNone(hotkey_policy.check("f6"))
+
+
+class TestAltLetterAllowed(unittest.TestCase):
+    """Alt+字母不再拦截：热键引擎（pynput 低级钩子）能收到物理 Alt+字母，
+    且程序合成的按键不会误触发热键（根因已在引擎层解决）。"""
+
+    def tearDown(self):
+        hotkey_policy.set_config(None)
+
+    def test_alt_letter_passes_check(self):
+        self.assertIsNone(hotkey_policy.check("alt+a"))       # 无配置
+        hotkey_policy.set_config(_build_cfg())
+        self.assertIsNone(hotkey_policy.check("alt+a"))       # 有配置也不拦
 
 
 if __name__ == "__main__":

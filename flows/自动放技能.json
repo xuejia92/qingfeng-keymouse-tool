@@ -1,0 +1,156 @@
+{
+  "id": "2d90f94e0288",
+  "name": "自动放技能",
+  "group": "流放之路2",
+  "steps": [
+    {
+      "type": "while",
+      "name": "while 循环",
+      "params": {
+        "condition": "true",
+        "interval_sec": 0.1
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "press",
+      "name": "键盘连按",
+      "params": {
+        "keys": "q",
+        "interval_ms": 100,
+        "count": 1,
+        "hold_ms": 800,
+        "background": false,
+        "window_title": "",
+        "duration_sec": 3.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": true
+    },
+    {
+      "type": "press",
+      "name": "键盘连按",
+      "params": {
+        "keys": "r",
+        "interval_ms": 100,
+        "count": 1,
+        "hold_ms": 100,
+        "background": false,
+        "window_title": "",
+        "duration_sec": 0.6
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": true
+    },
+    {
+      "type": "press",
+      "name": "键盘连按",
+      "params": {
+        "keys": "t",
+        "interval_ms": 100,
+        "count": 1,
+        "hold_ms": 100,
+        "background": false,
+        "window_title": "",
+        "duration_sec": 0.4
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": true
+    },
+    {
+      "type": "status_log",
+      "name": "状态日志",
+      "params": {
+        "text": "你好",
+        "level": "normal"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "wait",
+      "name": "延时等待",
+      "params": {
+        "seconds": 1.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "status_log",
+      "name": "状态日志",
+      "params": {
+        "text": "这是警告内 ⚠️",
+        "level": "warn"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "wait",
+      "name": "延时等待",
+      "params": {
+        "seconds": 1.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "status_log",
+      "name": "状态日志",
+      "params": {
+        "text": "这是错误的内容❌这是错误的内容❌这是错误的内容❌",
+        "level": "error"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "wait",
+      "name": "延时等待",
+      "params": {
+        "seconds": 1.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "endWhile",
+      "name": "while 循环结束",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "",
+        "text": "",
+        "raw": false,
+        "show_type": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 15,
+  "async_run": true,
+  "order": 2
+}

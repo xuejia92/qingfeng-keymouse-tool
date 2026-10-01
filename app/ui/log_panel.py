@@ -11,10 +11,16 @@ from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QPlainTextEdit,
                                QPushButton, QVBoxLayout, QWidget)
 
+from . import theme
+from .widgets import DISCLOSURE_COLLAPSED, DISCLOSURE_EXPANDED
+
 _MAX_BLOCKS = 400          # 最多保留的日志行数
 _TEXT_HEIGHT = 180         # 日志文本区展开后的高度
-_PRINT_COLOR = "#1668a8"   # 打印输出模块输出的文字颜色（蓝）
-_NORMAL_COLOR = "#24292f"  # 普通日志文字颜色
+_TEXT_FONT_PT = 9          # 日志正文基准字号（实际值 = 基准 × 全局字体百分比）
+# 日志文字颜色随主题：打印输出=主色（蓝），普通日志=正文色。
+# 实际取色在 _rerender 里通过 theme.token 现取，切换主题后重刷即可换色。
+_PRINT_TOKEN = "primary"   # 打印输出模块输出的文字颜色
+_NORMAL_TOKEN = "text"     # 普通日志文字颜色
 
 
 class LogPanel(QWidget):
@@ -33,6 +39,8 @@ class LogPanel(QWidget):
         self._expanded = False
         self._summary = ""
         self._entries: list[tuple[str, str]] = []   # [(文本, 种类)]，用于过滤切换时重渲染
+        # 主题切换后重刷日志文字颜色（日志字色不走 QSS，是逐条插入格式）
+        theme.register_listener(self._rerender)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -114,7 +122,9 @@ class LogPanel(QWidget):
             "QPlainTextEdit { color: #24292f; background: #fbfcfd;"
             "border: 1px solid #d8dee4; border-top: none;"
             "padding: 4px 6px; font-size: 9pt; }")
-        self._text.setFont(QFont("Consolas", 9))
+        # 等宽字体（Consolas）由 setFont 显式设定，**QSS 的 font-size 对它无效**，
+        # 所以字号要在 _refresh_font 里按全局字体百分比现算（见那里注释）。
+        self._refresh_font()
         self._text.setFixedHeight(_TEXT_HEIGHT)
         self._text.setVisible(False)
         lay.addWidget(self._text)
@@ -129,7 +139,7 @@ class LogPanel(QWidget):
         self.expandedChanged.emit(checked)
 
     def _refresh_header(self) -> None:
-        arrow = "▾" if self._expanded else "▸"
+        arrow = (DISCLOSURE_EXPANDED if self._expanded else DISCLOSURE_COLLAPSED)
         base = f"运行日志 {arrow}"
         self._header.setText(f"{base}　{self._summary}" if self._summary else base)
 
@@ -152,11 +162,26 @@ class LogPanel(QWidget):
             del self._entries[:len(self._entries) - _MAX_BLOCKS]
         self._rerender()
 
+    def _refresh_font(self) -> None:
+        """按全局字体百分比刷新日志正文字号。
+
+        setFont 显式设定的字体**不会被 QSS 的 font-size 覆盖**（本面板用的是
+        Consolas 等宽字体），所以这里自己换算；只在字号真的变了时才 setFont
+        （setFont 会触发全量重新排版，日志追加很频繁，不能每行都调）。
+        """
+        want = theme.scaled_pt(_TEXT_FONT_PT)
+        if abs(self._text.font().pointSizeF() - want) < 0.01:
+            return
+        font = QFont("Consolas")
+        font.setPointSizeF(want)
+        self._text.setFont(font)
+
     def _rerender(self) -> None:
+        self._refresh_font()      # 主题/字体百分比变化都会走到这里（已注册为主题监听）
         print_fmt = QTextCharFormat()
-        print_fmt.setForeground(QColor(_PRINT_COLOR))
+        print_fmt.setForeground(QColor(theme.token(_PRINT_TOKEN)))
         normal_fmt = QTextCharFormat()
-        normal_fmt.setForeground(QColor(_NORMAL_COLOR))
+        normal_fmt.setForeground(QColor(theme.token(_NORMAL_TOKEN)))
 
         self._text.clear()
         cursor = self._text.textCursor()

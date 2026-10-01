@@ -1,8 +1,13 @@
-"""keyboard 库全局热键管理。
+"""全局热键管理。
 
-所有热键统一注册，触发时发出 triggered(hotkey) 信号（自动排队到主线程），
-由 MainWindow 的调度表分发。单键热键（如 F6）采用 suppress 拦截，
-避免按键漏进其他程序；含 Ctrl/Alt/Win 的组合键不拦截。
+内部用 pynput 低级钩子引擎（app/physical_hotkeys.py）：只认**物理按键**，
+程序自己合成的按键（流程发送的技能键等）不会触发热键——否则游戏自动化
+流程一边发技能键、一边被自己的按键停掉（2026-09-22 现场事故）。
+
+对外仍是：register(hotkey) / unregister(hotkey) / unregister_all()，
+触发时发出 triggered(hotkey) 信号（自动排队到主线程），由 MainWindow 分发。
+单键热键（如 F6）注册时带 suppress 拦截，避免按键漏进其他程序；
+含 Ctrl/Alt/Win 的组合键不拦截。
 """
 from __future__ import annotations
 
@@ -11,7 +16,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal
 
-
+from .physical_hotkeys import engine as _engine
 
 log = logging.getLogger(__name__)
 
@@ -36,18 +41,16 @@ class HotkeyManager(QObject):
         with self._lock:
             if hotkey in self._handlers:
                 return True
-            try:
-                import keyboard
-
-                suppress = not any(m in hotkey for m in ("ctrl+", "alt+", "win+"))
-                handler = keyboard.add_hotkey(hotkey, lambda: self._on_trigger(hotkey),
-                                              suppress=suppress)
-                self._handlers[hotkey] = handler
-                log.info("热键注册成功: %s (suppress=%s)", hotkey, suppress)
-                return True
-            except Exception:
-                log.exception("热键注册失败: %s", hotkey)
-                return False
+        suppress = not any(m in hotkey for m in ("ctrl+", "alt+", "win+"))
+        ok = _engine.register(hotkey, lambda: self._on_trigger(hotkey),
+                              suppress=suppress)
+        if not ok:
+            log.error("热键注册失败（含无法识别的键名）: %s", hotkey)
+            return False
+        with self._lock:
+            self._handlers[hotkey] = True
+        log.info("热键注册成功: %s (suppress=%s)", hotkey, suppress)
+        return True
 
     def _on_trigger(self, hotkey: str) -> None:
         log.info("热键触发: %s", hotkey)
@@ -58,27 +61,11 @@ class HotkeyManager(QObject):
     def unregister(self, hotkey: str) -> None:
         hotkey = self.normalize(hotkey)
         with self._lock:
-            handler = self._handlers.pop(hotkey, None)
-        if handler is None:
-            return
-        try:
-            import keyboard
-            keyboard.remove_hotkey(handler)
-            log.info("热键注销: %s", hotkey)
-        except Exception:
-            log.exception("热键注销失败: %s", hotkey)
+            self._handlers.pop(hotkey, None)
+        _engine.unregister(hotkey)
+        log.info("热键注销: %s", hotkey)
 
     def unregister_all(self) -> None:
         with self._lock:
-            handlers = list(self._handlers.values())
             self._handlers.clear()
-        try:
-            import keyboard
-            for h in handlers:
-                try:
-                    keyboard.remove_hotkey(h)
-                except Exception:
-                    pass
-            keyboard.unhook_all()
-        except Exception:
-            log.exception("keyboard unhook_all 失败")
+        _engine.unregister_all()

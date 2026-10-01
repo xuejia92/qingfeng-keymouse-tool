@@ -1,11 +1,15 @@
-"""中键菜单页：管理「鼠标中键弹出的快捷菜单」里的菜单项。
+"""中键菜单页：管理「快捷菜单」里的菜单项，并设置它的触发方式。
 
-作用范围与触发条件：程序运行期间**系统范围内**监听鼠标，用户松开鼠标中键
-时在光标处弹出本页配置的菜单；每个菜单项关联一个已实现好的流程，点击条目
-即运行对应流程（走 FlowTab.start_flow_if_idle，已在运行则跳过）。
+触发方式有两种，互相独立、可只开一种也可都开（见本页顶部提示）：
+1. **鼠标中键**——程序运行期间系统范围内监听，松开中键时在光标处弹出菜单；
+   关闭后不装鼠标钩子（鼠标拖动更顺，见 mouse_menu.py 的 GIL 说明）。
+2. **全局快捷键**——用户自己录制的组合键，按下即在光标处弹出菜单。
 
-本页负责：菜单项的增删改与排序、菜单总开关、是否拦截中键。
-数据存于 AppConfig.middle_menu_items；运行时的菜单构造见 build_menu()。
+每个菜单项关联一个已实现好的流程，点击条目即运行对应流程
+（走 FlowTab.start_flow_if_idle，已在运行则跳过）。
+
+本页负责：菜单项的增删改与排序、两种触发方式的开关与快捷键。
+数据存于 AppConfig.middle_menu_*；运行时的菜单构造见 build_menu()。
 """
 from __future__ import annotations
 
@@ -16,7 +20,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog,
                                QListWidgetItem, QMenu, QMessageBox, QPushButton,
                                QVBoxLayout, QWidget)
 
+from .. import hotkey_policy
+from . import theme
 from ..config import AppConfig, Flow, MiddleMenuItem
+from ..keymap import hotkey_display
+from .hotkey_edit import HotkeyEdit
 from .middle_menu_dialog import MiddleMenuDialog
 from .middle_menu_icons import ICON_SIZE, blank_icon, icon_for
 from .widgets import set_variant
@@ -136,22 +144,42 @@ class MiddleMenuTab(QWidget):
         title = QLabel("📋 中键菜单")
         title.setStyleSheet("font-size: 13pt; font-weight: 600; color: #24292f;")
         top.addWidget(title)
-        hint = QLabel("在任意位置按鼠标中键弹出下面的菜单，点击条目即运行对应流程。")
+        hint = QLabel("按鼠标中键或下面设置的快捷键，即可在鼠标位置弹出菜单；点击条目运行对应流程。")
         hint.setStyleSheet("color:#8a939c;")
         top.addWidget(hint)
         top.addStretch(1)
 
         # 开关先设好初值再连信号，避免构造期误发 changed
-        self.enable_check = QCheckBox("启用中键菜单")
-        self.enable_check.setToolTip("关闭后按中键不再弹出菜单")
+        self.enable_check = QCheckBox("鼠标中键触发")
+        self.enable_check.setToolTip(
+            "勾选后按鼠标中键弹出菜单；取消勾选则只认快捷键。\n"
+            "取消勾选会卸掉鼠标钩子——鼠标输入更顺滑（拖动不再发涩）。")
         self.enable_check.setChecked(bool(self.cfg.middle_menu_enabled))
         self.suppress_check = QCheckBox("拦截中键")
         self.suppress_check.setToolTip(
-            "勾选后中键不会传给目标窗口（例如浏览器不再触发中键自动滚动）")
+            "勾选后中键不会传给目标窗口（例如浏览器不再触发中键自动滚动）。\n"
+            "仅在勾选了「鼠标中键触发」时有意义。")
         self.suppress_check.setChecked(bool(self.cfg.middle_menu_suppress))
         top.addWidget(self.enable_check)
         top.addWidget(self.suppress_check)
         root.addLayout(top)
+
+        # 快捷键触发：用户自己录制；Esc 清除。走统一的冲突检测（槽位 middle_menu）
+        trigger = QHBoxLayout()
+        trigger.addWidget(QLabel("快捷键触发："))
+        self.hotkey_edit = HotkeyEdit()
+        self.hotkey_edit.setMaximumWidth(180)
+        self.hotkey_edit.set_conflict_checker(
+            lambda hk: hotkey_policy.check(hk, "middle_menu"))
+        self.hotkey_edit.set_hotkey(self.cfg.middle_menu_hotkey)
+        self.hotkey_edit.setToolTip(
+            "点击输入框后按下组合键即完成设置；按 Esc 清除。\n"
+            "留空则只能用鼠标中键触发。与其它页的热键重复时会提示。")
+        trigger.addWidget(self.hotkey_edit)
+        self.trigger_state = QLabel()
+        self.trigger_state.setWordWrap(True)
+        trigger.addWidget(self.trigger_state, 1)
+        root.addLayout(trigger)
 
         bar = QHBoxLayout()
         self.add_btn = QPushButton("＋ 添加菜单项")
@@ -205,6 +233,8 @@ class MiddleMenuTab(QWidget):
         # 信号在初值设置之后才连接
         self.enable_check.toggled.connect(self._on_enable_toggled)
         self.suppress_check.toggled.connect(self._on_suppress_toggled)
+        self.hotkey_edit.hotkeyChanged.connect(self._on_hotkey_changed)
+        self._refresh_trigger_state()
 
     # ---------- 列表 ----------
     def refresh_list(self) -> None:
@@ -224,7 +254,7 @@ class MiddleMenuTab(QWidget):
             if not icon.isNull():
                 entry.setIcon(icon)
             if flow is None:
-                entry.setForeground(QColor("#d64541"))
+                entry.setForeground(QColor(theme.token("danger")))
                 entry.setToolTip("原关联流程已被删除，请点「编辑」重新选择流程")
             else:
                 tips = [f"点击后运行流程：{flow.name}"]
@@ -330,14 +360,43 @@ class MiddleMenuTab(QWidget):
         self._sync_buttons()
         self.changed.emit()
 
-    # ---------- 开关 ----------
+    # ---------- 开关 / 触发方式 ----------
     def _on_enable_toggled(self, checked: bool) -> None:
         self.cfg.middle_menu_enabled = bool(checked)
+        self._refresh_trigger_state()
         self.changed.emit()
 
     def _on_suppress_toggled(self, checked: bool) -> None:
         self.cfg.middle_menu_suppress = bool(checked)
         self.changed.emit()
+
+    def _on_hotkey_changed(self, hotkey: str) -> None:
+        self.cfg.middle_menu_hotkey = (hotkey or "").strip().lower()
+        self._refresh_trigger_state()
+        self.changed.emit()
+
+    def _refresh_trigger_state(self) -> None:
+        """触发方式说明：两种方式各自独立，必须让用户看清「现在到底怎么弹菜单」。
+
+        最容易踩的坑是两种方式都没开——菜单静默失效、按什么都没反应，
+        所以这种情况用红字明确警告。
+        """
+        by_mouse = bool(self.cfg.middle_menu_enabled)
+        hotkey = (self.cfg.middle_menu_hotkey or "").strip()
+        shown = hotkey_display(hotkey)
+        if by_mouse and hotkey:
+            text, color = f"鼠标中键与 {shown} 都可以弹出菜单", "#8a939c"
+        elif by_mouse:
+            text, color = "当前只用鼠标中键触发（未设快捷键）", "#8a939c"
+        elif hotkey:
+            text, color = (f"当前只用 {shown} 触发；"
+                           "已卸掉鼠标钩子，鼠标输入更顺滑"), "#8a939c"
+        else:
+            text, color = ("⚠ 两种触发方式都没启用，菜单不会弹出——"
+                           "请勾选「鼠标中键触发」或设置一个快捷键"), "#d64541"
+        self.trigger_state.setText(text)
+        self.trigger_state.setStyleSheet(f"color: {color};")
+        self.suppress_check.setEnabled(by_mouse)
 
     # ---------- 预览 / 外部联动 ----------
     def _preview(self) -> None:

@@ -286,10 +286,14 @@ class TestScheduleTabLogic(unittest.TestCase):
     def _make_tab(self, cfg):
         from app.ui.schedule_tab import ScheduleTab
         class _FT:
-            def __init__(self): self.started = []
+            def __init__(self):
+                self.started = []
+                self.queued = False   # True = 本次触发只是排队，还没开始跑
             def start_flow_if_idle(self, fid, silent=False):
                 self.started.append((fid, silent))
                 return self._next_return
+            def is_queued(self, fid):
+                return self.queued
         ft = _FT()
         tab = ScheduleTab(cfg, ft)
         tab.flow_tab = ft   # 方便用例控制 _next_return
@@ -517,6 +521,26 @@ class TestScheduleTabLogic(unittest.TestCase):
             tab._on_due(t.id, t.flow_id)
             self.assertEqual(tab.flow_tab.started[-1], (t.flow_id, True),
                              "调度触发应标记 silent")
+
+    def test_fire_logs_queued_when_flow_waits(self):
+        """同步流程遇忙会排队：日志要说清「已加入排队」，而不是谎报「运行流程」。"""
+        from unittest import mock
+        from app.ui import schedule_tab as schedule_tab_mod
+        with TempConfigPaths():
+            cfg = AppConfig()
+            cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+            t = ScheduleTask(name="t", mode="day", at_time="09:00",
+                             flow_id=cfg.flows[0].id, flow_name="F")
+            cfg.schedule_tasks = [t]
+            tab = self._make_tab(cfg)
+            tab.flow_tab._next_return = True
+            tab.flow_tab.queued = True          # 本次触发只是排队
+            with mock.patch.object(schedule_tab_mod, "log") as log_mock:
+                tab._fire(t)
+            text = " ".join(str(c) for c in log_mock.call_args_list)
+            self.assertIn("已加入排队", text)
+            self.assertTrue(t.last_run, "排队也算已排期，last_run 该更新")
+            self.assertTrue(t.enabled, "排队不应把任务停用")
 
     def test_run_now_not_silent(self):
         """用户手动「立即运行」不 silent：失败保留弹窗反馈。"""

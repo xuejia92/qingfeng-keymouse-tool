@@ -349,9 +349,10 @@ class TestBlockModel(unittest.TestCase):
 
     def test_block_pairs_definition(self):
         self.assertEqual(BLOCK_PAIRS, {"if": "endif", "foreach": "endForeach",
-                                       "while": "endWhile"})
-        self.assertEqual(BLOCK_OPEN_TYPES, ("if", "foreach", "while"))
-        self.assertEqual(BLOCK_CLOSE_TYPES, ("endif", "endForeach", "endWhile"))
+                                       "for": "endFor", "while": "endWhile"})
+        self.assertEqual(BLOCK_OPEN_TYPES, ("if", "foreach", "for", "while"))
+        self.assertEqual(BLOCK_CLOSE_TYPES,
+                         ("endif", "endForeach", "endFor", "endWhile"))
         self.assertEqual(ALL_BRANCH_HEADS, ("elseif", "else"))
 
     def test_match_block_end_foreach(self):
@@ -485,7 +486,7 @@ class TestValidateBlockStructure(unittest.TestCase):
     def test_break_outside_loop_invalid(self):
         errors = validate_block_structure([_s("break")])
         self.assertEqual(len(errors), 1)
-        self.assertIn("只能放在 Foreach/while 循环体内", errors[0])
+        self.assertIn("只能放在 Foreach/for/while 循环体内", errors[0])
 
     def test_continue_outside_loop_invalid(self):
         errors = validate_block_structure([_s("wait"), _s("continue")])
@@ -540,6 +541,52 @@ class TestEnclosingLoop(unittest.TestCase):
     def test_bad_index(self):
         self.assertIsNone(enclosing_loop([], 0))
         self.assertIsNone(enclosing_loop([_s("wait")], 5))
+
+
+class TestStepOutputVariablesVisible(unittest.TestCase):
+    """条件判断要能看到「前面步骤产出的内部变量」（2026-09-26 修）。
+
+    bug 现场：conditions 里自己维护了一张小表，只列了 10 种类型，导致「等待文字出现 /
+    等待图片出现 / 屏幕取色 / 网络请求 / DeepSeek / 执行脚本」等步骤的产出变量在条件里
+    被判成「变量未定义」。现在直接引用 config.STEP_OUTPUT_FIELDS，这组测试防止再次不同步。
+    """
+
+    def test_every_registered_output_type_is_visible(self):
+        from app.config import STEP_OUTPUT_FIELDS, FlowStep as FS
+        for t, fields in STEP_OUTPUT_FIELDS.items():
+            params = {f: "v1" for f in fields}
+            got = defined_variables_before([FS(type=t, params=params)], [], 1)
+            self.assertEqual(got, {"v1"}, f"{t} 的产出变量对条件不可见")
+
+    def test_wait_text_vars_visible(self):
+        """用户报的具体场景：等待文字出现的 result_var / pos_var 都能引用。"""
+        step = FlowStep(type="wait_text",
+                        params={"result_var": "found", "pos_var": "pos"})
+        self.assertEqual(defined_variables_before([step], [], 1), {"found", "pos"})
+
+    def test_wait_image_vars_visible(self):
+        step = FlowStep(type="wait_image",
+                        params={"result_var": "found", "pos_var": "pos"})
+        self.assertEqual(defined_variables_before([step], [], 1), {"found", "pos"})
+
+    def test_script_and_deepseek_result_visible(self):
+        for t in ("script", "deepseek", "color_pick", "http_request"):
+            params = {"result_var": "r"} if t in ("script", "deepseek") else {"variable": "r"}
+            if t == "http_request":
+                params = {"text_var": "r"}
+            got = defined_variables_before([FlowStep(type=t, params=params)], [], 1)
+            self.assertEqual(got, {"r"}, t)
+
+    def test_non_string_param_value_does_not_crash(self):
+        """参数值是数字时（历史脏数据）不能抛异常。"""
+        step = FlowStep(type="wait_text", params={"result_var": 123})
+        self.assertEqual(defined_variables_before([step], [], 1), {"123"})
+
+    def test_declared_variables_still_counted(self):
+        from app.config import FlowVariable
+        got = defined_variables_before(
+            [FlowStep(type="wait")], [FlowVariable(name="x", type="integer")], 1)
+        self.assertEqual(got, {"x"})
 
 
 if __name__ == "__main__":

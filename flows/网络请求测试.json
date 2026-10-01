@@ -106,5 +106,6 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 6,
-  "order": 6
+  "async_run": false,
+  "order": 9
 }

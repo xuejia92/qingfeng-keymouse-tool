@@ -6,6 +6,7 @@
     python build.py --dir        onedir 目录模式，启动更快，适合改完代码快速验证
     python build.py --console    保留控制台窗口（排查启动崩溃用）
     python build.py --clean      清空 PyInstaller 缓存后全量重打
+    python build.py --sync-only  只把最新的 templates\\ / flows\\ 同步到 dist，不打包
 
 实测（20 核 / PyInstaller 6.15.0 / Python 3.12.10）：
 - 打包约 54 秒，产物约 105 MB 单文件（含 OCR 模型）。
@@ -44,6 +45,10 @@ DIST_DIR = os.path.join(BASE_DIR, "dist")
 WORK_DIR = os.path.join(BASE_DIR, "build_pyinstaller")
 EXE_NAME = f"{APP_NAME}.exe"
 
+# 打包后要同步到 dist 的数据目录：exe 读的是同级目录里的这些文件夹，
+# 只留在工作区的改动同步过去才算"打包即最新"（见 sync_data_dirs）。
+SYNC_DIRS = ("templates", "flows")
+
 # 按 sys.platform 拼模块名做动态导入的平台后端，静态分析扫不到
 HIDDEN_MODULES = [
     "pynput.keyboard._win32",
@@ -52,6 +57,12 @@ HIDDEN_MODULES = [
     # pyttsx3 按驱动名动态 __import__（'pyttsx3.drivers.sapi5'），静态扫描扫不到，
     # 不显式声明的话打包后语音播报会报「找不到 driver」
     "pyttsx3.drivers.sapi5",
+    # rapidocr 的三个实现子包是运行时才动态导入的（见 RAPIDOCR_SUBPACKAGES），
+    # 它们内部用的这几个库同样扫不到 —— 漏了会在 OCR 初始化时报
+    # ModuleNotFoundError（2026-09-26 修好 ch_ppocr_v3_det 后又撞上 pyclipper）
+    "pyclipper",
+    "shapely",
+    "six",
 ]
 
 # onnxruntime 的条件导入链（cpuinfo+py3nvml 存在时 import transformers 进而
@@ -89,12 +100,20 @@ DRISSION_DATA_FILES = (
 )
 
 # RapidOCR 的模型与配置（运行时按「包目录」拼路径读取）
-RAPIDOCR_DATA_FILES = (
-    "config.yaml",
-    os.path.join("models", "ch_PP-OCRv4_det_infer.onnx"),
-    os.path.join("models", "ch_PP-OCRv4_rec_infer.onnx"),
-    os.path.join("models", "ch_ppocr_mobile_v2.0_cls_infer.onnx"),
-)
+# rapidocr 的运行时资源：模型清单 config.yaml + models/ 下的 onnx 模型。
+# ⚠️ 模型文件名**不能硬编码**：上游换过版本（v3 → v4），写死会静默漏收 ——
+# 2026-09-26 就踩到「build.py 里写着 v4、实际装的只有 v3」这种情况，所以这里
+# 改成扫描 models/ 目录，把所有 .onnx 都带上。
+RAPIDOCR_CONFIG_FILE = "config.yaml"
+RAPIDOCR_MODEL_DIR = "models"
+RAPIDOCR_MODEL_EXT = ".onnx"
+
+# rapidocr 的三个模型实现子包是**动态导入**的，静态分析扫不到：
+#   rapid_ocr_api.py: sys.path.append(包目录) + importlib.import_module("ch_ppocr_v3_det")
+# config.yaml 里 Det/Cls/Rec 的 module_name 就是这三个名字。必须把整个目录当
+# **数据**原样带进包里（运行时 sys.path 才 import 得到）。
+# 漏带任何一个 → OCR 时报 ModuleNotFoundError: No module named 'ch_ppocr_v3_det'
+RAPIDOCR_SUBPACKAGES = ("ch_ppocr_v3_det", "ch_ppocr_v2_cls", "ch_ppocr_v3_rec")
 
 
 def _fmt(seconds: float) -> str:
@@ -163,12 +182,22 @@ def ensure_interpreter() -> None:
 
 
 def _is_running(exe_name: str) -> bool:
-    """exe 正在运行时无法被覆盖，构建前先查一次。"""
+    """exe 正在运行时无法被覆盖，构建前先查一次。
+
+    ⚠️ 中文 Windows 的 tasklist 输出是**本地代码页**（GBK），而 subprocess 的 text=True
+    默认按 UTF-8 解码 → 会抛 UnicodeDecodeError，且 `.stdout` 变成 None 引发
+    AttributeError（2026-09-26 实际把 `python build.py` 整个打断）。这里显式指定 mbcs
+    解码 + errors="replace" 兜底；任何异常一律当作「没在运行」，绝不拦住打包。
+    """
     try:
+        kwargs = {"capture_output": True, "text": True, "timeout": 15,
+                  "errors": "replace"}
+        if os.name == "nt":
+            kwargs["encoding"] = "mbcs"
         out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {exe_name}"],
-                             capture_output=True, text=True, timeout=15).stdout
+                             **kwargs).stdout or ""
         return exe_name.lower() in out.lower()
-    except (OSError, subprocess.SubprocessError):
+    except Exception:
         return False
 
 
@@ -200,13 +229,32 @@ def _add_data_args() -> list:
         print("[警告] 没找到 rapidocr_onnxruntime，跳过它的模型（文字识别将不可用）")
     else:
         pkg = os.path.dirname(os.path.abspath(rapidocr_onnxruntime.__file__))
-        for rel in RAPIDOCR_DATA_FILES:
-            src = os.path.join(pkg, rel)
-            if os.path.isfile(src):
-                target = os.path.dirname(f"rapidocr_onnxruntime/{rel}")
-                args.append(src + sep + target)
+        # ① 模型清单（config.yaml）：列着 Det/Cls/Rec 用哪个模块、哪个模型
+        cfg_src = os.path.join(pkg, RAPIDOCR_CONFIG_FILE)
+        if os.path.isfile(cfg_src):
+            args.append(cfg_src + sep + "rapidocr_onnxruntime")
+        else:
+            print(f"[警告] 缺少 RapidOCR 配置：{cfg_src}")
+        # ② 模型本体：models/ 下的 .onnx 全收（不写死文件名，换版本也不会漏）
+        model_dir = os.path.join(pkg, RAPIDOCR_MODEL_DIR)
+        models = []
+        if os.path.isdir(model_dir):
+            models = sorted(f for f in os.listdir(model_dir)
+                            if f.lower().endswith(RAPIDOCR_MODEL_EXT))
+        for name in models:
+            args.append(os.path.join(model_dir, name)
+                        + sep + f"rapidocr_onnxruntime/{RAPIDOCR_MODEL_DIR}")
+        if not models:
+            print(f"[警告] 没找到 RapidOCR 模型（{model_dir} 下没有 {RAPIDOCR_MODEL_EXT}）："
+                  "文字识别会失败")
+        # ③ 动态导入的实现子包：整目录当数据带进去（缺了会 ModuleNotFoundError）
+        for sub in RAPIDOCR_SUBPACKAGES:
+            sub_dir = os.path.join(pkg, sub)
+            if os.path.isdir(sub_dir):
+                args.append(sub_dir + sep + f"rapidocr_onnxruntime/{sub}")
             else:
-                print(f"[警告] 缺少 RapidOCR 数据文件：{src}")
+                print(f"[警告] 缺少 RapidOCR 子包 {sub}\\：OCR 会报 "
+                      f"ModuleNotFoundError: No module named '{sub}'")
 
     return args
 
@@ -232,6 +280,111 @@ def build_cmd(args) -> list:
     return cmd
 
 
+def _sync_one_dir(name: str, backup_root: str | None = None,
+                  quiet: bool = False) -> dict:
+    """把工作区的 <name> 目录同步到 dist/<name>，返回统计。
+
+    只做「源比目标新」的覆盖复制（按文件大小 + 修改时间判断），不删除目标里
+    多出来的文件——dist 里可能有用户自己放的东西，静默删除风险太大，改为只报告。
+
+    若某个文件**目标比源还新**（说明用户直接改过 dist 里那份，比如在打包后的
+    程序界面里调过流程），覆盖前先复制一份到 backup_root 下，避免静默丢改动。
+    """
+    src_root = os.path.join(BASE_DIR, name)
+    dst_root = os.path.join(DIST_DIR, name)
+    stat = {"added": 0, "updated": 0, "same": 0, "extra": [], "backed_up": []}
+    if not os.path.isdir(src_root):
+        if not quiet:
+            print(f"  [跳过] 工作区没有 {name}\\ 目录")
+        return stat
+    src_rel = set()
+    for dirpath, _dirnames, filenames in os.walk(src_root):
+        for fn in filenames:
+            src = os.path.join(dirpath, fn)
+            rel = os.path.relpath(src, src_root)
+            src_rel.add(rel)
+            dst = os.path.join(dst_root, rel)
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+                    stat["added"] += 1
+                    continue
+                s, d = os.stat(src), os.stat(dst)
+                # 大小不同必定要更新；大小相同再比修改时间（按秒取整，躲开精度抖动）
+                if s.st_size != d.st_size or int(s.st_mtime) > int(d.st_mtime):
+                    if backup_root and int(d.st_mtime) > int(s.st_mtime):
+                        bdst = os.path.join(backup_root, name, rel)
+                        os.makedirs(os.path.dirname(bdst), exist_ok=True)
+                        shutil.copy2(dst, bdst)
+                        stat["backed_up"].append(rel)
+                    shutil.copy2(src, dst)
+                    stat["updated"] += 1
+                else:
+                    stat["same"] += 1
+            except OSError as e:
+                print(f"  [警告] 同步 {name}\\{rel} 失败：{e}")
+    if os.path.isdir(dst_root):
+        for dirpath, _dirnames, filenames in os.walk(dst_root):
+            for fn in filenames:
+                rel = os.path.relpath(os.path.join(dirpath, fn), dst_root)
+                if rel not in src_rel:
+                    stat["extra"].append(rel)
+    return stat
+
+
+def sync_data_dirs(names=SYNC_DIRS, quiet: bool = False) -> dict:
+    """把工作区的 templates\\ / flows\\ 同步到 dist，保证 exe 旁边用的是最新文件。
+
+    exe 运行时读的是**自己同级目录**的 templates / flows；改完模板或流程如果只
+    留在工作区，打出来的包旁边还是旧文件，跑起来就是"改了没生效"。
+
+    覆盖掉「dist 里那份反而更新」的文件时，会先备份到 dist\\_sync_backup\\<时间戳>\\。
+
+    quiet=True 时**不打印任何正常信息**（只保留同步失败这类警告），用于每次启动都
+    调一次的场景（restart_watchdog 启动主程序前会调，别刷屏）；返回值汇总：
+    {"added", "updated", "same", "extra", "backed_up", "backup_dir"}。
+    """
+    if not quiet:
+        print("\n[同步] 把工作区的模板 / 流程同步到 dist")
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    backup_root = os.path.join(DIST_DIR, "_sync_backup", stamp)
+    summary = {"added": 0, "updated": 0, "same": 0, "extra": 0, "backed_up": 0,
+               "backup_dir": ""}
+    used_backup = False
+    for name in names:
+        st = _sync_one_dir(name, backup_root=backup_root, quiet=quiet)
+        summary["added"] += st["added"]
+        summary["updated"] += st["updated"]
+        summary["same"] += st["same"]
+        summary["backed_up"] += len(st["backed_up"])
+        summary["extra"] += len(st["extra"])
+        if not quiet:
+            print(f"  {name}\\：新增 {st['added']} · 更新 {st['updated']} · "
+                  f"已最新 {st['same']}")
+        if st["backed_up"]:
+            used_backup = True
+            if not quiet:
+                print(f"    注意：{len(st['backed_up'])} 个文件在 dist 里比工作区新"
+                      f"（像是直接在程序里改过），已备份后再覆盖")
+                for rel in st["backed_up"][:5]:
+                    print(f"      - {rel}")
+                if len(st["backed_up"]) > 5:
+                    print(f"      …等 {len(st['backed_up'])} 个")
+        if st["extra"] and not quiet:
+            print(f"    提示：dist\\{name}\\ 里有 {len(st['extra'])} 个源目录已不存在的文件"
+                  f"（未自动删除，需要清理请手动处理）")
+            for rel in st["extra"][:5]:
+                print(f"      - {rel}")
+            if len(st["extra"]) > 5:
+                print(f"      …等 {len(st['extra'])} 个")
+    if used_backup:
+        summary["backup_dir"] = backup_root
+        if not quiet:
+            print(f"    备份位置：{os.path.relpath(backup_root, BASE_DIR)}")
+    return summary
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="PyInstaller 打包")
     ap.add_argument("--dir", action="store_true",
@@ -240,10 +393,17 @@ def main() -> int:
                     help="保留控制台窗口（排查启动崩溃用）")
     ap.add_argument("--clean", action="store_true",
                     help="清空 PyInstaller 缓存后全量重打")
+    ap.add_argument("--sync-only", action="store_true",
+                    help="只把最新的 templates / flows 同步到 dist，不重新打包")
     args = ap.parse_args()
 
     ensure_interpreter()          # 必须在 os.chdir 之前：sys.argv[0] 可能是相对路径
     os.chdir(BASE_DIR)
+
+    if args.sync_only:
+        os.makedirs(DIST_DIR, exist_ok=True)
+        sync_data_dirs()
+        return 0
 
     if _is_running(EXE_NAME):
         print(f"[错误] {EXE_NAME} 正在运行，exe 被占用会导致打包失败。")
@@ -280,11 +440,15 @@ def main() -> int:
         print(f"\n[失败] 未找到产物: {exe}")
         return 1
 
+    # 打包成功后：把工作区最新的 templates / flows 同步到 dist，
+    # 免得 exe 旁边还是旧模板/旧流程（改了没生效最容易踩的坑）
+    sync_data_dirs()
+
     size_mb = os.path.getsize(exe) / 1048576
     print(f"\n[完成] 耗时 {_fmt(elapsed)}")
     print(f"       {os.path.relpath(exe, BASE_DIR)}（{size_mb:.1f} MB）")
-    print("       说明：config.json / templates\\ / flows\\ / app.log 会在 exe "
-          "同级目录自动生成；assets 图标已内嵌，无需随 exe 分发。")
+    print("       说明：config.json / templates\\ / flows\\ / app.log 在 exe 同级目录；"
+          "本次已把工作区最新的 templates 与 flows 同步过去。")
     return 0
 
 

@@ -8,17 +8,23 @@ run_ocr_step / run_clip_set_step / run_clip_get_step / run_py_func_step 是与 U
 from __future__ import annotations
 
 import inspect
+import math
 import os
+import subprocess
 import threading
 import time
 from dataclasses import asdict
+from datetime import datetime, timedelta
 
 import pyperclip
 
 from PySide6.QtCore import QObject, Signal
 
-from . import finder, input_actors, web_actors, win_actors
-from .config import parse_region_str, resolve_template_path
+from . import cancel_key, finder, input_actors, web_actors, win_actors
+from .config import (PRESS_HOLD_DEFAULT_MS, POWER_ACTIONS, STATUS_LOG_LEVEL_LABELS,
+                     STATUS_LOG_LEVELS, format_duration,
+                     parse_at_time, parse_region_str, resolve_template_path,
+                     shutdown_countdown_seconds)
 from .logbus import log, log_print, log_print_raw
 
 # 找图循环两次抓屏之间的间隔（秒）。
@@ -648,6 +654,31 @@ def run_log_step(p: dict, variables: dict) -> tuple[bool, str]:
         lines.insert(0, text)
     emit("\n".join(lines))
     return True, f"已打印 {len(names)} 个变量"
+
+
+def run_status_log_step(p: dict, variables: dict) -> tuple[bool, str]:
+    """执行「状态日志」步骤：把内容输出到屏幕上的「运行状态浮层」（透明控制台）。
+
+    与「打印输出」的区别：输出目标是**浮层**而不是主窗口的日志面板，而且带级别
+    （normal 普通 / warn 警告 / error 错误），浮层里按级别用不同颜色显示。
+    参数：text 输出内容（支持 $变量名 占位与字面量 \\n / \\b），level 级别。
+    浮层是 QWidget，流程在后台线程里跑，所以经 ui_call 调度到主线程再更新。
+    """
+    from . import running_overlay
+    from .screenshot_actor import ui_call
+    from .values import resolve_references
+
+    level = str(p.get("level") or "normal").strip().lower()
+    if level not in STATUS_LOG_LEVELS:
+        level = "normal"
+    text = _unescape_log_text(str(p.get("text") or ""))
+    if not text.strip():
+        return True, "状态日志：内容为空，已跳过"
+    resolved = str(resolve_references(text, variables)).strip()
+    if not resolved:
+        return True, "状态日志：内容为空，已跳过"
+    ui_call(lambda: running_overlay.append_status(resolved, level))
+    return True, f"状态日志[{STATUS_LOG_LEVEL_LABELS.get(level, '普通')}]已输出到浮层"
 
 
 def run_clip_set_step(p: dict, variables: dict) -> tuple[bool, str]:
@@ -1382,6 +1413,417 @@ def run_wait_image_step(p: dict, variables: dict,
             time.sleep(interval)
 
 
+# ---------------- 定时关机 ----------------
+
+# 长等待（指定时间点 / 倒计时）与提醒倒计时的轮询步长（秒）。
+# 独立成模块常量而不是内联字面量：测试要把它调小来压缩等待时间，
+# 绝不能去 patch 全局 time.sleep —— 那会让其它仍在跑的后台线程（调度器轮询等）
+# 睡了个寂寞，满核忙等把整套测试拖垮（见 tests 铁律）。
+SHUTDOWN_WAIT_TICK_SEC = 0.5
+SHUTDOWN_WARN_TICK_SEC = 0.5
+# 提醒倒计时写日志的间隔（秒）：每秒一条会刷屏，间隔太长又看不出进度。
+SHUTDOWN_WARN_LOG_EVERY_SEC = 5.0
+# 提醒期取消的分片轮询粒度（秒）：「流程停止」与「按 Esc」是两个 Event，没法一起等，
+# 只能分片轮询（见 _CancelGate.wait）。0.1 秒足够跟手，开销可忽略。
+SHUTDOWN_CANCEL_POLL_SEC = 0.1
+
+
+def _num_or(value, default: float, lo: float | None = None,
+            hi: float | None = None) -> float:
+    """把配置里的数字安全转成 float（非法值用 default），并按需夹到 [lo, hi]。"""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        out = float(default)
+    if lo is not None:
+        out = max(lo, out)
+    if hi is not None:
+        out = min(hi, out)
+    return out
+
+
+def power_command(action: str, force: bool, delay_sec: int = 0) -> list[str] | None:
+    """电源动作 -> 命令行（纯函数，便于测试与预览）。
+
+    shutdown/restart 走 shutdown.exe（/s 关机、/r 重启），force 时追加 /f
+    强制结束阻塞关机的程序；sleep/lock 走 rundll32，与 /f 无关。
+    未知动作返回 None。argv[0] 的实际路径由 _run_power_command 解析补齐。
+    """
+    delay = max(0, int(delay_sec or 0))
+    if action == "shutdown":
+        return ["shutdown", "/s", "/t", str(delay)] + (["/f"] if force else [])
+    if action == "restart":
+        return ["shutdown", "/r", "/t", str(delay)] + (["/f"] if force else [])
+    if action == "sleep":
+        # 0,1,0 = 不强制、允许挂起、不关闭电源；需系统已启用睡眠才生效
+        return ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]
+    if action == "lock":
+        return ["rundll32.exe", "user32.dll,LockWorkStation"]
+    return None
+
+
+def _shutdown_exe() -> str:
+    """取 System32 下 shutdown.exe 的绝对路径。
+
+    不让 Windows 按 PATH / 当前目录搜索：程序目录就在用户可写的盘上，
+    同名的 shutdown.exe 会被优先执行（同 find.exe 被 Git 版 find 顶掉的坑）。
+    """
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    path = os.path.join(root, "System32", "shutdown.exe")
+    return path if os.path.isfile(path) else "shutdown"
+
+
+def _power_run(argv: list[str]):
+    """真正执行电源命令（单点封装：测试只 patch 这一个函数，不碰全局 subprocess）。"""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    return subprocess.run(argv, capture_output=True, text=True, errors="replace",
+                          timeout=15, creationflags=flags)
+
+
+def _run_power_command(cmd: list[str]) -> tuple[bool, str]:
+    """执行电源命令，返回 (成功?, 说明)。失败时带上退出码与命令输出便于排查。"""
+    argv = list(cmd)
+    if argv and str(argv[0]).lower() == "shutdown":
+        argv[0] = _shutdown_exe()
+    try:
+        proc = _power_run(argv)
+    except FileNotFoundError:
+        return False, f"找不到命令：{argv[0]}"
+    except subprocess.TimeoutExpired:
+        return False, "命令执行超时"
+    except OSError as e:
+        return False, f"{type(e).__name__}: {e}"
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
+        return False, f"返回码 {proc.returncode}" + (f"：{msg}" if msg else "")
+    return True, "已下发"
+
+
+def _shutdown_sleep(seconds: float, stop: threading.Event | None) -> None:
+    """可被 stop 提前打断的等待。"""
+    seconds = max(0.0, float(seconds or 0))
+    if stop is not None:
+        stop.wait(seconds)
+    else:
+        time.sleep(seconds)
+
+
+def _wait_for_seconds(seconds: float, stop: threading.Event | None) -> str:
+    """等到 seconds 秒之后；中途 stop 置位则提前返回「已手动停止」，正常等到返回空串。"""
+    deadline = time.monotonic() + max(0.0, float(seconds or 0))
+    while True:
+        if stop is not None and stop.is_set():
+            return "已手动停止"
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            return ""
+        _shutdown_sleep(min(SHUTDOWN_WAIT_TICK_SEC, remain), stop)
+
+
+def _wait_at_time(p: dict, stop: threading.Event | None) -> tuple[bool, str, str]:
+    """「指定时间点」触发：等到今天的 HH:MM；已过则按配置顺延次日或判失败。"""
+    parsed = parse_at_time(p.get("at_time"))
+    if parsed is None:
+        return False, "时间点格式无效（应填 HH:MM，例如 23:30）", ""
+    hh, mm = parsed
+    now = datetime.now()
+    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if target <= now:
+        if (p.get("at_time_if_passed") or "next_day") == "fail":
+            return False, f"时间点 {hh:02d}:{mm:02d} 今天已过（配置为「过点判失败」）", ""
+        target += timedelta(days=1)
+    wait = (target - now).total_seconds()
+    log(f"定时关机：等待到 {target:%Y-%m-%d %H:%M}（{format_duration(wait)}后触发）")
+    reason = _wait_for_seconds(wait, stop)
+    if reason:
+        return False, reason, ""
+    return True, "", f"{target:%H:%M}"
+
+
+def _wait_countdown(p: dict, stop: threading.Event | None) -> tuple[bool, str, str]:
+    """「倒计时」触发：等满 时/分/秒 之和。"""
+    secs = shutdown_countdown_seconds(p)
+    if secs <= 0:
+        return False, "倒计时时长必须大于 0（时 / 分 / 秒至少填一项）", ""
+    log(f"定时关机：倒计时 {format_duration(secs)} 后触发")
+    reason = _wait_for_seconds(secs, stop)
+    if reason:
+        return False, reason, ""
+    return True, "", f"倒计时 {format_duration(secs)} 结束"
+
+
+def _wait_condition(p: dict, variables: dict,
+                    stop: threading.Event | None) -> tuple[bool, str, str]:
+    """「条件触发」：按间隔轮询屏幕，直到出现指定图片或文字。
+
+    参数：cond_mode（image=找图 / text=找字）、image/image_path/confidence、
+    text/tolerance、region（两种条件共用，空=全屏）、interval_sec（检测间隔）、
+    cond_timeout_sec（最长等待，0=一直等）、hold_sec（须连续成立的秒数，0=出现即触发）。
+
+    OCR / 模板图加载失败一律判失败（与「等待文字出现」「等待图片出现」一致），
+    否则「OCR 用不了」会被误当成「条件一直没满足」而永远挂着。
+    """
+    cond_mode = (p.get("cond_mode") or "image").strip()
+    region = str(p.get("region") or "")
+    interval = max(0.05, _num_or(p.get("interval_sec"), 1.0))
+    timeout = max(0.0, _num_or(p.get("cond_timeout_sec"), 0.0))
+    hold = max(0.0, _num_or(p.get("hold_sec"), 0.0))
+
+    if cond_mode == "text":
+        from .values import resolve_references
+        from . import ocr as ocr_actor
+        keyword = resolve_references(str(p.get("text") or ""), variables).strip()
+        if not keyword:
+            return False, "目标文字为空", ""
+        tolerance = _num_or(p.get("tolerance"), 0.8, 0.0, 1.0)
+
+        def probe() -> tuple[str, str]:
+            ok, value, why = ocr_actor.find_text(region=region, text=keyword,
+                                                 tolerance=tolerance)
+            if not ok:
+                return "error", why
+            if value is None:
+                return "miss", ""
+            return "hit", f"文字「{keyword}」已出现（{int(value['x'])}, {int(value['y'])}）"
+    elif cond_mode == "image":
+        template = finder.load_template(
+            resolve_template_path(p.get("image", ""), p.get("image_path", "")) or "")
+        if template is None:
+            return False, "模板图加载失败", ""
+        confidence = _num_or(p.get("confidence"), 0.85, 0.0, 1.0)
+        region_tuple = parse_region_str(region)
+
+        def probe() -> tuple[str, str]:
+            try:
+                screen = finder.grab_full_screen()
+                hit = (finder.locate_in_region(template, screen, confidence, region_tuple)
+                       if region_tuple is not None
+                       else finder.locate(template, screen, confidence))
+            except Exception as e:
+                return "error", f"找图失败：{type(e).__name__}: {e}"
+            if hit is None:
+                return "miss", ""
+            return "hit", f"图片已出现（{int(hit[0])},{int(hit[1])}，置信度 {hit[2]:.2f}）"
+    else:
+        return False, f"未知的条件类型: {cond_mode}", ""
+
+    start = time.monotonic()
+    hit_since: float | None = None
+    while True:
+        if stop is not None and stop.is_set():
+            return False, "已手动停止", ""
+        state, detail = probe()
+        if state == "error":
+            return False, detail, ""
+        if state == "hit":
+            if hold <= 0:
+                return True, "", detail
+            now = time.monotonic()
+            if hit_since is None:
+                hit_since = now
+                log(f"定时关机：条件已命中，需连续保持 {format_duration(hold)} 才触发")
+            if now - hit_since >= hold:
+                return True, "", f"{detail}（已连续保持 {format_duration(hold)}）"
+        else:
+            hit_since = None
+            if timeout > 0 and (time.monotonic() - start) >= timeout:
+                return False, f"等待条件超时（{format_duration(timeout)}内未命中）", ""
+        _shutdown_sleep(interval, stop)
+
+
+def _overlay_font_size(p: dict) -> int:
+    """配置里的浮层字号 -> 合法 pt 值（非法 / 越界都收进安全范围）。"""
+    from . import power_overlay
+    return power_overlay.clamp_font_size(
+        _num_or(p.get("warn_overlay_font_size"), power_overlay.DEFAULT_FONT_SIZE))
+
+
+def _overlay_note(esc_ok: bool) -> str:
+    """浮层副行文案：Esc 监听没挂上就别写「按 Esc 取消」，免得提示一句做不到的话。"""
+    from . import power_overlay
+    return power_overlay.NOTE if esc_ok else power_overlay.NOTE_NO_ESC
+
+
+def _show_warn_overlay(p: dict, act_label: str, remain_sec: float,
+                       note: str = "") -> bool:
+    """在屏幕下方刷新大号红色倒计时浮层；返回浮层这次是否成功显示。
+
+    浮层只是「抬头看一眼还剩几秒」的提醒：没有 Qt 实例 / 平台不支持时静默降级成
+    「只有日志」，**绝不因为浮层画不出来就把关机流程判失败**。
+    `note` 是副行的取消提示（默认用浮层自带的文案）。
+    """
+    try:
+        from . import power_overlay
+        return power_overlay.show_countdown(
+            remain_sec, act_label, font_size=_overlay_font_size(p),
+            note=note or power_overlay.NOTE) is not None
+    except Exception:
+        return False
+
+
+def _hide_warn_overlay() -> None:
+    """收起浮层：正常执行、被取消、抛异常三条路径都得收，别把它留在桌面上。"""
+    try:
+        from . import power_overlay
+        power_overlay.hide_countdown()
+    except Exception:
+        pass
+
+
+class _CancelGate:
+    """提醒倒计时期间的取消信号：把「流程停止」与「按 Esc」合成一个可等待对象。
+
+    鸭子类型对齐 `threading.Event`（只用 `is_set()` / `wait(seconds)`），
+    所以能直接当 stop 传给 `_shutdown_sleep`，不必给等待函数加参数。
+    `source()` 说明是谁先触发的——两种情况用户看到的措辞不一样。
+    """
+
+    def __init__(self, stop: threading.Event | None = None):
+        self._stop = stop
+        self._esc = threading.Event()
+
+    def press_esc(self) -> None:
+        """Esc 监听的回调（跑在键盘钩子线程里，只置事件，见 cancel_key 的说明）。"""
+        self._esc.set()
+
+    def is_set(self) -> bool:
+        return self._esc.is_set() or (self._stop is not None and self._stop.is_set())
+
+    def wait(self, seconds: float | None = None) -> bool:
+        """等 seconds 秒；期间任一取消源触发就立刻返回 True。"""
+        timeout = None if seconds is None else max(0.0, _num_or(seconds, 0.0))
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self.is_set():
+                return True
+            if deadline is None:
+                self._esc.wait(SHUTDOWN_CANCEL_POLL_SEC)
+            else:
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    return False
+                self._esc.wait(min(SHUTDOWN_CANCEL_POLL_SEC, remain))
+
+    def source(self) -> str:
+        """谁先取消的：`"stop"` / `"esc"` / `""`（没人取消）。
+
+        「流程停止」优先：流程正在收摊时再按 Esc，原因该记在停止上。
+        """
+        if self._stop is not None and self._stop.is_set():
+            return "stop"
+        return "esc" if self._esc.is_set() else ""
+
+
+def _warn_before_power(p: dict, stop: threading.Event | None, act_label: str) -> str:
+    """触发后、真正执行电源动作前的提醒倒计时（warn_sec）。
+
+    返回空串表示倒计时正常走完（可以执行了）；非空是终止原因。两种取消方式：
+    点流程「停止」，或在提醒期内**直接按 Esc 键**（浮层副行就写着这句提示）。
+    命令只在倒计时结束的最后一刻才发出，所以「取消」不会在系统里留下挂着的关机计划。
+
+    倒计时期间在屏幕下方显示大号红色浮层（warn_overlay 可关），让用户看得见
+    「还剩几秒就要关机了」——否则用户只能靠日志察觉。
+
+    Esc 监听**只在提醒期挂着**：长倒计时 / 条件等待会持续几十分钟甚至几小时，
+    用户在别的程序里随手按 Esc 就会把任务无声取消掉，所以那两段不挂（已与用户确认）。
+    """
+    warn = _num_or(p.get("warn_sec"), 30.0, 0.0, 3600.0)
+    if warn <= 0:
+        return ""
+    show_overlay = bool(p.get("warn_overlay", True))
+    gate = _CancelGate(stop)
+    with cancel_key.EscListener(gate.press_esc) as esc_ok:
+        hint = "按 Esc 键或点流程「停止」取消" if esc_ok else "点流程「停止」可取消"
+        note = _overlay_note(esc_ok)
+        log(f"定时关机：{format_duration(warn)}后{act_label}（{hint}）")
+        deadline = time.monotonic() + warn
+        next_log = time.monotonic() + SHUTDOWN_WARN_LOG_EVERY_SEC
+        # 浮层按「秒」刷新：轮询是每 0.5 秒一次，但文案同一秒内不该重画
+        # （白跑一次跨线程调度，浮层宽度还会随字数反复跳）。
+        overlay_on = show_overlay and _show_warn_overlay(p, act_label, warn, note)
+        shown_sec = int(math.ceil(warn))
+        try:
+            while True:
+                source = gate.source()
+                if source:
+                    if source == "esc":
+                        log(f"定时关机：已按 Esc 键取消{act_label}")
+                        return f"已取消{act_label}（按下 Esc 键）"
+                    log(f"定时关机：已取消{act_label}")
+                    return f"已取消{act_label}（收到停止指令）"
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    return ""
+                sec = int(math.ceil(remain))
+                if overlay_on and sec != shown_sec:
+                    overlay_on = _show_warn_overlay(p, act_label, sec, note)
+                    shown_sec = sec
+                if time.monotonic() >= next_log:
+                    log(f"定时关机：{act_label}倒计时 {format_duration(remain)}"
+                        f"（{hint}）")
+                    next_log = time.monotonic() + SHUTDOWN_WARN_LOG_EVERY_SEC
+                _shutdown_sleep(min(SHUTDOWN_WARN_TICK_SEC, remain), gate)
+        finally:
+            if show_overlay:
+                _hide_warn_overlay()
+
+
+def run_shutdown_step(p: dict, variables: dict,
+                      stop: threading.Event | None = None) -> tuple[bool, str]:
+    """执行「定时关机」步骤：先等触发条件成立，再执行关机 / 重启 / 睡眠 / 锁定。
+
+    三种触发方式（trigger_mode）：
+      at_time   指定时间点（at_time="HH:MM"，24 小时制）；今天该时刻已过时按
+                at_time_if_passed 决定顺延到次日（next_day，默认）还是判失败（fail）。
+      countdown 倒计时（count_hours / count_minutes / count_seconds 之和须 > 0）。
+      condition 条件触发（cond_mode=image 找图 / text 找字），按 interval_sec 轮询屏幕。
+
+    触发后执行（三种方式共用）：先走 warn_sec 秒的提醒倒计时（可取消，期间在屏幕
+    下方显示大号红色倒计时浮层，可用 warn_overlay 关掉、warn_overlay_font_size 调字号），
+    再按 power_action 执行电源动作；force_close_apps 决定是否 /f 强制结束未保存的程序；
+    dry_run=True 只写日志不真正执行（验证配置用）。
+
+    停止语义：触发前被打断 -> 判失败「已手动停止」；提醒倒计时内被打断 -> 取消执行，
+    返回「已取消××（收到停止指令）」或「已取消××（按下 Esc 键）」，
+    两种情况都不会留下系统侧的关机计划。
+    """
+    if stop is not None and stop.is_set():
+        return False, "已手动停止"
+    mode = (p.get("trigger_mode") or "countdown").strip()
+    action = (p.get("power_action") or "shutdown").strip()
+    act_label = POWER_ACTIONS.get(action)
+    if act_label is None:
+        return False, f"未知的电源动作: {action}"
+
+    if mode == "at_time":
+        ok, reason, when = _wait_at_time(p, stop)
+    elif mode == "countdown":
+        ok, reason, when = _wait_countdown(p, stop)
+    elif mode == "condition":
+        ok, reason, when = _wait_condition(p, variables, stop)
+    else:
+        return False, f"未知的触发方式: {mode}"
+    if not ok:
+        return False, reason
+
+    cancel = _warn_before_power(p, stop, act_label)
+    if cancel:
+        return False, cancel
+
+    if p.get("dry_run"):
+        log(f"定时关机：[演练] {when}，未真正执行{act_label}")
+        return True, f"[演练] {when}，未执行{act_label}"
+
+    cmd = power_command(action, bool(p.get("force_close_apps")), 0)
+    if cmd is None:
+        return False, f"未知的电源动作: {action}"
+    log("定时关机：执行 " + " ".join(cmd))
+    ok, why = _run_power_command(cmd)
+    if not ok:
+        return False, f"{act_label}失败：{why}"
+    return True, f"{when}，已执行{act_label}"
+
+
 def run_yolo_detect_step(p: dict, variables: dict,
                          variable_types: dict | None = None,
                          stop: threading.Event | None = None) -> tuple[bool, str]:
@@ -1591,19 +2033,52 @@ def _coord_from_pos_var(expr: str, variables: dict | None,
         return int(default_x), int(default_y)
 
 
-def run_click_step(p: dict, stop: threading.Event, progress, variables: dict | None = None) -> str:
-    """公共鼠标点击循环。返回结束原因。
+def _live_params(p):
+    """取最新参数：p 是 dict 就用它本身；是函数就调一次拿最新值。
+
+    主界面连点器/连按器传函数（背后是主线程实时更新的配置快照），这样运行期间
+    改「间隔」能立刻生效；流程步骤传 dict（参数在启动那刻固定）。
+    """
+    return p() if callable(p) else p
+
+
+def _interval_seconds(params: dict, default_ms: int, min_ms: int) -> float:
+    """参数里的 interval_ms → 秒（带下限保护；连点/连按下限 20ms、找图 50ms）。"""
+    return max(int(params.get("interval_ms", default_ms) or default_ms), min_ms) / 1000.0
+
+
+def _hold_seconds(params: dict) -> float:
+    """「键盘连按」每次按下的**按住时长**（秒）；缺省用 config.PRESS_HOLD_DEFAULT_MS。
+
+    非法值按默认处理，负数按 0（= 按下即松开）。
+    """
+    raw = params.get("hold_ms", PRESS_HOLD_DEFAULT_MS)
+    try:
+        ms = int(raw)
+    except (TypeError, ValueError):
+        ms = PRESS_HOLD_DEFAULT_MS
+    return max(ms, 0) / 1000.0
+
+
+def run_click_step(p: dict, stop: threading.Event, progress, variables: dict | None = None,
+                   zero_count_as_one: bool = True) -> str:
+    """公共鼠标连点循环。返回结束原因。
 
     variables: 流程运行期变量（可选）。固定坐标模式下 pos_var 非空时，
     坐标优先取变量值（"x,y" 坐标，或 "x1,y1,x2,y2" 区域取中心），
     未定义或格式不对回退 pos_x / pos_y。
+    zero_count_as_one: count<=0 且 duration<=0 时是否按「1 次」处理。
+    流程步骤必须保持 True——「无限」步骤会把流程永远卡住；主界面连点器/
+    连按器/找图任务的界面上写的是「0 = 无限」（widgets.StopConditionGroup），
+    它们必须传 False，否则用户按「无限」启动只会执行 1 次（2026-09-22 修）。
     """
+    p_source = p                     # 可能是「取最新参数的函数」，循环里刷新间隔用
+    p = _live_params(p_source)       # 这之后 p 一定是 dict
     button = p.get("mouse_button", "left")
     times = 2 if p.get("click_type") == "double" else 1
-    interval = max(int(p.get("interval_ms", 100) or 100), 20) / 1000.0
     count = int(p.get("count", 1) or 0)
     duration = float(p.get("duration_sec", 0) or 0)
-    if count <= 0 and duration <= 0:
+    if zero_count_as_one and count <= 0 and duration <= 0:
         count = 1  # 防呆：流程中"无限"步骤按 1 次执行，避免流程卡死
     background = bool(p.get("background"))
     window_title = (p.get("window_title") or "").strip()
@@ -1621,6 +2096,8 @@ def run_click_step(p: dict, stop: threading.Event, progress, variables: dict | N
     done, t0 = 0, time.monotonic()
     try:
         while True:
+            # 每轮重读间隔：主界面连点器运行期间改「点击间隔」也能立刻生效
+            interval = _interval_seconds(_live_params(p_source), 100, 20)
             if p.get("fixed_position"):
                 if p.get("pos_var"):
                     x, y = _coord_from_pos_var(p.get("pos_var"), variables,
@@ -1643,15 +2120,21 @@ def run_click_step(p: dict, stop: threading.Event, progress, variables: dict | N
             win_actors.restore_foreground()
 
 
-def run_press_step(p: dict, stop: threading.Event, progress) -> str:
-    """公共键盘连按循环。返回结束原因。"""
+def run_press_step(p: dict, stop: threading.Event, progress,
+                   zero_count_as_one: bool = True) -> str:
+    """公共键盘连按循环。返回结束原因。
+
+    zero_count_as_one: 见 run_click_step——流程步骤保持 True（防卡死），
+    主界面「键盘连按」传 False（次数 0 = 真正无限连按）。
+    """
+    p_source = p
+    p = _live_params(p_source)
     keys = (p.get("keys") or "").strip()
     if not keys:
         return "未设置按键"
-    interval = max(int(p.get("interval_ms", 100) or 100), 20) / 1000.0
     count = int(p.get("count", 1) or 0)
     duration = float(p.get("duration_sec", 0) or 0)
-    if count <= 0 and duration <= 0:
+    if zero_count_as_one and count <= 0 and duration <= 0:
         count = 1
     background = bool(p.get("background"))
     window_title = (p.get("window_title") or "").strip()
@@ -1667,7 +2150,11 @@ def run_press_step(p: dict, stop: threading.Event, progress) -> str:
     done, t0 = 0, time.monotonic()
     try:
         while True:
-            input_actors.press_combo(keys)
+            live = _live_params(p_source)
+            # 每轮重读：主界面「键盘连按」运行期间改「按下间隔 / 每次按住」立刻生效
+            interval = _interval_seconds(live, 100, 20)
+            hold = _hold_seconds(live)
+            input_actors.press_combo(keys, hold_sec=hold, stop=stop)
             done += 1
             progress(done, time.monotonic() - t0)
             reason = _limit_reason(stop, done, t0, count, duration)
@@ -1700,21 +2187,28 @@ def _wait_hit(template, confidence: float, timeout: float, region,
         stop.wait(grab_interval(region))
 
 
-def run_find_step(p: dict, stop: threading.Event, progress) -> str:
-    """公共找图点击循环。返回结束原因（"等待目标超时" 视为步骤失败）。"""
+def run_find_step(p: dict, stop: threading.Event, progress,
+                  zero_count_as_one: bool = True) -> str:
+    """公共找图点击循环。返回结束原因（"等待目标超时" 视为步骤失败）。
+
+    zero_count_as_one: 见 run_click_step——流程步骤保持 True（防卡死），
+    主界面「找图点击」任务传 False（次数 0 = 命中后就一直点，直到按停止）。
+    """
+    p_source = p
+    p = _live_params(p_source)
     template = finder.load_template(
         resolve_template_path(p.get("image", ""), p.get("image_path", "")) or "")
     if template is None:
         return "模板图加载失败"
     region = parse_region_str(str(p.get("region", "") or ""))
-    interval = max(int(p.get("interval_ms", 500) or 500), 50) / 1000.0
     timeout = float(p.get("search_timeout_sec", 10) or 0)
     count = int(p.get("count", 1) or 0)
     duration = float(p.get("duration_sec", 0) or 0)
-    if count <= 0 and duration <= 0:
+    if zero_count_as_one and count <= 0 and duration <= 0:
         count = 1
     done, t0 = 0, time.monotonic()
     while True:
+        interval = _interval_seconds(_live_params(p_source), 500, 50)
         hit = _wait_hit(template, float(p.get("confidence", 0.85)), timeout, region, stop)
         if hit is None:
             return "已手动停止" if stop.is_set() else "等待目标超时"
@@ -1781,11 +2275,13 @@ class ClickTask(BaseTask):
         self.get_config = lambda: None
 
     def work(self) -> str:
-        cfg = self.get_config()
-        if cfg is None:
+        if self.get_config() is None:
             return "未配置"
-        return run_click_step(asdict(cfg), self._stop,
-                              lambda d, e: self.progress.emit(d, e))
+        # 传「取最新配置的函数」而非快照：运行期间改间隔能立刻生效（见 _live_params）；
+        # 连点器界面的「次数 0」= 无限，也不能沿用流程步骤的「0 → 1 次」防呆
+        return run_click_step(lambda: asdict(self.get_config()), self._stop,
+                              lambda d, e: self.progress.emit(d, e),
+                              zero_count_as_one=False)
 
 
 class PressTask(BaseTask):
@@ -1796,11 +2292,13 @@ class PressTask(BaseTask):
         self.get_config = lambda: None
 
     def work(self) -> str:
-        cfg = self.get_config()
-        if cfg is None:
+        if self.get_config() is None:
             return "未配置"
-        return run_press_step(asdict(cfg), self._stop,
-                              lambda d, e: self.progress.emit(d, e))
+        # 传「取最新配置的函数」而非快照：运行期间改「按下间隔」立刻生效（见 _live_params）；
+        # 连按器界面的「次数 0」= 无限，不能沿用流程步骤的「0 → 1 次」防呆
+        return run_press_step(lambda: asdict(self.get_config()), self._stop,
+                              lambda d, e: self.progress.emit(d, e),
+                              zero_count_as_one=False)
 
 
 class FindTaskRunner(BaseTask):
@@ -1811,5 +2309,7 @@ class FindTaskRunner(BaseTask):
         self.task = task
 
     def work(self) -> str:
+        # 找图任务界面的「次数 0」= 无限（命中后一直点，直到按停止）
         return run_find_step(asdict(self.task), self._stop,
-                             lambda d, e: self.progress.emit(d, e))
+                             lambda d, e: self.progress.emit(d, e),
+                             zero_count_as_one=False)

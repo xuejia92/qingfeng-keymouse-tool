@@ -59,7 +59,7 @@ def find_python() -> str:
     cands: list[str] = []
     if sys.executable.lower().endswith("python.exe"):
         cands.append(sys.executable)          # 源码运行时直接用当前解释器
-    for tag in ("-3.12", "-3.11", "-3.13"):   # py launcher
+    for tag in ("-3.14", "-3.12", "-3.11", "-3.13"):   # py launcher（3.14 优先）
         try:
             out = subprocess.run(
                 ["py", tag, "-c", "import sys;print(sys.executable)"],
@@ -73,6 +73,10 @@ def find_python() -> str:
         cands.extend(sorted(
             glob.glob(os.path.join(local, "Programs", "Python",
                                    "Python3*", "python.exe")), reverse=True))
+    if local:                                  # 本机 managed Python：LOCALAPPDATA\\Python\\pythoncore-*
+        cands.extend(sorted(
+            glob.glob(os.path.join(local, "Python",
+                                   "pythoncore-*", "python.exe")), reverse=True))
     check = ("import importlib.util as u,sys;"
              "sys.exit(0 if all(u.find_spec(m) for m in "
              "('PyInstaller','PySide6','cv2')) else 1)")
@@ -92,6 +96,20 @@ def find_python() -> str:
                        "请先执行 pip install -r requirements-dev.txt")
 
 
+def current_released_version() -> str:
+    """读 dist/config.json 的 version（当前已发布的最新版本，带 v 前缀）。
+
+    发布成功后 sync_manifest_version 会把当次版本写进 dist/config.json；
+    读不到（未打包/文件缺失）返回空串。
+    """
+    try:
+        with open(os.path.join(BASE_DIR, "dist", "config.json"),
+                  encoding="utf-8") as f:
+            return str(json.load(f).get("version") or "").strip()
+    except (OSError, ValueError):
+        return ""
+
+
 # ---------- GitHub API ----------
 
 def _http_opener(proxy: str):
@@ -104,11 +122,21 @@ def _http_opener(proxy: str):
 
 def gh_token() -> str:
     """从 gh CLI 取 GitHub 凭证（用户已 gh auth login）。"""
-    out = subprocess.run(["gh", "auth", "token"], capture_output=True,
-                         text=True, timeout=30)
+    try:
+        out = subprocess.run(["gh", "auth", "token"], capture_output=True,
+                             text=True, timeout=30)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "未安装 GitHub CLI (gh)。请先安装并登录：\n"
+            "  1) 安装：winget install GitHub.cli，\n"
+            "     或到 https://cli.github.com 下载安装包；\n"
+            "  2) 登录：在命令行运行  gh auth login  （按提示浏览器授权）。")
     if out.returncode != 0:
         raise RuntimeError("未登录 GitHub：请先运行 gh auth login")
-    return out.stdout.strip()
+    token = out.stdout.strip()
+    if not token:
+        raise RuntimeError("未登录 GitHub：请先运行 gh auth login")
+    return token
 
 
 def _api_request(opener, url: str, token: str, method: str,
@@ -194,11 +222,15 @@ def run_build(log) -> None:
             f"（含 build.py / main.py / dist 的目录）下运行。")
     py = find_python()
     log("> 开始打包主程序（PyInstaller，约 1 分钟）…")
+    # build.py 用 print 输出中文，Windows 下子进程 stdout 默认是 GBK(cp936)，
+    # 而这里按 UTF-8 解码就会乱码——强制子进程用 UTF-8 输出，两边对齐。
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.Popen(
         [py, build_script],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
-        cwd=BASE_DIR,
+        cwd=BASE_DIR, env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -292,16 +324,23 @@ class PublishApp:
         tk.Label(frm, text="（如 3.1.0，自动加 v 前缀作为 tag）").grid(
             row=0, column=2, sticky="w")
 
-        tk.Label(frm, text="代理：").grid(row=1, column=0, sticky="e")
+        cur = current_released_version()
+        tk.Label(frm, text="当前已发布版本：", fg="#57606a").grid(
+            row=1, column=0, sticky="e")
+        tk.Label(frm, text=cur or "（未找到 dist/config.json）",
+                 fg="#1668a8").grid(
+            row=1, column=1, columnspan=2, sticky="w")
+
+        tk.Label(frm, text="代理：").grid(row=2, column=0, sticky="e")
         self.proxy_var = tk.StringVar(value="http://127.0.0.1:7897")
         tk.Entry(frm, textvariable=self.proxy_var, width=32).grid(
-            row=1, column=1, sticky="w", padx=(0, 18))
+            row=2, column=1, sticky="w", padx=(0, 18))
         tk.Label(frm, text="（清空 = 直连，GitHub 需代理）").grid(
-            row=1, column=2, sticky="w")
+            row=2, column=2, sticky="w")
 
         self.btn = tk.Button(frm, text="开始发布", command=self.start,
                              width=12, bg="#1668a8", fg="white")
-        self.btn.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        self.btn.grid(row=3, column=1, sticky="w", pady=(8, 0))
 
         self.status = tk.Label(root, text="就绪", anchor="w")
         self.status.pack(fill="x", padx=10)

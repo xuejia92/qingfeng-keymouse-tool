@@ -11,9 +11,9 @@ import threading
 
 from PySide6.QtCore import QObject, Signal
 
-from .conditions import (MAX_WHILE_ITERATIONS, build_control_flow,
-                         build_loop_flow, eval_condition)
-from .config import FLOW_STEP_TYPES, Flow
+from .conditions import (MAX_FOR_ITERATIONS, MAX_WHILE_ITERATIONS,
+                         build_control_flow, build_loop_flow, eval_condition)
+from .config import FLOW_STEP_TYPES, Flow, while_iter_interval
 from .logbus import log, log_print
 from .tasks import (run_app_step, run_click_step, run_clip_get_step,
                     run_clip_set_step, run_close_app_step, run_color_pick_step,
@@ -31,7 +31,9 @@ from .tasks import (run_app_step, run_click_step, run_clip_get_step,
                     run_py_func_step, run_qq_mail_step, run_script_step,
                     run_screenshot_step,
                     run_shot_translate_step,
+                    run_shutdown_step,
                     run_speech_step,
+                    run_status_log_step,
                     run_text_find_step,
                     run_var_step, run_wait_image_step, run_wait_text_step,
                     run_web_step, run_yolo_detect_step)
@@ -103,6 +105,15 @@ class FlowRunner(QObject):
     def stop(self) -> None:
         self._stop.set()
 
+    @property
+    def stopping(self) -> bool:
+        """已收到停止请求、但线程还在收尾（is_running 仍是 True）。
+
+        频繁启停时这个窗口很关键：用户按下停止后几十毫秒内线程才真正结束，
+        这期间再按一次「运行」若被当成「又停一次」就会被吞掉（见 FlowTab.toggle_flow）。
+        """
+        return self.is_running and self._stop.is_set()
+
     # ---------- 执行 ----------
     def _run(self) -> None:
         try:
@@ -142,8 +153,9 @@ class FlowRunner(QObject):
 
         循环语义（loop_stack 栈，与 pending_ends 正交）：
         - foreach：对 items 每个元素写 item_var/index_var 后执行循环体，空列表跳过；
-        - while：进入前求值条件，不成立跳过整块；到达 endWhile 无条件跳回 while 重求值，
-          靠 iterations 计数做死循环保护；
+        - while：进入前求值条件，不成立跳过整块；到达 endWhile 重新求值条件，
+          成立则先等「迭代间隔」（默认 1 秒，步骤参数 interval_sec 可改/可设 0、
+          等待可被「停止」打断）再跳回循环体开头，靠 iterations 计数做死循环保护；
         - endForeach/endWhile 为结构标记，不执行不判成败。
         """
         vars = getattr(self, "vars", FlowVariableStore(self.flow))
@@ -274,6 +286,47 @@ class FlowRunner(QObject):
                 arrived_by_jump = False
                 continue
 
+            if t == "for":
+                # 计数循环：先求值 起始/结束/步长 生成数值序列（range 语义，结束值不含），
+                # 空序列直接跳过整块；否则写首轮变量后进入循环体。
+                end = loop_ends.get(idx, n)
+                self.stepStarted.emit(idx, step.name)
+                ok, why, values = self._prepare_for(step, vars)
+                self.last_step_ok, self.last_step_reason = ok, why
+                self.stepFinished.emit(idx, ok, why)
+                log(f"流程「{self.flow.name}」步骤 {idx + 1}/{n}：{step.name} · {why}")
+                if not ok:
+                    if self._stop.is_set():
+                        return "已手动停止"
+                    return f"第 {idx + 1} 步「{step.name}」失败：{why}"
+                if not values:
+                    idx = end + 1
+                else:
+                    var_name = (step.params.get("var") or "").strip() or "i"
+                    loop_stack.append({"type": "for", "values": values, "i": 0,
+                                       "body_start": idx + 1, "end": end,
+                                       "var": var_name})
+                    self._write_for_vars(vars, loop_stack[-1])
+                    idx += 1
+                arrived_by_jump = False
+                continue
+
+            if t == "endFor":
+                # 序列还有下一项则写变量后回 body_start，走完弹栈结束循环
+                if loop_stack and loop_stack[-1]["type"] == "for":
+                    frame = loop_stack[-1]
+                    frame["i"] += 1
+                    if frame["i"] < len(frame["values"]):
+                        self._write_for_vars(vars, frame)
+                        idx = frame["body_start"]
+                    else:
+                        loop_stack.pop()
+                        idx += 1
+                else:
+                    idx += 1   # 孤儿 endFor：跳过
+                arrived_by_jump = False
+                continue
+
             if t == "endWhile":
                 # 迭代计数 +1，超限报错；否则重新求值条件：成立回 body_start，不成立弹栈退出
                 if loop_stack and loop_stack[-1]["type"] == "while":
@@ -288,6 +341,10 @@ class FlowRunner(QObject):
                         return (f"第 {frame['while_idx'] + 1} 步"
                                 f"「{while_step.name}」失败：{why}")
                     if self._last_condition_truthy:
+                        # 每轮迭代之间默认等待 1 秒（步骤参数 interval_sec 可改、可设 0）：
+                        # 条件恒真的 while 若体内没有耗时步骤，会满速空转（刷日志、吃 CPU）。
+                        # 等待挂在 self._stop 上，点「停止」立刻中断，不会拖住退出。
+                        self._wait_while_gap(while_step)
                         idx = frame["body_start"]
                     else:
                         loop_stack.pop()
@@ -350,6 +407,16 @@ class FlowRunner(QObject):
         self.current_step_index = -1
         return None
 
+    def _wait_while_gap(self, step) -> None:
+        """while 每轮迭代之间的等待（默认 1 秒，见 config.while_iter_interval）。
+
+        时长由步骤参数 interval_sec 决定：缺省/非法 → 默认 1 秒，0 = 不等待。
+        用 self._stop.wait 而非 time.sleep，等待期间点「停止」会立刻返回。
+        """
+        delay = while_iter_interval(getattr(step, "params", None))
+        if delay > 0:
+            self._stop.wait(delay)
+
     @staticmethod
     def _prepare_foreach(step, vars) -> tuple[bool, str, list, list | None]:
         """准备 foreach 数据源：求值表达式并归一化，返回 (成功?, 说明, 元素列表, 键列表)。
@@ -407,6 +474,65 @@ class FlowRunner(QObject):
             vars.types[index_var] = FlowRunner._python_type_name(index_value)
 
     @staticmethod
+    def _prepare_for(step, vars) -> tuple[bool, str, list]:
+        """准备 for 循环的数值序列：求值 起始/结束/步长，返回 (成功?, 说明, 数值列表)。
+
+        语义是「**含结束值**」的计数循环（2026-09-27 按用户要求定）：从起始值数到
+        结束值、两头都算——「从 1 数到 10」就是 10 个数（1..10）。步长可为负（倒数），
+        起始值等于结束值时跑 1 轮。三个值都支持表达式（``$变量``、``len($arr)``、
+        字面量），与 foreach 的 items 一样在运行时求值。序列长度受 MAX_FOR_ITERATIONS
+        保护，避免超大边界把内存吃光。
+        """
+        raw = {k: (step.params.get(k) or "").strip() for k in ("start", "stop", "step")}
+        if not raw["stop"]:
+            return False, "未填写结束值", []
+
+        values_of: dict[str, int] = {}
+        for key, default in (("start", "0"), ("step", "1")):
+            text = raw[key] or default
+            ok, val, why = eval_expression_value(text, vars.values)
+            if not ok:
+                return False, f"{key}「{text}」{why}", []
+            try:
+                values_of[key] = int(val)
+            except (TypeError, ValueError):
+                return False, (f"{key}「{text}」不是整数"
+                               f"（得到 {type(val).__name__}）"), []
+
+        text = raw["stop"]
+        ok, val, why = eval_expression_value(text, vars.values)
+        if not ok:
+            return False, f"结束值「{text}」{why}", []
+        try:
+            stop = int(val)
+        except (TypeError, ValueError):
+            return False, (f"结束值「{text}」不是整数"
+                           f"（得到 {type(val).__name__}）"), []
+
+        start, step_val = values_of["start"], values_of["step"]
+        if step_val == 0:
+            return False, "步长不能为 0", []
+        # 「含结束值」语义（2026-09-27 按用户要求定）：从起始值数到结束值、两头都算——
+        # 「从 1 数到 10」就是 10 个数，符合直觉；不是 Python range 的不含式。
+        going = (stop - start) * step_val >= 0    # 方向一致（含相等）才有内容
+        length = (abs(stop - start) // abs(step_val) + 1) if going else 0
+        if length > MAX_FOR_ITERATIONS:
+            return False, (f"循环次数 {length} 超过上限 {MAX_FOR_ITERATIONS}，"
+                           f"请检查起始值/结束值/步长"), []
+        values = list(range(start, stop + (1 if step_val > 0 else -1), step_val))
+        desc = f"{start} → {stop}" + (f" 步长 {step_val}" if step_val != 1 else "")
+        return True, f"for {desc}（{len(values)} 轮）", values
+
+    @staticmethod
+    def _write_for_vars(vars, frame: dict) -> None:
+        """把 for 当前轮的数值写入循环变量（变量名为空则不写）。"""
+        name = frame.get("var") or ""
+        if name:
+            value = frame["values"][frame["i"]]
+            vars.values[name] = value
+            vars.types[name] = FlowRunner._python_type_name(value)
+
+    @staticmethod
     def _python_type_name(value) -> str:
         if isinstance(value, bool):
             return "bool"
@@ -439,6 +565,8 @@ class FlowRunner(QObject):
             return run_var_step(step.params, vars.values, vars.types)
         elif step.type == "log":
             return run_log_step(step.params, vars.values)
+        elif step.type == "status_log":
+            return run_status_log_step(step.params, vars.values)
         elif step.type == "ocr":
             return run_ocr_step(step.params, vars.values, self._stop)
         elif step.type == "shot_translate":
@@ -468,6 +596,8 @@ class FlowRunner(QObject):
                                         self._stop)
         elif step.type == "color_pick":
             return run_color_pick_step(step.params, vars.values, self._stop)
+        elif step.type == "shutdown":
+            return run_shutdown_step(step.params, vars.values, self._stop)
         elif step.type == "py_func":
             return run_py_func_step(step.params, vars.values, self._stop)
         elif step.type == "dp_browser":

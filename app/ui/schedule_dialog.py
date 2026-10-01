@@ -17,11 +17,12 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
 from ..config import SCHEDULE_MODES, WEEKDAY_NAMES, Flow, ScheduleTask
 from ..scheduler import (describe_schedule, format_dt, next_run_times,
                          parse_cron)
+from .frameless import FramelessDialog
 
 _PREVIEW_N = 5
 
 
-class ScheduleDialog(QDialog):
+class ScheduleDialog(FramelessDialog):
     def __init__(self, task: ScheduleTask | None, flows: list[Flow],
                  groups: list[str], parent=None, default_group: str = ""):
         super().__init__(parent)
@@ -41,7 +42,7 @@ class ScheduleDialog(QDialog):
 
     # ---------- UI ----------
     def _build(self):
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.body())
         root.setSpacing(8)
 
         form = QFormLayout()

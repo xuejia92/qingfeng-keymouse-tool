@@ -197,6 +197,11 @@ def run_dp_browser_step(p: dict, variables: dict,
 
     复用 web_actors 的会话管理：launch_mode 支持 front/headless/background/attach
     （attach 需 attach_port）；可选在打开后访问一个网址（url）。
+
+    attach_port 是**调试端口**（默认 9333）：attach 模式用它定位要接管的浏览器；
+    自启模式则把它设给新浏览器（等价 `--remote-debugging-port=N`），
+    这样自启的浏览器同样开放该端口，之后能被别的步骤/流程接管。
+    留空表示不带端口（兼容旧流程）。
     """
     if stop is not None and stop.is_set():
         return False, "已手动停止"
@@ -210,11 +215,15 @@ def run_dp_browser_step(p: dict, variables: dict,
     if mode not in web_actors.LAUNCH_MODES:
         return False, f"未知的浏览器启动模式: {mode}"
     attach_port = None
-    if mode == "attach":
+    raw_port = p.get("attach_port")
+    if raw_port not in (None, ""):
         try:
-            attach_port = web_actors._parse_attach_port(p.get("attach_port"))
+            attach_port = web_actors._parse_attach_port(raw_port)
         except ValueError as e:
-            return False, f"接管浏览器：{e}"
+            return False, (f"接管浏览器：{e}" if mode == "attach"
+                           else f"调试端口：{e}")
+    elif mode == "attach":
+        return False, "接管浏览器：未填写接管端口"
 
     ok, why = web_actors.is_available()
     if not ok:
@@ -234,6 +243,8 @@ def run_dp_browser_step(p: dict, variables: dict,
             tab = browser.new_tab(url) if p.get("new_tab") else browser.latest_tab
             if not p.get("new_tab"):
                 tab.get(url, timeout=timeout)
+    except ValueError as e:
+        return False, str(e)      # 接管失败等我们自己抛的、文案已完整的提示
     except Exception as e:
         return False, f"浏览器启动失败：{type(e).__name__}: {e}"
 

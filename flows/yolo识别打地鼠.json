@@ -19,7 +19,8 @@
       "type": "while",
       "name": "while 循环",
       "params": {
-        "condition": "i>0"
+        "condition": "i>0",
+        "interval_sec": 1.0
       },
       "continue_on_fail": false,
       "pair_id": "",
@@ -91,5 +92,6 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 4,
-  "order": 10
+  "async_run": false,
+  "order": 13
 }

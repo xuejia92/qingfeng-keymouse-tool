@@ -124,5 +124,6 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 3,
-  "order": 8
+  "async_run": false,
+  "order": 11
 }

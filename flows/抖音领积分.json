@@ -1,0 +1,116 @@
+{
+  "id": "f8fc968225de",
+  "name": "抖音领积分",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "wait_text",
+      "name": "等待文字出现",
+      "params": {
+        "text": "可领取",
+        "region": "0,208,64,69",
+        "interval_sec": 1.0,
+        "tolerance": 0.8,
+        "timeout_sec": 0.0,
+        "result_var": "",
+        "pos_var": "可领取坐标"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "click",
+      "name": "鼠标点击",
+      "params": {
+        "mouse_button": "left",
+        "click_type": "single",
+        "interval_ms": 100,
+        "fixed_position": true,
+        "pos_x": 2171,
+        "pos_y": 309,
+        "pos_var": "可领取坐标",
+        "count": 1,
+        "duration_sec": 0.0,
+        "background": false,
+        "window_title": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "for",
+      "name": "for 循环",
+      "params": {
+        "var": "i",
+        "start": "0",
+        "stop": "5",
+        "step": "1"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "wait_text",
+      "name": "等待文字出现",
+      "params": {
+        "text": "可领取",
+        "region": "1548,223,464,302",
+        "interval_sec": 1.0,
+        "tolerance": 0.8,
+        "timeout_sec": 0.0,
+        "result_var": "",
+        "pos_var": "可领取坐标"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "click",
+      "name": "鼠标点击",
+      "params": {
+        "mouse_button": "left",
+        "click_type": "single",
+        "interval_ms": 100,
+        "fixed_position": true,
+        "pos_x": 2171,
+        "pos_y": 309,
+        "pos_var": "可领取坐标",
+        "count": 1,
+        "duration_sec": 0.0,
+        "background": false,
+        "window_title": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "wait",
+      "name": "延时等待",
+      "params": {
+        "seconds": 0.5
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "endFor",
+      "name": "for 循环结束",
+      "params": {},
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 18,
+  "async_run": false,
+  "order": 16
+}

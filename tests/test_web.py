@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from app import web_actors
 from app.config import (FLOW_STEP_TYPES, WEB_ACTIONS, Flow, FlowStep,
@@ -367,7 +368,13 @@ class TestRunWebStep(unittest.TestCase):
 class _FakeAttachBrowser:
     """可断言的假浏览器：记录端口与 quit 调用，tabs_count/address 模拟 DrissionPage。"""
 
-    def __init__(self, port=None):
+    def __init__(self, addr_or_opts=None):
+        # attach 现在走 Chromium(ChromiumOptions)：端口在 options.address 里（"127.0.0.1:9333"）。
+        port = None
+        if isinstance(addr_or_opts, int):
+            port = addr_or_opts
+        elif addr_or_opts is not None:
+            port = (getattr(addr_or_opts, "address", "") or "").rsplit(":", 1)[-1]
         self.port = int(port) if port else 9222
         self.address = f"127.0.0.1:{self.port}"
         self.tabs_count = 2
@@ -393,16 +400,36 @@ class TestAttachMode(unittest.TestCase):
         """打桩 _import_drission：Chromium 构造等价于创建 _FakeAttachBrowser 并登记。"""
         registry = []
 
+        class _FakeCO:
+            """ChromiumOptions 替身：记录端口，address 供 _FakeAttachBrowser 读。"""
+
+            def set_local_port(self, port):
+                self._address = f"127.0.0.1:{port}"
+                return self
+
+            def existing_only(self, _on):
+                return self
+
+            @property
+            def address(self):
+                return self._address
+
         def fake_import():
             class FakeChromium(_FakeAttachBrowser):
                 def __init__(self, addr_or_opts=None, session_options=None):
                     super().__init__(addr_or_opts)
                     registry.append(self)
 
-            return FakeChromium, None, ()
+            return FakeChromium, _FakeCO, ()
 
         original = web_actors._import_drission
         web_actors._import_drission = fake_import
+        # attach 现在会先探测端口是否有浏览器；打桩成"有"，否则真实 socket 探测
+        # 会失败并抛「接管失败」，测不到下面的会话逻辑。
+        self._port_patch = mock.patch.object(web_actors, "_port_has_browser",
+                                             return_value=True)
+        self._port_patch.start()
+        self.addCleanup(self._port_patch.stop)
         return registry, original
 
     # ---- 端口解析纯函数 ----

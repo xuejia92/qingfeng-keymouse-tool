@@ -21,7 +21,8 @@ CONDITION_TYPES = ("if", "elseif", "else", "endif")
 
 # ---------------- 统一块模型 ----------------
 # 三种块共用「扁平列表 + 类型配对」：起始块 -> 结束标记。分支头只有 if 有。
-BLOCK_PAIRS = {"if": "endif", "foreach": "endForeach", "while": "endWhile"}
+BLOCK_PAIRS = {"if": "endif", "foreach": "endForeach", "for": "endFor",
+               "while": "endWhile"}
 BRANCH_HEADS = {"if": ("elseif", "else")}
 
 # 派生的类型集合：type 驱动整套块逻辑（配对/缩进/删除/校验），避免逐块重写。
@@ -32,6 +33,8 @@ ALL_BRANCH_HEADS = tuple(h for hs in BRANCH_HEADS.values() for h in hs)  # ("els
 
 # while 死循环保护上限：循环体内不修改变量导致条件恒真时的兜底
 MAX_WHILE_ITERATIONS = 10000
+# for 循环的序列长度上限：防止 range(0, 10**9) 这类参数把内存吃光
+MAX_FOR_ITERATIONS = 1000000
 # 块嵌套最大深度：更深报错，防止列表缩进失控
 MAX_BLOCK_DEPTH = 8
 
@@ -39,14 +42,15 @@ MAX_BLOCK_DEPTH = 8
 _BLOCK_LABELS = {
     "if": "条件判断", "elseif": "否则如果", "else": "否则", "endif": "条件结束",
     "foreach": "Foreach 循环", "endForeach": "Foreach 循环结束",
+    "for": "for 循环", "endFor": "for 循环结束",
     "while": "while 循环", "endWhile": "while 循环结束",
     "break": "break 中断循环", "continue": "continue 继续循环",
 }
 
 # 循环块的起始/结束类型：break/continue 只能位于这些循环块内部
-LOOP_OPEN_TYPES = ("foreach", "while")
-LOOP_CLOSE_TYPES = ("endForeach", "endWhile")
-_LOOP_CLOSE_TO_OPEN = {"endForeach": "foreach", "endWhile": "while"}
+LOOP_OPEN_TYPES = ("foreach", "for", "while")
+LOOP_CLOSE_TYPES = ("endForeach", "endFor", "endWhile")
+_LOOP_CLOSE_TO_OPEN = {"endForeach": "foreach", "endFor": "for", "endWhile": "while"}
 
 # 求值时暴露给表达式的安全内置（白名单）；其余（open/__import__/eval…）一律不可用。
 # 集合函数/迭代工具常用于构造数据源（foreach items 的 range/sorted/slice 等）。
@@ -395,23 +399,18 @@ def _step_defined_variables(t: str, p: dict) -> list[str]:
     一个步骤可能产出多个变量（shot_translate 同时写译文与原文；
     foreach 的 item_var / index_var 在循环执行后被定义，循环结束保留最后值），
     因此都计入「后续步骤可引用」的变量，供 while 条件/其它步骤的变量校验使用。
+
+    ⚠️ 字段表**直接引用 config.STEP_OUTPUT_FIELDS**（单一数据源，函数内局部导入以保持
+    本模块的轻依赖）。这里曾经自己维护一张小表、只列了 10 种类型，导致「等待文字出现 /
+    等待图片出现 / 屏幕取色 / 网络请求 / DeepSeek / 执行脚本」等步骤的产出变量在条件
+    判断里被判成「变量未定义」（2026-09-26 用户报的 bug）。以后新增产出字段只需改
+    config 那张表，编辑期校验与变量下拉不会再不同步。
     """
+    from .config import STEP_OUTPUT_FIELDS
     p = p or {}
-    # 步骤类型 -> 写入的变量参数字段（按顺序）
-    keys_map = {
-        "var": ("name",),
-        "ocr": ("variable",),
-        "shot_translate": ("variable", "source_var"),
-        "text_find": ("variable",),
-        "find_image": ("variable",),
-        "screenshot": ("variable",),
-        "clip_get": ("variable",),
-        "py_func": ("result_var",),
-        "foreach": ("item_var", "index_var"),
-    }
     out: list[str] = []
-    for key in keys_map.get(t, ()):
-        v = (p.get(key) or "").strip()
+    for key in STEP_OUTPUT_FIELDS.get(t, ()):
+        v = str(p.get(key) or "").strip()
         if v and v not in out:
             out.append(v)
     return out
@@ -421,8 +420,9 @@ def defined_variables_before(steps, declared_variables, index: int) -> set[str]:
     """返回 index 位置之前已定义的变量名集合。
 
     已定义 = 流程声明变量（declared_variables，含 .name 属性的对象）+
-    index 之前所有会产出变量的步骤（var / ocr / text_find / find_image /
-    screenshot / clip_get / py_func / foreach 的 item/index）。
+    index 之前所有会产出变量的步骤（字段表见 config.STEP_OUTPUT_FIELDS：
+    文字识别 / 等待文字出现 / 等待图片出现 / 找图 / 截图 / 取色 / 网络请求 /
+    DeepSeek / 脚本 / python函数 / foreach、for 的循环变量 / DrissionPage 等）。
     """
     names: set[str] = set()
     for v in declared_variables or []:
@@ -615,13 +615,13 @@ def max_block_depth(steps) -> int:
 def build_loop_flow(steps) -> dict[int, int]:
     """构建循环控制流信息，返回 {起始块索引: 结束标记索引}。
 
-    只覆盖 foreach / while 两种循环块（if 分支由 build_control_flow 处理），
+    只覆盖 foreach / for / while 三种循环块（if 分支由 build_control_flow 处理），
     供执行引擎在「循环体结束 / 跳过整块」时快速拿到配对位置。
     """
     loop_ends: dict[int, int] = {}
     for i, s in enumerate(steps):
         t = getattr(s, "type", "")
-        if t in ("foreach", "while"):
+        if t in LOOP_OPEN_TYPES:
             e = match_block_end(steps, i)
             if e is not None:
                 loop_ends[i] = e
@@ -676,24 +676,24 @@ def validate_block_structure(steps) -> list[str]:
         errors.append(f"第 {frame['idx'] + 1} 步"
                       f"「{_BLOCK_LABELS.get(frame['type'], frame['type'])}」"
                       f"缺少配对的「{_BLOCK_LABELS.get(end_t, end_t)}」")
-    # break / continue 只能位于 foreach/while 循环体内
+    # break / continue 只能位于 foreach/for/while 循环体内
     for i, s in enumerate(steps):
         t = getattr(s, "type", "")
         if t in ("break", "continue") and enclosing_loop(steps, i) is None:
             errors.append(f"第 {i + 1} 步「{_BLOCK_LABELS.get(t, t)}」"
-                          f"只能放在 Foreach/while 循环体内")
+                          f"只能放在 Foreach/for/while 循环体内")
     return errors
 
 
 def empty_loop_bodies(steps) -> list[tuple[int, str]]:
-    """返回「空循环体」的 (起始块索引, 类型) 列表（foreach/while 与结束标记之间无步骤）。
+    """返回「空循环体」的 (起始块索引, 类型) 列表（foreach/for/while 与结束标记之间无步骤）。
 
     空循环体运行期会跳过 / 不空转，此处仅用于编辑期提示，不视为结构错误。
     """
     result: list[tuple[int, str]] = []
     for i, s in enumerate(steps):
         t = getattr(s, "type", "")
-        if t not in ("foreach", "while"):
+        if t not in LOOP_OPEN_TYPES:
             continue
         e = match_block_end(steps, i)
         if e is None or e == i + 1:

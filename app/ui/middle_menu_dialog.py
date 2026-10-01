@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QVBoxLayout, QWidget)
 
 from ..config import Flow, MiddleMenuItem
+from .frameless import FramelessDialog
 from .icon_grid import IconPicker
 
 # 编辑一个「原流程已被删除」的菜单项时，流程下拉里插入的占位项
@@ -20,7 +21,7 @@ _MISSING_FLOW_TEXT = "⚠ 原流程已删除，请重新选择"
 _NEW_ITEM_SEPARATOR_DEFAULT = True
 
 
-class MiddleMenuDialog(QDialog):
+class MiddleMenuDialog(FramelessDialog):
     """新建 / 编辑单个中键菜单项。"""
 
     def __init__(self, item: MiddleMenuItem | None, flows: list[Flow], parent=None):
@@ -35,7 +36,7 @@ class MiddleMenuDialog(QDialog):
 
     # ---------- UI ----------
     def _build(self) -> None:
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.body())
         root.setSpacing(8)
 
         form = QFormLayout()

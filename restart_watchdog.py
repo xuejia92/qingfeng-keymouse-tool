@@ -14,6 +14,12 @@
   重启，避免在别处按组合键误伤（QINGFENG_RESTART_HOTKEY_GLOBAL=1 可关掉这个前台
   限制，恢复成"任何程序里按都生效"）。
 
+顺手同步 dist
+-------------
+每次启动 / 重启前，会把工作区最新的 `templates` / `flows` 同步到 `dist` 里的同名目录
+（复用 build.py 的同一套实现，与打包脚本行为一致），免得 dist 里那份打包版还在用旧模板、
+旧流程。**同步失败只提示、不影响启动**。没有 dist 目录（没打过包）时静默跳过。
+
 退出码（restart.bat 依赖，不可随意改）
 - 0  收到重启请求 → bat 重新启动
 - 1  主程序自己退出了（用户点退出/关窗口）→ bat 结束
@@ -402,6 +408,84 @@ def shutdown_child(child, graceful: bool = True) -> None:
     _force_kill(child)
 
 
+# ---------------------------------------------------------------- 启动前同步 dist
+
+def sync_dist_config(dist_dir: str | None = None) -> bool:
+    """把工作区 config.json 的最新内容同步到 dist/config.json，version 字段各自保留。
+
+    规则：dist 的字段整体以工作区为准（新增/改过的字段都同步过去），唯独 version
+    保留 dist 自己的——那是发布工具 sync_manifest_version 维护的发布版本，不能被
+    工作区开发期的版本号盖掉。内容没变化不落盘；任一步失败静默返回 False。
+    """
+    import json
+
+    src = os.path.join(SCRIPT_DIR, "config.json")
+    dst_dir = dist_dir or os.path.join(SCRIPT_DIR, "dist")
+    dst = os.path.join(dst_dir, "config.json")
+    if not (os.path.isfile(src) and os.path.isfile(dst)):
+        return False
+    try:
+        with open(src, encoding="utf-8") as f:
+            src_data = json.load(f)
+        with open(dst, encoding="utf-8") as f:
+            dst_data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(src_data, dict) or not isinstance(dst_data, dict):
+        return False
+    merged = dict(src_data)
+    if "version" in dst_data:
+        merged["version"] = dst_data["version"]     # version 各自保留
+    if merged == dst_data:
+        return False                                # 内容没变，不落盘
+    tmp = dst + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, dst)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def sync_dist_data() -> dict | None:
+    """启动主程序前，把工作区最新的 templates / flows 同步到 dist。
+
+    与打包脚本用的是**同一个函数**（`build.sync_data_dirs`），保证两边行为一致
+    （只覆盖"源更新"的文件、不删 dist 里多余的、目标反而更新时先备份）。
+    这里的定位是"顺手同步"：没打过包（没有 dist 目录）静默跳过；任何失败只提示，
+    绝不拦住启动。返回同步汇总；没同步则 None。
+    """
+    try:
+        import build
+    except Exception as e:
+        say(f"  [!] 跳过同步到 dist（导入 build.py 失败：{e}）")
+        return None
+    if not os.path.isdir(build.DIST_DIR):
+        return None                      # 没打过包：没有 dist，无需同步
+    try:
+        st = build.sync_data_dirs(quiet=True)
+    except Exception as e:
+        say(f"  [!] 同步 templates / flows 到 dist 失败（不影响启动）：{e}")
+        return None
+    if st["added"] or st["updated"] or st["backed_up"]:
+        line = f"  [同步] 工作区 → dist：新增 {st['added']} · 更新 {st['updated']}"
+        if st["backed_up"]:
+            line += f" · 备份 {st['backed_up']}"
+        say(line)
+    # config.json：同步最新内容，version 各自保留（发布版本不被开发期版本盖掉）
+    try:
+        if sync_dist_config(build.DIST_DIR):
+            say("  [同步] config.json 最新内容 → dist（version 各自保留）")
+    except Exception as e:
+        say(f"  [!] 同步 config.json 到 dist 失败（不影响启动）：{e}")
+    return st
+
+
 # ---------------------------------------------------------------- 入口
 
 def self_check() -> int:
@@ -423,6 +507,7 @@ def self_check() -> int:
         ok = False
     if ok:
         say("  [√] 环境检查通过，可以启动 main.py")
+    say("  dist 数据 : 启动前会自动把 templates / flows 同步到 dist（没有 dist 则跳过）")
     return 0 if ok else EXIT_ENV_ERROR
 
 
@@ -459,6 +544,8 @@ def main() -> int:
         say(f"    请先执行：\"{sys.executable}\" -m pip install -r "
             f"\"{os.path.join(SCRIPT_DIR, 'requirements.txt')}\"")
         return EXIT_ENV_ERROR
+
+    sync_dist_data()      # 每次启动 / 重启前同步一次（与打包脚本同一套逻辑）
 
     child = subprocess.Popen([sys.executable, ENTRY, *passthrough], cwd=SCRIPT_DIR)
     req = RestartRequest()

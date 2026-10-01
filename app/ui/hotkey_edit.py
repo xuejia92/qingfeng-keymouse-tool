@@ -53,11 +53,11 @@ class HotkeyEdit(QLineEdit):
         hk = qt_key_event_to_hotkey(ev)
         if hk:
             if self._conflict_checker is not None:
-                owner = self._conflict_checker(hk)
-                if owner:
-                    QMessageBox.warning(
-                        self, "热键冲突",
-                        f"该热键已被「{owner}」占用，请换一个组合。")
+                reason = self._conflict_checker(hk)
+                if reason:
+                    # reason 可能是「该热键已被 X 占用」，也可能是
+                    # 「Alt+字母在 Windows 上收不到」这类硬规则提示，直接展示
+                    QMessageBox.warning(self, "热键不可用", str(reason))
                     self._refresh()          # 恢复原值显示
                     self.clearFocus()
                     return

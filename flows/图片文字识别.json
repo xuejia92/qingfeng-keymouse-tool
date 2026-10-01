@@ -7,7 +7,7 @@
       "type": "ocr",
       "name": "文字识别",
       "params": {
-        "region": "0,124,344,280",
+        "region": "403,1177,181,66",
         "variable": "wenzi",
         "lang": "ch",
         "multi_ocr": true
@@ -20,7 +20,7 @@
       "type": "log",
       "name": "打印输出",
       "params": {
-        "variables": "zhaotu",
+        "variables": "wenzi",
         "text": "",
         "raw": false,
         "show_type": false
@@ -35,29 +35,30 @@
       "params": {
         "region": "",
         "save_mode": "variable",
-        "variable": ""
+        "variable": "wenzi"
       },
       "continue_on_fail": false,
       "pair_id": "",
-      "commented": false
+      "commented": true
     },
     {
       "type": "log",
       "name": "打印输出",
       "params": {
-        "variables": "",
+        "variables": "wenzi",
         "text": "",
         "raw": false,
         "show_type": false
       },
       "continue_on_fail": false,
       "pair_id": "",
-      "commented": false
+      "commented": true
     }
   ],
   "variables": [],
   "hotkey": "",
   "loops": 1,
   "created_seq": 8,
-  "order": 11
+  "async_run": false,
+  "order": 14
 }

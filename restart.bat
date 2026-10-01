@@ -6,6 +6,9 @@ rem  Usage: double-click this file, or run it from a terminal
 rem
 rem  Behavior:
 rem   - starts main.py through restart_watchdog.py
+rem   - before every start (and every Ctrl+R restart) the watchdog syncs the
+rem     newest templates\ and flows\ into dist\ (same logic as build.py), so
+rem     the packaged copy in dist never keeps stale data
 rem   - press Ctrl+R inside THIS console window to restart the app
 rem   - when the app quits by itself, this script exits
 rem   - any error keeps this window open (pause) so you can read it

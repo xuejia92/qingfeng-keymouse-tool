@@ -19,9 +19,23 @@ from app.config import (AppConfig, AUTO_STEP_TYPES, FLOW_STEP_TYPES, Flow, FlowS
                         default_step_params)
 from app.conditions import validate_condition_structure
 from app.ui import flow_tab as flow_tab_mod
+from app.ui import flow_dialog as flow_dialog_mod
+from app.ui import theme
 from app.ui.flow_dialog import StepRunDelegate
-from app.ui.flow_tab import (BRANCH_TYPES, INDENT_UNIT, MODULE_GROUPS, FlowTab)
+from app.ui.flow_tab import (BRANCH_TYPES, INDENT_UNIT, MAX_UNDO_STEPS,
+                             MODULE_GROUPS, FlowTab)
 from tests._env import TempConfigPaths
+
+
+def _flow_name(item) -> str:
+    """左栏流程条目的**纯名字**。
+
+    流程条目文本带一个圆点前缀（`FLOW_BULLET`，用来和分组色带区分，2026-10-01）；
+    本文件的断言关心的是「哪个流程、什么顺序」，所以先剥掉装饰再比。
+    """
+    text = item.text(0)
+    bullet = flow_tab_mod.FLOW_BULLET
+    return text[len(bullet):] if text.startswith(bullet) else text
 
 
 class _TempPathsMixin:
@@ -76,11 +90,11 @@ class TestFlowTabModuleGroups(_TempPathsMixin, unittest.TestCase):
         self.assertEqual(len(self.tab._module_btns), len(draggable))
 
     def test_all_collapsed_by_default(self):
-        """未手动调整过折叠状态时默认全部收起：模块区隐藏、标题 ▸、不写配置。"""
+        """未手动调整过折叠状态时默认全部收起：模块区隐藏、标题是收起符、不写配置。"""
         for gid, wrapper in self.tab._group_wrappers.items():
             self.assertTrue(wrapper.isHidden(), f"分组 {gid} 应默认收起")
         for header in self.tab._group_headers.values():
-            self.assertTrue(header.text().startswith("▸"))
+            self.assertTrue(header.text().startswith(flow_tab_mod.DISCLOSURE_COLLAPSED))
         # 默认收起只是渲染态：未操作前不落盘，cfg 仍保持空
         self.assertEqual(self.cfg.collapsed_module_groups, [])
 
@@ -94,14 +108,14 @@ class TestFlowTabModuleGroups(_TempPathsMixin, unittest.TestCase):
             self.assertEqual(sorted(self.cfg.collapsed_module_groups),
                              sorted(gid for gid, _, _ in MODULE_GROUPS if gid != "input"))
             self.assertTrue(self.cfg.module_groups_explicit)
-            self.assertTrue(header.text().startswith("▾"))
+            self.assertTrue(header.text().startswith(flow_tab_mod.DISCLOSURE_EXPANDED))
             save.assert_called_once()
 
             header.setChecked(False)                      # 收起
             self.assertTrue(self.tab._group_wrappers["input"].isHidden())
             self.assertEqual(sorted(self.cfg.collapsed_module_groups),
                              sorted(gid for gid, _, _ in MODULE_GROUPS))
-            self.assertTrue(header.text().startswith("▸"))
+            self.assertTrue(header.text().startswith(flow_tab_mod.DISCLOSURE_COLLAPSED))
 
     def test_expand_persists_and_restores(self):
         """手动展开多组后重建 FlowTab，展开状态从 cfg 恢复（其余默认收起）。"""
@@ -117,8 +131,8 @@ class TestFlowTabModuleGroups(_TempPathsMixin, unittest.TestCase):
         self.assertFalse(tab2._group_wrappers["logic"].isHidden())
         self.assertFalse(tab2._group_wrappers["app_web"].isHidden())
         self.assertTrue(tab2._group_wrappers["input"].isHidden())
-        self.assertTrue(tab2._group_headers["logic"].text().startswith("▾"))
-        self.assertTrue(tab2._group_headers["input"].text().startswith("▸"))
+        self.assertTrue(tab2._group_headers["logic"].text().startswith(flow_tab_mod.DISCLOSURE_EXPANDED))
+        self.assertTrue(tab2._group_headers["input"].text().startswith(flow_tab_mod.DISCLOSURE_COLLAPSED))
 
     def test_unknown_group_ids_ignored_on_load(self):
         """config 里未知分组 id 应被忽略，不产生异常。"""
@@ -178,14 +192,14 @@ class TestFlowTabFlowGroups(_TempPathsMixin, unittest.TestCase):
         self.assertEqual(names, [("group", "办公"), ("group", "游戏"), ("group", "")])
         g_office = self.tab.list.topLevelItem(0)
         self.assertEqual(g_office.childCount(), 2)
-        self.assertEqual(g_office.child(0).text(0), "流程A")
-        self.assertEqual(g_office.child(1).text(0), "流程B")
+        self.assertEqual(_flow_name(g_office.child(0)), "流程A")
+        self.assertEqual(_flow_name(g_office.child(1)), "流程B")
         g_game = self.tab.list.topLevelItem(1)
         self.assertEqual(g_game.childCount(), 1)
-        self.assertEqual(g_game.child(0).text(0), "流程C")
+        self.assertEqual(_flow_name(g_game.child(0)), "流程C")
         g_ungrouped = self.tab.list.topLevelItem(2)
         self.assertEqual(g_ungrouped.childCount(), 1)
-        self.assertEqual(g_ungrouped.child(0).text(0), "流程D")
+        self.assertEqual(_flow_name(g_ungrouped.child(0)), "流程D")
 
     def test_group_expand_collapse_persists(self):
         """收起分组：记入 cfg.collapsed_flow_groups 并持久化；展开后清出。"""
@@ -294,6 +308,337 @@ class TestFlowTabFlowGroups(_TempPathsMixin, unittest.TestCase):
         self.assertEqual(self.tab._selected_flow().name, "流程A")
 
 
+class TestLeftColumnGroupVsFlow(_TempPathsMixin, unittest.TestCase):
+    """左栏「分组」与「流程」必须一眼分得开（2026-10-01 用户反馈）。
+
+    用户原话：「左侧的分组列表和流程列表，看起来一样，优化一下显示，分组和流程做一下区分」。
+    原来两者都是 47px 等高行、底色又都很淡。现在靠**四层**区分：
+      高度（分组 GROUP_ROW_H=50 / 流程 FLOW_ROW_H=36，逐条 setSizeHint）
+      形状（分组是通栏色带 + 左侧主色竖条 + 上下细边框；流程是白底）
+      缩进（流程是子项，缩进 indentation）
+      内容（分组有 ▼/▲ + 流程圆点前缀；流程有圆点前缀）
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp_enter()
+        self.cfg = AppConfig()
+        self.cfg.flows = [Flow(name="流程A", group="办公"),
+                          Flow(name="流程B", group="办公"),
+                          Flow(name="流程C", group="游戏"),
+                          Flow(name="流程D", group="")]
+        self.cfg.flow_groups = ["办公", "游戏"]
+        self.cfg.collapsed_flow_groups = []
+        self.tab = FlowTab(self.cfg)
+        self.tab.resize(900, 600)
+        self.tab.show()
+        self._app.processEvents()
+
+    def tearDown(self):
+        self._temp_exit()
+
+    # ---------- 一、高度 ----------
+    def test_group_row_is_taller_than_flow_row(self):
+        tree = self.tab.list
+        g = self.tab._group_item("办公")
+        h_group = tree.visualItemRect(g).height()
+        h_flow = tree.visualItemRect(g.child(0)).height()
+        self.assertEqual(h_group, flow_tab_mod.GROUP_ROW_H)
+        self.assertEqual(h_flow, flow_tab_mod.FLOW_ROW_H)
+        self.assertGreater(h_group, h_flow,
+                           "分组行必须比流程行高，否则又会「看起来一样」")
+
+    # ---------- 二、缩进 ----------
+    def test_flow_rows_are_indented_under_the_group(self):
+        tree = self.tab.list
+        g = self.tab._group_item("办公")
+        self.assertEqual(tree.visualItemRect(g).x(), 0)
+        self.assertGreater(tree.visualItemRect(g.child(0)).x(), 0,
+                           "流程是子项，必须缩进在分组色带之下")
+
+    # ---------- 三、形状：分组是通栏色带 ----------
+    def test_group_header_band_spans_full_row(self):
+        """分组底色挂在最外层控件上，整行（含右侧按钮区）通栏 —— 这是与流程最主要的形状差别。"""
+        header = self.tab.list.itemWidget(self.tab._group_item("办公"), 0)
+        self.assertIsNotNone(header)
+        self.assertEqual(header.objectName(), "groupHeaderBox")
+        self.assertTrue(header.testAttribute(Qt.WA_StyledBackground),
+                        "不设 WA_StyledBackground 的话 QSS 底色不会画出来")
+        self.assertGreaterEqual(header.width(), self.tab.list.viewport().width() - 2,
+                               "分组色带要通栏，不能是居中的小药丸")
+        # 色带比条目行矮 1px（条目自己有一条下边框）
+        self.assertGreaterEqual(header.height(), flow_tab_mod.GROUP_ROW_H - 1)
+
+    def test_group_qss_has_band_and_left_accent(self):
+        with open(flow_tab_mod.__file__, encoding="utf-8") as fh:
+            qss = fh.read()
+        self.assertIn("QWidget#groupHeaderBox", qss)
+        self.assertIn("border-left: 3px solid #1668a8", qss)   # 段标题的主色锚点
+        self.assertIn("border-bottom: 1px solid #d8dee4", qss)
+        self.assertNotIn("height: 36px", qss)                  # 行高改由 setSizeHint 逐条控制
+
+    # ---------- 五、字号与选中态（2026-10-01 第二轮：紧凑 + 选中变浅） ----------
+    def test_fonts_are_compact_and_hotkey_smaller_than_title(self):
+        """整体字号降一档；热键那行必须仍**小于**分组名（用户要求「字小一点」）。"""
+        import re
+        with open(flow_tab_mod.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+
+        def _pt(anchor: str) -> float:
+            seg = src.split(anchor, 1)[1]
+            m = re.search(r"font-size:\s*([\d.]+)pt", seg)
+            self.assertIsNotNone(m, f"{anchor} 附近没有 font-size")
+            return float(m.group(1))
+
+        flow_pt = _pt("QTreeWidget#flowList {")
+        title_pt = _pt('QPushButton[groupHeader="true"]')
+        hotkey_pt = _pt("QLabel#groupHotkey")
+        self.assertLessEqual(flow_pt, 9)          # 条目：原 10pt
+        self.assertLessEqual(title_pt, 9)         # 分组名：原 10pt
+        self.assertLessEqual(hotkey_pt, 8)        # 热键：原 8pt → 7pt
+        self.assertLess(hotkey_pt, title_pt)
+
+    def test_selected_flow_uses_light_background(self):
+        """选中的流程条目：**浅色底 + 主色字**（原来整条实心主色 #1668a8 + 白字，太重）。
+
+        用 primary_soft 而不是 pressed_bg：浅色主题下 `sel_bg == pressed_bg == #e3edf7`，
+        而分组色带正是 sel_bg——选 pressed_bg 会和色带**完全同色**（实测过）。
+        """
+        with open(flow_tab_mod.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        rule = src.split("QTreeWidget#flowList::item:selected", 1)[1].split("}", 1)[0]
+        self.assertIn("background-color: #e8f1fa", rule)   # 最浅的蓝（→ primary_soft）
+        self.assertIn("color: #1668a8", rule)              # 主色字
+        self.assertNotIn("color: white", rule)
+        self.assertNotIn("background-color: #1668a8", rule)
+        # 和分组色带（sel_bg）用的字面量不能是同一个，否则浅色主题下两者同色
+        band = src.split("QWidget#groupHeaderBox {", 1)[1].split("}", 1)[0]
+        self.assertNotIn("background: #e8f1fa", band)
+
+    def test_selected_color_differs_from_group_band_token(self):
+        """浅色主题下 `sel_bg == pressed_bg == #e3edf7`：选中项千万别挑这两个令牌。
+
+        这条是实测踩出来的——分组色带（sel_bg）和选中项（pressed_bg）在浅色主题下
+        渲染成同一个颜色，屏幕上完全分不出来。
+        """
+        t = theme.THEMES["light"]
+        self.assertEqual(t["sel_bg"], t["pressed_bg"])       # 前提：这俩同值
+        self.assertNotEqual(t["primary_soft"], t["sel_bg"])  # 所以只能挑 primary_soft
+
+    def test_default_rows_have_no_explicit_foreground(self):
+        """默认条目不能塞显式字色：否则会压过 `::item:selected` 的主色字。"""
+        item = self.tab._flow_item(self.cfg.flows[0].id)
+        self.assertIsNone(item.data(0, Qt.ForegroundRole))
+
+    def test_foreground_is_cleared_after_a_run_ends(self):
+        """跑完一轮后回到默认态：显式字色要被清掉（而不是塞回调色板色），选中态才跟主题。"""
+        f = self.cfg.flows[0]
+        self.tab._launch_flow(f)
+        self.tab._on_state(f.id, "done", "")
+        item = self.tab._flow_item(f.id)
+        self.assertIsNone(item.data(0, Qt.ForegroundRole))
+
+    # ---------- 四、内容：无计数、按钮贴右、圆点 ----------
+    def test_group_header_shows_no_flow_count(self):
+        """分组里**不显示**流程个数（用户 2026-10-01 要求）——省下的横向空间留给分组名。"""
+        from PySide6.QtWidgets import QLabel
+        header = self.tab.list.itemWidget(self.tab._group_item("办公"), 0)
+        self.assertIsNone(header.findChild(QLabel, "groupCount"))
+        with open(flow_tab_mod.__file__, encoding="utf-8") as fh:
+            self.assertNotIn("groupCount", fh.read())
+
+    def test_header_buttons_are_compact_and_right_aligned(self):
+        """⚙（编辑分组）/ ＋（新建流程）固定小尺寸并**贴右**，不占地方。"""
+        from PySide6.QtCore import QSize
+        from PySide6.QtWidgets import QPushButton
+        header = self.tab.list.itemWidget(self.tab._group_item("办公"), 0)
+        btns = [b for b in header.findChildren(QPushButton) if b.text() in ("⚙", "＋")]
+        self.assertEqual(len(btns), 2, "编辑分组 / 新建流程两个按钮都要在")
+        for b in btns:
+            self.assertEqual(b.size(),
+                             QSize(flow_tab_mod.GROUP_BTN_W, flow_tab_mod.GROUP_BTN_H))
+        right_btn = max(btns, key=lambda b: b.x() + b.width())
+        self.assertLessEqual(header.width() - (right_btn.x() + right_btn.width()), 8,
+                             "按钮要贴在分组色带右侧")
+        left_btn = min(btns, key=lambda b: b.x())
+        self.assertGreater(left_btn.x(), header.width() // 2,
+                           "按钮整体靠右，左侧留给分组名")
+
+    def test_ungrouped_has_only_plus_button(self):
+        """「未分组」不是可编辑分组：只有 ＋，没有 ⚙。"""
+        from PySide6.QtWidgets import QPushButton
+        header = self.tab.list.itemWidget(self.tab._group_item(""), 0)
+        texts = [b.text() for b in header.findChildren(QPushButton)
+                 if b.text() in ("⚙", "＋")]
+        self.assertEqual(texts, ["＋"])
+        # 按钮依旧贴右
+        plus = header.findChildren(QPushButton)
+        plus = [b for b in plus if b.text() == "＋"][0]
+        self.assertLessEqual(header.width() - (plus.x() + plus.width()), 8)
+
+    def test_flow_rows_have_bullet_prefix(self):
+        item = self.tab._group_item("办公").child(0)
+        self.assertTrue(item.text(0).startswith(flow_tab_mod.FLOW_BULLET),
+                        f"流程条目要有圆点前缀：{item.text(0)!r}")
+        self.assertEqual(_flow_name(item), "流程A")
+
+    def test_flow_row_text_keeps_status_marks_after_bullet(self):
+        """圆点在最前，异步 ⚡ / 运行 ▶ / 排队 ⏳ 标记原样跟在后面。"""
+        f = Flow(name="异步流程", group="办公", async_run=True)
+        self.assertEqual(self.tab._flow_row_text(f),
+                         flow_tab_mod.FLOW_BULLET + self.tab._flow_item_text(f))
+        self.assertIn("⚡", self.tab._flow_row_text(f))
+        self.assertEqual(self.tab._flow_item_text(f), f"{flow_tab_mod.ASYNC_MARK} 异步流程")
+
+    def test_group_rows_stay_unselectable(self):
+        """分组头依旧不可选中：选中态（实心主色）是流程条目的专属外观。"""
+        g = self.tab._group_item("办公")
+        self.assertFalse(bool(g.flags() & Qt.ItemIsSelectable))
+        self.tab.list.setCurrentItem(g)
+        self.assertIsNone(self.tab._selected_flow())
+
+
+class TestPanelRowAlignment(_TempPathsMixin, unittest.TestCase):
+    """右栏模块面板的行高/字号必须与左栏分组列表**逐项对齐**（2026-10-01 用户要求）。
+
+    用户原话：「模块面板下面的分组和列表改为和左侧分组列表一样的高度，
+    一样的分组字体和列表字体，让整个页面显示的协调一点」。
+
+    对照关系：
+        左栏分组行（GROUP_ROW_H）  <->  右栏分组头
+        左栏流程行（FLOW_ROW_H）   <->  右栏模块按钮
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp_enter()
+        self.cfg = AppConfig()
+        self.cfg.flows = [Flow(name="流程A", group="办公")]
+        self.cfg.flow_groups = ["办公"]
+        self.cfg.collapsed_flow_groups = []
+        self.cfg.collapsed_module_groups = []
+        self.tab = FlowTab(self.cfg)
+        self.tab.resize(1000, 700)
+        self.tab.show()
+        self._app.processEvents()
+
+    def tearDown(self):
+        self._temp_exit()
+
+    def _left_group_row(self):
+        return self.tab.list.visualItemRect(self.tab._group_item("办公")).height()
+
+    def _left_flow_row(self):
+        g = self.tab._group_item("办公")
+        return self.tab.list.visualItemRect(g.child(0)).height()
+
+    def test_row_heights_match_left_column(self):
+        self.assertEqual(self._left_group_row(), flow_tab_mod.GROUP_ROW_H)
+        self.assertEqual(self._left_flow_row(), flow_tab_mod.FLOW_ROW_H)
+        # 右栏分组头 / 模块按钮
+        header = self.tab._group_headers["logic"]
+        btn = self.tab._module_btn_by_type["log"]
+        self.assertEqual(header.height(), self._left_group_row(),
+                         "模块面板的分组头要和左栏分组行一样高")
+        self.assertEqual(btn.height(), self._left_flow_row(),
+                         "模块面板的列表项要和左栏流程行一样高")
+
+    def test_group_font_matches_left_group_title(self):
+        from PySide6.QtWidgets import QPushButton
+        left_title = self.tab.list.itemWidget(self.tab._group_item("办公"), 0)\
+            .findChild(QPushButton, "groupTitle")
+        self.assertIsNotNone(left_title)
+        right_header = self.tab._group_headers["logic"]
+        self.assertEqual(right_header.font().pointSizeF(),
+                         left_title.font().pointSizeF())
+        # 字重也要一致（都是加粗的分组名）
+        self.assertEqual(right_header.font().bold(), left_title.font().bold())
+
+    def test_list_font_matches_left_list(self):
+        right_btn = self.tab._module_btn_by_type["log"]
+        # 断言**绝对字号**，不能只比两边相等——之前这条用例在离屏无字体环境下
+        # 两边都是默认值，等于白测（模块按钮实际是 10pt 也照样通过）。
+        self.assertEqual(right_btn.font().pointSizeF(), 9.0)
+        self.assertEqual(self.tab.list.font().pointSizeF(), 9.0)
+        self.assertEqual(right_btn.font().pointSizeF(),
+                         self.tab.list.font().pointSizeF())
+
+    def test_module_button_font_comes_from_wrapper_stylesheet(self):
+        """⚠️ 模块按钮的字号只能靠**容器自己的样式表**给（2026-10-01 踩出来的）。
+
+        面板顶层那条 `QWidget#flowTab QGroupBox#modulePanel QPushButton` 对 ModuleButton
+        **只生效背景/边框/内边距，字号完全不生效**（实测把它改成 20pt 也没用），按钮一直沿用
+        应用默认字体 10pt——这就是「右栏字体还是比左栏大」的真正原因。
+        分组头（`[groupHeader="true"]` 那条）反而正常，`setFont()` 也无效。
+        实测可行的只有容器级/按钮级 QSS，所以字号挂在 wrapper 上，这条用例钉住它。
+        """
+        wrapper = self.tab._group_wrappers["logic"]
+        self.assertIn("font-size: 9pt", wrapper.styleSheet())
+        btn = self.tab._module_btn_by_type["log"]
+        self.assertEqual(btn.font().pointSizeF(), 9.0)
+
+    def test_module_list_pitch_is_tight(self):
+        """行间距也要紧：左栏流程行是紧挨着的，右栏原来留 3px（pitch 31 vs 28）。"""
+        wrapper = self.tab._group_wrappers["logic"]
+        self.assertLessEqual(wrapper.layout().spacing(), 1)
+
+    def test_module_panel_qss_uses_same_font_size(self):
+        """源码级兜底：modulePanel 的两条按钮规则都必须是 9pt（跟左栏同一档）。"""
+        with open(flow_tab_mod.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        seg = src.split("QGroupBox#modulePanel QPushButton {", 1)[1]
+        item_rule = seg.split("}", 1)[0]
+        header_rule = src.split('QPushButton[groupHeader="true"] {', 1)[1].split("}", 1)[0]
+        self.assertIn("font-size: 9pt", item_rule)
+        self.assertIn("font-size: 9pt", header_rule)
+        self.assertIn("font-weight: 700", header_rule)
+
+    def test_step_rows_are_one_notch_bigger_than_left(self):
+        """中间「要执行的模块」列表：行高/字号**比左栏条目大一档**（2026-10-01 用户要求）。
+
+        用户原话：「中间要执行的模块列表，每一个模块的行高稍微大一点，字体稍微大一点，
+        紧凑一点，节约空间」——它是真正要执行的主体，可读性优先，但仍要紧凑
+        （上下 padding 归零，见 test_step_view_qss_keeps_padding_at_zero）。
+        演变：44px@11pt → 28px@9pt（与左栏同节奏）→ **30px@10pt**（比左栏大一档）。
+        """
+        from app.ui.flow_dialog import StepRunDelegate
+        step = FlowStep(type="wait", name="延时等待",
+                        params=dict(default_step_params("wait")))
+        self.cfg.flows[0].steps = [step, FlowStep(
+            type="log", name="打印输出", params=dict(default_step_params("log")))]
+        self.tab.refresh_list()
+        self._app.processEvents()
+
+        sl = self.tab.step_list
+        row_h = sl.visualItemRect(sl.item(0)).height()
+        self.assertEqual(row_h, flow_tab_mod.STEP_ROW_H, "步骤行高 = STEP_ROW_H")
+        self.assertGreater(row_h, self._left_flow_row(),
+                           "中间模块列表的行高要比左栏流程条目大一档")
+        self.assertGreater(sl.font().pointSizeF(),
+                           self.tab.list.font().pointSizeF(),
+                           "中间模块列表的字号要比左栏大一档")
+        # 「▶ 执行」按钮要装得进行里
+        self.assertLess(StepRunDelegate.BTN_H, row_h)
+
+    def test_step_view_qss_keeps_padding_at_zero(self):
+        """⚠️ `::item{height}` 是**内容高**：不把上下 padding 归零，通用规则的
+        `padding:4px 8px` 会再加 8px（这正是原来 38 变成 44 的原因）。
+        两处 QSS（flowTab 大样式表 + step_list 自己的）必须同档。"""
+        with open(flow_tab_mod.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn("height: 38px", src)
+        self.assertEqual(src.count(f"height: {flow_tab_mod.STEP_ROW_H}px"), 2)
+        self.assertEqual(src.count("padding: 0px 8px"), 2)
+
+
 class TestFlowSortAndPin(_TempPathsMixin, unittest.TestCase):
     """流程/分组的「置顶」与「按创建顺序排序」：入口逻辑 + 持久化语义。"""
 
@@ -322,7 +667,7 @@ class TestFlowSortAndPin(_TempPathsMixin, unittest.TestCase):
 
     def _group_flow_names(self, g):
         item = self.tab._group_item(g)
-        return [item.child(i).text(0) for i in range(item.childCount())]
+        return [_flow_name(item.child(i)) for i in range(item.childCount())]
 
     def _top_groups(self):
         return [self.tab.list.topLevelItem(i).data(0, Qt.UserRole)
@@ -407,43 +752,87 @@ class TestModulePanelCollapseAll(_TempPathsMixin, unittest.TestCase):
 
     def test_panel_title_button_starts_collapsed(self):
         self.assertIsNotNone(self.tab.panel_title_btn)
-        self.assertEqual(self.tab.panel_title_btn.text(), "模块面板 v")  # 默认收起，可点击展开
+        # 默认全收起：标题显示 ▲（与分组头同一条规则：▲ = 收起了）。按常量比对，换符号不用改测试
+        self.assertEqual(self.tab.panel_title_btn.text(),
+                         f"模块面板 {flow_tab_mod.DISCLOSURE_COLLAPSED}")
         self.assertTrue(self.tab.panel_title_btn.isEnabled())
         self.assertIn("展开", self.tab.panel_title_btn.toolTip())
+
+    def test_disclosure_arrows_are_font_safe_glyphs(self):
+        """展开/收起符号必须用**各字重都有字形**的字符，且全面板只用一条规则。
+
+        用户原话：「展开和收起图标改为好看点的」。查下来两处问题：
+        1. 面板标题原来用 ASCII 的 `^` / 字母 `v`，根本不像控件图标；
+        2. 全项目用的 `▾`/`▸`（U+25BE/U+25B8）**在 Microsoft YaHei 的粗体字面里没有**，
+           而分组头/日志条正是 `font-weight:700 + 9pt` —— 实测渲染成一个方框（缺字），
+           真机上能不能看见三角全看系统字体回退给不给面子。
+        `▼`(U+25BC)/`▲`(U+25B2) 各字重都有，所以统一换成它们；
+        并且统一语义：**▼ = 展开着，▲ = 收起了**（标题原先的 `^`/`v` 是反向的，已改齐）。
+        """
+        from app.ui.widgets import DISCLOSURE_COLLAPSED, DISCLOSURE_EXPANDED
+        self.assertEqual(DISCLOSURE_EXPANDED, "▼")
+        self.assertEqual(DISCLOSURE_COLLAPSED, "▲")
+        self.assertEqual(flow_tab_mod.DISCLOSURE_EXPANDED, DISCLOSURE_EXPANDED)
+        for arrow in (DISCLOSURE_EXPANDED, DISCLOSURE_COLLAPSED):
+            self.assertGreaterEqual(ord(arrow), 0x25A0)   # Geometric Shapes
+            self.assertLessEqual(ord(arrow), 0x25FF)
+        with open(flow_tab_mod.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn('"模块面板 ^"', src)
+        self.assertNotIn('"模块面板 v"', src)
+
+    def test_no_legacy_disclosure_glyphs_left_in_ui_code(self):
+        """UI 代码里不该再有 `▾`/`▸`（只有注释里允许出现，用来解释历史）。"""
+        import app.ui
+        base = os.path.dirname(os.path.abspath(app.ui.__file__))
+        offenders = []
+        for fn in os.listdir(base):
+            if not fn.endswith(".py"):
+                continue
+            with open(os.path.join(base, fn), encoding="utf-8") as fh:
+                for n, line in enumerate(fh, 1):
+                    code = line.split("#", 1)[0]      # 去掉行尾注释
+                    if "▾" in code or "▸" in code:
+                        offenders.append(f"{fn}:{n}")
+        self.assertEqual(offenders, [],
+                         "还在用粗体下会缺字的 ▾/▸：" + ", ".join(offenders))
 
     def test_toggle_expands_then_collapses_all_and_persists(self):
         """点击标题：默认收起 -> 展开全部（记忆为空）；再点 -> 全部收起（状态全部持久化）。"""
         with mock.patch.object(AppConfig, "save") as save:
             self.tab.panel_title_btn.click()          # 全收起 -> 展开全部
         for header in self.tab._group_headers.values():
-            self.assertTrue(header.text().startswith("▾"))
+            self.assertTrue(header.text().startswith(flow_tab_mod.DISCLOSURE_EXPANDED))
             self.assertTrue(header.isChecked())
         for wrapper in self.tab._group_wrappers.values():
             self.assertFalse(wrapper.isHidden())
         self.assertTrue(self.cfg.module_groups_explicit)
         self.assertEqual(self.cfg.collapsed_module_groups, [])
-        self.assertEqual(self.tab.panel_title_btn.text(), "模块面板 ^")
+        self.assertEqual(self.tab.panel_title_btn.text(),
+                         f"模块面板 {flow_tab_mod.DISCLOSURE_EXPANDED}")
 
         with mock.patch.object(AppConfig, "save") as save:
             self.tab.panel_title_btn.click()          # 全展开 -> 全部收起
         for header in self.tab._group_headers.values():
-            self.assertTrue(header.text().startswith("▸"))
+            self.assertTrue(header.text().startswith(flow_tab_mod.DISCLOSURE_COLLAPSED))
         for wrapper in self.tab._group_wrappers.values():
             self.assertTrue(wrapper.isHidden())
         self.assertEqual(sorted(self.cfg.collapsed_module_groups),
                          sorted(gid for gid, _, _ in MODULE_GROUPS))
-        self.assertEqual(self.tab.panel_title_btn.text(), "模块面板 v")
+        self.assertEqual(self.tab.panel_title_btn.text(),
+                         f"模块面板 {flow_tab_mod.DISCLOSURE_COLLAPSED}")
         save.assert_called()
 
     def test_expand_individually_from_collapsed(self):
-        """默认全收起时，点单个分组标题可单独展开，其余保持收起，标题回 ^。"""
+        """默认全收起时，点单个分组标题可单独展开，其余保持收起，标题回 ▲。"""
         with mock.patch.object(AppConfig, "save"):
             self.tab._group_headers["input"].setChecked(True)   # 单独展开 input
         self.assertFalse(self.tab._group_wrappers["input"].isHidden())
         self.assertTrue(self.tab._group_wrappers["perceive"].isHidden())
         self.assertEqual(sorted(self.cfg.collapsed_module_groups),
                          sorted(gid for gid, _, _ in MODULE_GROUPS if gid != "input"))
-        self.assertEqual(self.tab.panel_title_btn.text(), "模块面板 ^")
+        self.assertEqual(self.tab.panel_title_btn.text(),
+                         f"模块面板 {flow_tab_mod.DISCLOSURE_EXPANDED}")
 
     def test_perceive_group_renamed_with_screenshot(self):
         """「文字识别」分组改名为「目标识别」，并纳入「截图」「找图」模块。"""
@@ -747,6 +1136,11 @@ class _LoopFlowMixin(_TempPathsMixin):
         self.cfg = AppConfig()
         self.cfg.collapsed_module_groups = []
         self.cfg.flows = [Flow(name="循环流程")]
+        # 拖入模块现在会顺手打开步骤编辑窗（2026-09-26 起）；测试里不需要真窗口，
+        # 也不该在断言步骤结构时弹出非模态窗，统一替身掉。
+        self._dlg_patch = mock.patch.object(flow_tab_mod, "StepParamsDialog")
+        self._dlg_patch.start()
+        self.addCleanup(self._dlg_patch.stop)
         self.tab = FlowTab(self.cfg)      # 构造时自动选中唯一流程
         self.flow = self.cfg.flows[0]
 
@@ -757,10 +1151,263 @@ class _LoopFlowMixin(_TempPathsMixin):
         return [s.type for s in self.flow.steps]
 
 
+class TestDropOpensEditor(_LoopFlowMixin, unittest.TestCase):
+    """拖入模块后要立刻打开它的编辑窗，并选中新步骤（2026-09-26 用户要求）。"""
+
+    def _drop_and_pump(self, step_type, row):
+        """拖入 + 跑一轮事件循环，让 QTimer.singleShot(0) 里的开窗动作执行。"""
+        with mock.patch.object(self.tab, "_edit_step_param") as editor:
+            self.tab._on_step_dropped(step_type, row)
+            self._app.processEvents()
+        return editor
+
+    def test_drop_wait_opens_editor_and_selects_new_row(self):
+        editor = self._drop_and_pump("wait", 0)
+        editor.assert_called_once()
+        self.assertEqual(self.tab.step_list.currentRow(), 0)
+
+    def test_drop_in_middle_selects_inserted_row(self):
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="wait")]
+        self.tab._reload_steps()
+        editor = self._drop_and_pump("log", 1)          # 插到中间
+        editor.assert_called_once()
+        self.assertEqual(self.tab.step_list.currentRow(), 1)
+        self.assertEqual(self.flow.steps[1].type, "log")
+
+    def test_block_drop_selects_open_step(self):
+        """if/foreach/while 拖入后选中的是「起始块」（编辑条件处），不是结束标记。"""
+        editor = self._drop_and_pump("foreach", 0)
+        editor.assert_called_once()
+        self.assertEqual(self.flow.steps[0].type, "foreach")
+        self.assertEqual(self.tab.step_list.currentRow(), 0)
+
+    def test_else_branch_selects_its_own_row(self):
+        self.flow.steps = [FlowStep(type="if"), FlowStep(type="endif")]
+        self.tab._reload_steps()
+        editor = self._drop_and_pump("else", 1)
+        editor.assert_called_once()
+        row = self.tab.step_list.currentRow()
+        self.assertEqual(self.flow.steps[row].type, "else")
+
+    def test_break_does_not_open_editor(self):
+        """break/continue 没有可填参数，别弹个空窗。"""
+        self.flow.steps = [FlowStep(type="foreach"), FlowStep(type="endForeach")]
+        self.tab._reload_steps()
+        editor = self._drop_and_pump("break", 1)
+        editor.assert_not_called()
+
+    def test_rejected_drop_does_not_open_editor(self):
+        """位置非法被拒（else 不在 if 块内）→ 不弹编辑窗。"""
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        with mock.patch.object(flow_tab_mod.QMessageBox, "information",
+                               return_value=None):
+            editor = self._drop_and_pump("else", 1)
+        editor.assert_not_called()
+
+    def test_running_flow_does_not_open_editor(self):
+        """流程运行中禁止编辑 → 拖入直接返回，不弹窗。"""
+        with mock.patch.object(self.tab, "_selected_running", return_value=True):
+            editor = self._drop_and_pump("wait", 0)
+        editor.assert_not_called()
+
+    def test_web_drop_opens_editor(self):
+        editor = self._drop_and_pump("web", 0)
+        editor.assert_called_once()
+
+
+class TestMultiSelectDelete(_LoopFlowMixin, unittest.TestCase):
+    """步骤列表支持 Ctrl/Shift 多选，并能一次删除多个（2026-09-26 用户要求）。"""
+
+    def _select(self, *rows):
+        for r in rows:
+            self.tab.step_list.item(r).setSelected(True)
+
+    def _delete_confirmed(self):
+        with mock.patch.object(FlowTab, "_confirm_del_steps", return_value=True):
+            self.tab._del_step()
+
+    def test_extended_selection_enabled(self):
+        from PySide6.QtWidgets import QAbstractItemView
+        self.assertEqual(self.tab.step_list.selectionMode(),
+                         QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def test_delete_two_of_three(self):
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="log"),
+                           FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0, 2)
+        self._delete_confirmed()
+        self.assertEqual(self._types(), ["log"])
+
+    def test_delete_block_and_step_together(self):
+        """选中「if 起始块 + 一个普通步骤」→ 整块（含 endif）与那步一起删。"""
+        self.flow.steps = [FlowStep(type="if"), FlowStep(type="endif"),
+                           FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0, 2)
+        self._delete_confirmed()
+        self.assertEqual(self._types(), [])
+
+    def test_delete_branch_head_only_keeps_block(self):
+        self.flow.steps = [FlowStep(type="if"), FlowStep(type="else"),
+                           FlowStep(type="endif"), FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(1, 3)
+        self._delete_confirmed()
+        self.assertEqual(self._types(), ["if", "endif"])
+
+    def test_cancel_keeps_everything(self):
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="log")]
+        self.tab._reload_steps()
+        self._select(0, 1)
+        with mock.patch.object(FlowTab, "_confirm_del_steps", return_value=False):
+            self.tab._del_step()
+        self.assertEqual(self._types(), ["wait", "log"])
+
+    def test_rows_to_remove_expands_blocks(self):
+        self.flow.steps = [FlowStep(type="foreach"), FlowStep(type="wait"),
+                           FlowStep(type="endForeach"), FlowStep(type="log")]
+        self.assertEqual(self.tab._rows_to_remove(self.flow, [0]), {0, 1, 2})
+        self.assertEqual(self.tab._rows_to_remove(self.flow, [1, 3]), {1, 3})
+
+    def test_nothing_selected_does_nothing(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self.tab.step_list.clearSelection()
+        self.tab._del_step()
+        self.assertEqual(self._types(), ["wait"])
+
+    def test_confirm_text_mentions_block_expansion(self):
+        self.flow.steps = [FlowStep(type="if"), FlowStep(type="wait"),
+                           FlowStep(type="endif")]
+        self.tab._reload_steps()
+        with mock.patch.object(flow_tab_mod, "QMessageBox") as qmb:
+            box = qmb.return_value
+            box.clickedButton.return_value = None            # 取消
+            self.tab._confirm_del_steps(self.flow, [0])
+        text = box.setText.call_args.args[0]
+        self.assertIn("1 个步骤", text)
+        self.assertIn("实际会移除 3 个步骤", text)
+
+    def test_single_selection_still_uses_targeted_confirm(self):
+        """只选中一个时仍走原来的单步确认（提示按类型区分）。"""
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        with mock.patch.object(FlowTab, "_confirm_del_step", return_value=True) as one, \
+                mock.patch.object(FlowTab, "_confirm_del_steps") as many:
+            self.tab._del_step()
+        one.assert_called_once()
+        many.assert_not_called()
+
+
+class TestMultiSelectComment(_LoopFlowMixin, unittest.TestCase):
+    """多选后同时注释 / 取消注释多个模块（2026-09-26 用户要求）。"""
+
+    def _select(self, *rows):
+        for r in rows:
+            self.tab.step_list.item(r).setSelected(True)
+
+    def test_comment_multiple_selected(self):
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="log"),
+                           FlowStep(type="click")]
+        self.tab._reload_steps()
+        self._select(0, 2)
+        self.tab._toggle_comment_step()
+        self.assertEqual([s.commented for s in self.flow.steps],
+                         [True, False, True])
+
+    def test_all_commented_toggles_back(self):
+        self.flow.steps = [FlowStep(type="wait", commented=True),
+                           FlowStep(type="log", commented=True)]
+        self.tab._reload_steps()
+        self._select(0, 1)
+        self.tab._toggle_comment_step()
+        self.assertEqual([s.commented for s in self.flow.steps], [False, False])
+
+    def test_mixed_state_comments_all(self):
+        """混着两种状态时统一成「全部注释」（否则没法表达）。"""
+        self.flow.steps = [FlowStep(type="wait", commented=True),
+                           FlowStep(type="log")]
+        self.tab._reload_steps()
+        self._select(0, 1)
+        self.tab._toggle_comment_step()
+        self.assertEqual([s.commented for s in self.flow.steps], [True, True])
+
+    def test_selection_kept_after_comment(self):
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="log"),
+                           FlowStep(type="click")]
+        self.tab._reload_steps()
+        self._select(0, 2)
+        self.tab._toggle_comment_step()
+        self.assertEqual(self.tab._selected_step_rows(), [0, 2])   # 保持多选
+
+    def test_single_step_still_toggles_both_ways(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._toggle_comment_step()
+        self.assertTrue(self.flow.steps[0].commented)
+        self._select(0)                        # 重建后重新选中
+        self.tab._toggle_comment_step()
+        self.assertFalse(self.flow.steps[0].commented)
+
+    def test_menu_text_mentions_selected_count(self):
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="log")]
+        self.tab._reload_steps()
+        self._select(0, 1)
+        pos = self.tab.step_list.visualItemRect(self.tab.step_list.item(0)).center()
+        with mock.patch.object(flow_tab_mod, "QMenu") as qmenu:
+            menu = qmenu.return_value
+            menu.exec.return_value = None            # 不点任何项
+            self.tab._step_context_menu(pos)
+        labels = [c.args[0] for c in menu.addAction.call_args_list if c.args]
+        self.assertTrue(any("注释选中的 2 个模块" in lb for lb in labels), labels)
+
+    def test_right_click_on_selected_keeps_multi_selection(self):
+        """右键点在已选中的行上不能把多选清掉，否则批量操作没法用。"""
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="log")]
+        self.tab._reload_steps()
+        self._select(0, 1)
+        pos = self.tab.step_list.visualItemRect(self.tab.step_list.item(1)).center()
+        with mock.patch.object(flow_tab_mod, "QMenu") as qmenu:
+            qmenu.return_value.exec.return_value = None
+            self.tab._step_context_menu(pos)
+        self.assertEqual(self.tab._selected_step_rows(), [0, 1])
+
+    def test_running_flow_does_not_comment(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        with mock.patch.object(self.tab, "_selected_running", return_value=True):
+            self.tab._toggle_comment_step()
+        self.assertFalse(self.flow.steps[0].commented)
+
+
 class TestLoopBlockInsert(_LoopFlowMixin, unittest.TestCase):
     def test_foreach_dropped_creates_pair(self):
         self.tab._on_step_dropped("foreach", 0)
         self.assertEqual(self._types(), ["foreach", "endForeach"])
+
+    def test_for_dropped_creates_pair(self):
+        """for 与 foreach/while 一样：拖入即生成配对结束标记 endFor。"""
+        self.tab._on_step_dropped("for", 0)
+        self.assertEqual(self._types(), ["for", "endFor"])
+
+    def test_for_defaults(self):
+        self.tab._on_step_dropped("for", 0)
+        p = self.flow.steps[0].params
+        self.assertEqual(p["var"], "i")
+        self.assertEqual(p["start"], "1")     # 默认 1..10（含结束值）= 10 轮
+        self.assertEqual(p["stop"], "10")
+        self.assertEqual(p["step"], "1")
+
+    def test_for_insert_in_middle_keeps_pair_adjacent(self):
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self.tab._on_step_dropped("for", 1)
+        self.assertEqual(self._types(), ["wait", "for", "endFor", "wait"])
 
     def test_while_dropped_creates_pair(self):
         self.tab._on_step_dropped("while", 0)
@@ -1624,6 +2271,442 @@ class TestStepOnlyEditsEmitStepsChanged(_TempPathsMixin, unittest.TestCase):
         self.assertEqual(self.cfg.flow_groups, ["乙", "甲"])
         self.assertEqual(self.changed, [1])
         self.assertEqual(self.steps_changed, [])
+
+
+class TestForModulePanel(_LoopFlowMixin, unittest.TestCase):
+    """for 出现在模块面板的「条件分支」组；endFor 作为结构标记不上面板。"""
+
+    def test_panel_contains_for_but_not_endfor(self):
+        from app.ui.flow_tab import MODULE_GROUPS
+        types = [t for _gid, _title, ts in MODULE_GROUPS for t in ts]
+        self.assertIn("for", types)
+        self.assertNotIn("endFor", types)
+
+    def test_every_panel_type_has_an_icon(self):
+        from app.ui.flow_dialog import _TYPE_ICONS
+        from app.ui.flow_tab import MODULE_GROUPS
+        for _gid, _title, ts in MODULE_GROUPS:
+            for t in ts:
+                self.assertIn(t, _TYPE_ICONS, f"模块 {t} 缺少图标")
+
+    def test_for_icons_registered(self):
+        from app.ui.flow_dialog import _TYPE_ICONS
+        self.assertIn("for", _TYPE_ICONS)
+        self.assertIn("endFor", _TYPE_ICONS)
+
+
+class TestForDialogRoundTrip(unittest.TestCase):
+    """for 的参数对话框：_fill 与 apply_to 必须成对（改完保存再打开要看到原值）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_fill_then_apply_round_trip(self):
+        from app.ui.flow_dialog import StepParamsDialog
+        step = FlowStep(type="for", params={"var": "k", "start": "2",
+                                            "stop": "9", "step": "3"})
+        dlg = StepParamsDialog(step, None)
+        # _fill：参数回填到控件
+        self.assertEqual(dlg.for_var.text(), "k")
+        self.assertEqual(dlg._combo_value(dlg.for_start), "2")
+        self.assertEqual(dlg._combo_value(dlg.for_stop), "9")
+        self.assertEqual(dlg._combo_value(dlg.for_step), "3")
+        # 改值 → apply_to 写回
+        dlg.for_var.setText("m")
+        dlg._set_combo_value(dlg.for_stop, "12")
+        dlg.apply_to(step)
+        self.assertEqual(step.params["var"], "m")
+        self.assertEqual(step.params["stop"], "12")
+        self.assertEqual(step.params["start"], "2")      # 没改的保持原值
+        self.assertEqual(step.params["step"], "3")
+
+    def test_apply_fills_defaults_for_empty_boxes(self):
+        from app.ui.flow_dialog import StepParamsDialog
+        step = FlowStep(type="for", params={"var": "", "start": "",
+                                            "stop": "5", "step": ""})
+        dlg = StepParamsDialog(step, None)
+        dlg._set_combo_value(dlg.for_stop, "5")
+        dlg.apply_to(step)
+        self.assertEqual(step.params["var"], "i")        # 空 → 默认
+        self.assertEqual(step.params["start"], "1")
+        self.assertEqual(step.params["step"], "1")
+
+
+class TestDropOpensEditorFor(_LoopFlowMixin, unittest.TestCase):
+    """拖入 for 后立刻打开编辑窗（与 §18 的通用行为一致）。"""
+
+    def test_for_drop_opens_editor(self):
+        with mock.patch.object(self.tab, "_edit_step_param") as editor:
+            self.tab._on_step_dropped("for", 0)
+            self._app.processEvents()
+        editor.assert_called_once()
+        self.assertEqual(self.flow.steps[0].type, "for")
+        self.assertEqual(self.tab.step_list.currentRow(), 0)
+
+
+class TestStepCopyPaste(_LoopFlowMixin, unittest.TestCase):
+    """步骤列表 Ctrl+C 复制 / Ctrl+V 粘贴（2026-09-26 用户要求）。"""
+
+    def _select(self, *rows):
+        for r in rows:
+            self.tab.step_list.item(r).setSelected(True)
+
+    def _types(self):
+        return [s.type for s in self.flow.steps]
+
+    def test_copy_paste_duplicates_step_with_params(self):
+        self.flow.steps = [FlowStep(type="wait", params={"seconds": 3})]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._copy_steps()
+        self.tab._paste_steps()
+        self.assertEqual(self._types(), ["wait", "wait"])
+        self.assertEqual(self.flow.steps[1].params["seconds"], 3)
+
+    def test_paste_inserts_after_current_row(self):
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="log")]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._copy_steps()
+        self.tab.step_list.setCurrentRow(0)          # 当前第 1 行 → 粘到它后面
+        self.tab._paste_steps()
+        self.assertEqual(self._types(), ["wait", "wait", "log"])
+
+    def test_paste_appends_when_nothing_current(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._copy_steps()
+        self.tab.step_list.clearSelection()
+        self.tab.step_list.setCurrentRow(-1)
+        self.tab._paste_steps()
+        self.assertEqual(len(self.flow.steps), 2)
+
+    def test_copy_multiple_selected_steps(self):
+        self.flow.steps = [FlowStep(type="wait"), FlowStep(type="log"),
+                           FlowStep(type="click")]
+        self.tab._reload_steps()
+        self._select(0, 2)
+        self.tab._copy_steps()
+        self.tab._paste_steps()
+        self.assertEqual(self._types(),
+                         ["wait", "log", "click", "wait", "click"])
+
+    def test_copy_block_copies_whole_block(self):
+        """复制 if 起始块要连带 endif 与块内步骤（否则粘出来是缺 endif 的残块）。"""
+        self.flow.steps = [FlowStep(type="if", params={"condition": "a == 1"}),
+                           FlowStep(type="wait"), FlowStep(type="endif")]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._copy_steps()
+        self.tab._paste_steps()
+        self.assertEqual(self._types(),
+                         ["if", "wait", "endif", "if", "wait", "endif"])
+        self.assertEqual(self.flow.steps[3].params["condition"], "a == 1")
+
+    def test_copy_from_close_marker_also_whole_block(self):
+        """点 endif 复制，同样应复制整块。"""
+        self.flow.steps = [FlowStep(type="foreach"), FlowStep(type="wait"),
+                           FlowStep(type="endForeach")]
+        self.tab._reload_steps()
+        self._select(2)
+        self.tab._copy_steps()
+        self.assertEqual(len(self.tab._step_clipboard), 3)
+
+    def test_copy_branch_head_only(self):
+        self.flow.steps = [FlowStep(type="if"), FlowStep(type="else"),
+                           FlowStep(type="endif")]
+        self.tab._reload_steps()
+        self._select(1)
+        self.tab._copy_steps()
+        self.assertEqual([s.type for s in self.tab._step_clipboard], ["else"])
+
+    def test_paste_selects_pasted_steps(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._copy_steps()
+        self.tab._paste_steps()
+        self.assertEqual(self.tab._selected_step_rows(), [1])
+
+    def test_pasted_copy_is_independent(self):
+        """副本必须与原步骤彻底解耦：改副本不能动到原件。"""
+        self.flow.steps = [FlowStep(type="wait", params={"seconds": 5})]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._copy_steps()
+        self.tab._paste_steps()
+        self.flow.steps[1].params["seconds"] = 99
+        self.assertEqual(self.flow.steps[0].params["seconds"], 5)
+
+    def test_paste_with_empty_clipboard_does_nothing(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self.tab._paste_steps()
+        self.assertEqual(len(self.flow.steps), 1)
+
+    def test_copy_without_selection_does_nothing(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self.tab.step_list.clearSelection()
+        self.tab._copy_steps()
+        self.assertEqual(self.tab._step_clipboard, [])
+
+    def test_paste_break_outside_loop_rolls_back(self):
+        """break 粘到循环外 → 结构校验拦下并整体回滚（不留脏数据）。"""
+        self.flow.steps = [FlowStep(type="foreach"), FlowStep(type="break"),
+                           FlowStep(type="endForeach"), FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(1)                      # 复制 break
+        self.tab._copy_steps()
+        self.tab.step_list.setCurrentRow(3)  # 当前在循环外那行 → 粘其后
+        self.tab._paste_steps()
+        self.assertEqual(self._types(),
+                         ["foreach", "break", "endForeach", "wait"])
+
+    def test_running_flow_ignores_copy_paste(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        with mock.patch.object(self.tab, "_selected_running", return_value=True):
+            self.tab._copy_steps()
+            self.tab._paste_steps()
+        self.assertEqual(len(self.flow.steps), 1)
+
+    def test_shortcuts_emit_signals(self):
+        """列表里按 Ctrl+C / Ctrl+V 会发对应信号（真正的逻辑在 FlowTab）。"""
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        seen = []
+        self.tab.step_list.copyRequested.connect(lambda: seen.append("copy"))
+        self.tab.step_list.pasteRequested.connect(lambda: seen.append("paste"))
+        for key in (Qt.Key_C, Qt.Key_V):
+            ev = QKeyEvent(QEvent.Type.KeyPress, key, Qt.ControlModifier)
+            self._app.sendEvent(self.tab.step_list, ev)
+        self.assertEqual(seen, ["copy", "paste"])
+
+    def test_menu_has_copy_and_paste(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        pos = self.tab.step_list.visualItemRect(self.tab.step_list.item(0)).center()
+        with mock.patch.object(flow_tab_mod, "QMenu") as qmenu:
+            qmenu.return_value.exec.return_value = None
+            self.tab._step_context_menu(pos)
+        labels = [c.args[0] for c in qmenu.return_value.addAction.call_args_list
+                  if c.args]
+        self.assertTrue(any("复制" in lb for lb in labels), labels)
+        self.assertTrue(any("粘贴" in lb for lb in labels), labels)
+
+
+class TestMissingParamsMarker(_LoopFlowMixin, unittest.TestCase):
+    """必填参数没填的步骤在列表里被标记（红框由委托画，标记数据挂在 item 上）。"""
+
+    def _marker(self, row):
+        return self.tab.step_list.item(row).data(flow_dialog_mod._STEP_MISSING_ROLE)
+
+    def test_missing_params_marked_with_tooltip(self):
+        self.flow.steps = [FlowStep(type="wait_text", params={"text": ""})]
+        self.tab._reload_steps()
+        self.assertEqual(self._marker(0), ["目标文字"])
+        self.assertIn("还没设置", self.tab.step_list.item(0).toolTip())
+
+    def test_empty_result_var_is_not_flagged(self):
+        """回归（2026-09-26 用户报）：等待文字出现的两个结果变量都可留空，不该标红。"""
+        self.flow.steps = [FlowStep(type="wait_text",
+                                    params={"text": "开始", "result_var": "",
+                                            "pos_var": ""})]
+        self.tab._reload_steps()
+        self.assertIsNone(self._marker(0))
+
+    def test_complete_step_not_marked(self):
+        self.flow.steps = [FlowStep(type="wait_text",
+                                    params={"text": "开始", "result_var": "t"})]
+        self.tab._reload_steps()
+        self.assertIsNone(self._marker(0))
+        self.assertEqual(self.tab.step_list.item(0).toolTip(), "")
+
+    def test_commented_step_not_marked(self):
+        """已注释的步骤运行期会被跳过，不该再刷红框。"""
+        self.flow.steps = [FlowStep(type="var", params={"name": ""}, commented=True)]
+        self.tab._reload_steps()
+        self.assertIsNone(self._marker(0))
+
+    def test_marker_clears_after_filling(self):
+        self.flow.steps = [FlowStep(type="if", params={"condition": ""})]
+        self.tab._reload_steps()
+        self.assertEqual(self._marker(0), ["条件表达式"])
+        self.flow.steps[0].params["condition"] = "a == 1"
+        self.tab._reload_steps()
+        self.assertIsNone(self._marker(0))
+
+    def test_structural_steps_not_marked(self):
+        self.flow.steps = [FlowStep(type="foreach", params={"items": "arr"}),
+                           FlowStep(type="break"),
+                           FlowStep(type="endForeach")]
+        self.tab._reload_steps()
+        self.assertIsNone(self._marker(0))
+        self.assertIsNone(self._marker(1))
+        self.assertIsNone(self._marker(2))
+
+    def test_delegate_paints_marked_row_without_error(self):
+        """委托真的能把这行画出来（红框分支不抛异常）。"""
+        from PySide6.QtGui import QPainter, QPixmap
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        self.flow.steps = [FlowStep(type="var", params={"name": ""})]
+        self.tab._reload_steps()
+        delegate = self.tab.step_list.itemDelegate()
+        index = self.tab.step_list.indexFromItem(self.tab.step_list.item(0))
+        opt = QStyleOptionViewItem()
+        rect = self.tab.step_list.visualItemRect(self.tab.step_list.item(0))
+        opt.rect = rect if rect.isValid() else opt.rect
+        pix = QPixmap(max(1, opt.rect.width()), max(1, opt.rect.height()))
+        painter = QPainter(pix)
+        delegate.paint(painter, opt, index)     # 不抛异常即通过
+        painter.end()
+
+
+class TestUndoSteps(_LoopFlowMixin, unittest.TestCase):
+    """Ctrl+Z 撤销步骤改动，可连续撤销（2026-09-26 用户要求）。"""
+
+    def _types(self):
+        return [s.type for s in self.flow.steps]
+
+    def _select(self, *rows):
+        for r in rows:
+            self.tab.step_list.item(r).setSelected(True)
+
+    def test_undo_after_drop(self):
+        self.tab._on_step_dropped("wait", 0)
+        self.assertEqual(self._types(), ["wait"])
+        self.tab._undo_steps()
+        self.assertEqual(self._types(), [])
+
+    def test_undo_after_delete_restores_step_and_params(self):
+        self.flow.steps = [FlowStep(type="wait", params={"seconds": 5}),
+                           FlowStep(type="log")]
+        self.tab._reload_steps()
+        self._select(0)
+        with mock.patch.object(FlowTab, "_confirm_del_step", return_value=True):
+            self.tab._del_step()
+        self.assertEqual(self._types(), ["log"])
+        self.tab._undo_steps()
+        self.assertEqual(self._types(), ["wait", "log"])
+        self.assertEqual(self.flow.steps[0].params["seconds"], 5)   # 参数一并恢复
+
+    def test_undo_after_paste(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._copy_steps()
+        self.tab._paste_steps()
+        self.assertEqual(len(self.flow.steps), 2)
+        self.tab._undo_steps()
+        self.assertEqual(len(self.flow.steps), 1)
+
+    def test_undo_after_comment(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._toggle_comment_step()
+        self.assertTrue(self.flow.steps[0].commented)
+        self.tab._undo_steps()
+        self.assertFalse(self.flow.steps[0].commented)
+
+    def test_multiple_undo_goes_back_step_by_step(self):
+        self.tab._on_step_dropped("wait", 0)
+        self.tab._on_step_dropped("log", 1)
+        self.tab._on_step_dropped("click", 2)
+        self.assertEqual(self._types(), ["wait", "log", "click"])
+        self.tab._undo_steps()
+        self.assertEqual(self._types(), ["wait", "log"])
+        self.tab._undo_steps()
+        self.assertEqual(self._types(), ["wait"])
+        self.tab._undo_steps()
+        self.assertEqual(self._types(), [])
+        self.tab._undo_steps()                 # 到底了再按也不出错
+        self.assertEqual(self._types(), [])
+
+    def test_undo_removes_whole_block(self):
+        self.tab._on_step_dropped("if", 0)
+        self.assertEqual(self._types(), ["if", "endif"])
+        self.tab._undo_steps()
+        self.assertEqual(self._types(), [])
+
+    def test_empty_stack_reports_message(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        msgs = []
+        with mock.patch.object(FlowTab, "_status_msg",
+                               side_effect=lambda t, ms: msgs.append(t)):
+            self.tab._undo_steps()
+        self.assertTrue(any("没有可撤销" in m for m in msgs), msgs)
+
+    def test_rejected_drop_records_nothing(self):
+        """被拒绝的拖入（else 不在 if 块内）不该产生撤销点。"""
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        with mock.patch.object(flow_tab_mod.QMessageBox, "information",
+                               return_value=None):
+            self.tab._on_step_dropped("else", 1)      # 非法位置，被拒
+        self.assertFalse(self.tab._undo.get(self.flow.id))
+        self.tab._undo_steps()                        # 再按撤销应无事发生
+        self.assertEqual(self._types(), ["wait"])
+
+    def test_cancelled_delete_records_nothing(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        with mock.patch.object(FlowTab, "_confirm_del_step", return_value=False):
+            self.tab._del_step()
+        self.assertFalse(self.tab._undo.get(self.flow.id))
+
+    def test_undo_history_is_per_flow(self):
+        other = Flow(name="另一个流程", steps=[FlowStep(type="log")])
+        self.cfg.flows.append(other)
+        self.tab._on_step_dropped("wait", 0)          # 只改当前流程
+        self.tab._undo_steps()
+        self.assertEqual(self._types(), [])
+        self.assertFalse(self.tab._undo.get(other.id))   # 另一个流程没有历史
+
+    def test_undo_ignored_while_running(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        self.tab._copy_steps()
+        self.tab._paste_steps()
+        with mock.patch.object(self.tab, "_selected_running", return_value=True):
+            self.tab._undo_steps()
+        self.assertEqual(len(self.flow.steps), 2)     # 运行中不许撤销
+
+    def test_undo_stack_is_capped(self):
+        for _ in range(MAX_UNDO_STEPS + 5):
+            self.tab._on_step_dropped("wait", 0)
+        self.assertLessEqual(len(self.tab._undo.get(self.flow.id, [])),
+                             MAX_UNDO_STEPS)
+
+    def test_ctrl_z_emits_undo_signal(self):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        seen = []
+        self.tab.step_list.undoRequested.connect(lambda: seen.append("undo"))
+        ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key_Z, Qt.ControlModifier)
+        self._app.sendEvent(self.tab.step_list, ev)
+        self.assertEqual(seen, ["undo"])
+
+    def test_menu_has_undo_item(self):
+        self.flow.steps = [FlowStep(type="wait")]
+        self.tab._reload_steps()
+        self._select(0)
+        pos = self.tab.step_list.visualItemRect(self.tab.step_list.item(0)).center()
+        with mock.patch.object(flow_tab_mod, "QMenu") as qmenu:
+            qmenu.return_value.exec.return_value = None
+            self.tab._step_context_menu(pos)
+        labels = [c.args[0] for c in qmenu.return_value.addAction.call_args_list
+                  if c.args]
+        self.assertTrue(any("撤销" in lb for lb in labels), labels)
 
 
 if __name__ == "__main__":

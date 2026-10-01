@@ -13,8 +13,12 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -231,6 +235,116 @@ class TestShutdownChild(unittest.TestCase):
         finally:
             if child.poll() is None:
                 child.kill()
+
+
+class TestDistSync(unittest.TestCase):
+    """启动前同步 dist（与打包脚本同一套逻辑）：没打过包就跳过，失败不拦启动。"""
+
+    _EMPTY = {"added": 0, "updated": 0, "same": 0, "extra": 0,
+              "backed_up": 0, "backup_dir": ""}
+
+    def test_skips_silently_when_no_dist(self):
+        missing = os.path.join(tempfile.gettempdir(), "qf_no_such_dist_12345")
+        buf = io.StringIO()
+        with mock.patch("build.DIST_DIR", missing), \
+                contextlib.redirect_stdout(buf):
+            self.assertIsNone(wd.sync_dist_data())
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_returns_summary_from_build(self):
+        st = dict(self._EMPTY, added=2, updated=1)
+        with mock.patch("build.DIST_DIR", tempfile.gettempdir()), \
+                mock.patch("build.sync_data_dirs", return_value=st):
+            self.assertEqual(wd.sync_dist_data(), st)
+
+    def test_prints_one_line_only_when_changed(self):
+        st = dict(self._EMPTY, added=2, updated=1)
+        buf = io.StringIO()
+        with mock.patch("build.DIST_DIR", tempfile.gettempdir()), \
+                mock.patch("build.sync_data_dirs", return_value=st), \
+                contextlib.redirect_stdout(buf):
+            wd.sync_dist_data()
+        out = buf.getvalue()
+        self.assertIn("[同步]", out)
+        self.assertIn("新增 2", out)
+
+    def test_silent_when_nothing_changed(self):
+        buf = io.StringIO()
+        with mock.patch("build.DIST_DIR", tempfile.gettempdir()), \
+                mock.patch("build.sync_data_dirs", return_value=dict(self._EMPTY)), \
+                contextlib.redirect_stdout(buf):
+            wd.sync_dist_data()
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_failure_is_swallowed(self):
+        """同步失败只提示，不能拦住主程序启动。"""
+        with mock.patch("build.DIST_DIR", tempfile.gettempdir()), \
+                mock.patch("build.sync_data_dirs", side_effect=OSError("busy")):
+            self.assertIsNone(wd.sync_dist_data())      # 不抛异常
+
+    def test_called_before_starting_main(self):
+        """源码级契约：同步必须在 Popen(main.py) **之前**调用。"""
+        with open(os.path.join(ROOT, "restart_watchdog.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        body = src.split("def main()")[1]
+        start = body.index("sync_dist_data()")
+        popen = body.index("subprocess.Popen")
+        self.assertLess(start, popen, "同步要在启动主程序之前做")
+
+
+class TestConfigSync(unittest.TestCase):
+    """config.json 也随启动同步到 dist：version 各自保留，其余以工作区为准。"""
+
+    def test_keeps_dist_version_and_syncs_rest(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(tmp, "dist"))
+            src = {"version": "0.0.1", "mail_host": "smtp.new", "ui_theme": "night"}
+            dst = {"version": "v3.9.0", "mail_host": "smtp.old"}
+            with open(os.path.join(tmp, "config.json"), "w", encoding="utf-8") as f:
+                json.dump(src, f)
+            with open(os.path.join(tmp, "dist", "config.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(dst, f)
+
+            with mock.patch.object(wd, "SCRIPT_DIR", tmp):
+                self.assertTrue(wd.sync_dist_config(os.path.join(tmp, "dist")))
+
+            with open(os.path.join(tmp, "dist", "config.json"), encoding="utf-8") as f:
+                out = json.load(f)
+            self.assertEqual(out["version"], "v3.9.0")       # dist version 保留
+            self.assertEqual(out["mail_host"], "smtp.new")   # 其余同步
+            self.assertEqual(out["ui_theme"], "night")       # 新字段带过去
+
+            # 内容已一致：再同步不落盘、返回 False
+            with mock.patch.object(wd, "SCRIPT_DIR", tmp):
+                self.assertFalse(wd.sync_dist_config(os.path.join(tmp, "dist")))
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_skips_when_dist_config_missing(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmp, "config.json"), "w", encoding="utf-8") as f:
+                json.dump({"version": "0.0.1"}, f)
+            with mock.patch.object(wd, "SCRIPT_DIR", tmp):
+                self.assertFalse(wd.sync_dist_config(os.path.join(tmp, "dist")))
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_skips_when_src_invalid(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(tmp, "dist"))
+            with open(os.path.join(tmp, "config.json"), "w", encoding="utf-8") as f:
+                f.write("{ not json")
+            with open(os.path.join(tmp, "dist", "config.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({"version": "v3.9.0"}, f)
+            with mock.patch.object(wd, "SCRIPT_DIR", tmp):
+                self.assertFalse(wd.sync_dist_config(os.path.join(tmp, "dist")))
+        finally:
+            shutil.rmtree(tmp)
 
 
 if __name__ == "__main__":

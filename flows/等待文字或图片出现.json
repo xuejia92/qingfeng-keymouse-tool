@@ -58,5 +58,6 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 12,
-  "order": 2
+  "async_run": false,
+  "order": 5
 }

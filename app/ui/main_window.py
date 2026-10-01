@@ -10,9 +10,9 @@ import sys
 
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow,
-                               QMessageBox, QProgressBar, QPushButton,
-                               QTabWidget, QToolTip, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMessageBox,
+                               QProgressBar, QPushButton, QStatusBar, QTabWidget,
+                               QToolTip, QWidget)
 
 from ..config import APP_NAME, AppConfig, ClickerConfig, PresserConfig
 from ..capture_report import stop as stop_capture
@@ -25,6 +25,7 @@ from ..updater import compare_versions, install_update
 from .clicker_tab import ClickerTab
 from .finder_tab import FinderTab
 from .flow_tab import FlowTab
+from .frameless_window import FramelessMainWindow
 from .middle_menu_tab import MiddleMenuTab, build_menu
 from .presser_tab import PresserTab
 from .schedule_tab import ScheduleTab
@@ -71,7 +72,7 @@ class _RunIndicator(QPushButton):
                               self.toolTip(), self)
 
 
-class MainWindow(QMainWindow):
+class MainWindow(FramelessMainWindow):
     hideToTrayNotice = Signal()
 
     def __init__(self, cfg: AppConfig, manager: HotkeyManager):
@@ -80,8 +81,16 @@ class MainWindow(QMainWindow):
         self.manager = manager
         # 注入实时配置供各热键录入控件做冲突校验
         hotkey_policy.set_config(cfg)
-        # 正常窗口样式：任务栏显示入口；点 X 隐藏到托盘（见 closeEvent）
+        # 界面主题与全局字体百分比：必须在任何控件构建之前应用
+        #（之后构建的控件才会被主题映射；字号也要先设定，基线/内联样式生成时即按新字号）
+        from . import theme
+        theme.set_font_scale(getattr(cfg, "ui_font_scale", theme.UI_FONT_SCALE_DEFAULT))
+        theme.apply_theme(getattr(cfg, "ui_theme", "light"))
+        # 窗口样式：无边框 + 四角圆角卡片 + 自绘标题栏（标题栏随主题换色，见 frameless_window）
+        # 点 X 隐藏到托盘，退出走托盘菜单（见 closeEvent）
+        # 版本号不放标题栏，改显示在底部状态栏最右侧（2026-10-01 用户要求）
         self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(*_MIN_WINDOW)    # 无边框窗口没有系统下限，自己兜住
         self.resize(*self._window_size())
 
         self.click_task = ClickTask()
@@ -110,27 +119,34 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.finder_tab, "🖼 找图点击")
         tabs.addTab(self.settings_tab, "⚙ 设置")
 
-        # centralWidget = 标签页 + 底部可折叠日志面板
+        # centralWidget = 标签页 + 底部可折叠日志面板 + 状态栏（都在圆角卡片的内容区里）
         from .log_panel import LogPanel
         self.log_panel = LogPanel()
-        central = QWidget()
-        clay = QVBoxLayout(central)
-        clay.setContentsMargins(0, 0, 0, 0)
-        clay.setSpacing(0)
-        clay.addWidget(tabs, 1)
-        clay.addWidget(self.log_panel)
-        self.setCentralWidget(central)
+        body = self.body_layout()
+        body.addWidget(tabs, 1)
+        body.addWidget(self.log_panel)
+        body.addWidget(self.status_bar())    # 最后加：底部圆角归它
         self.log_panel.expandedChanged.connect(self._on_log_expanded)
-        self._apply_button_theme()
-        self._apply_tab_theme()          # 必须在按钮样式之后：它是往已有 QSS 上追加
+        self._apply_window_theme()       # 按钮 + 顶部导航栏（主题令牌生成）
+        # 主题切换时重刷窗口级样式（控件级内联样式由主题引擎自动重放）
+        from . import theme
+        theme.register_listener(self._apply_window_theme)
         # 接受外部文件拖放（拖入 .json 直接导入为自动化流程）
         self.setAcceptDrops(True)
 
         bottom = QWidget()
+        bottom.setObjectName("statusBarBody")
+        # 状态栏统一小字号（9pt）+ 内边距压到最小 → 整条更矮（2026-10-01 用户要求）。
+        # ⚠️ 这条只是兜底：**自带样式表的子控件不会继承父级的 QSS font-size**
+        #（实测 status_hint / version_label 仍是应用字体 10pt），所以每个子控件
+        # 都得自己显式写 font-size: 9pt。
+        bottom.setStyleSheet(
+            "QWidget#statusBarBody { font-size: 9pt; }")
         blay = QHBoxLayout(bottom)
-        blay.setContentsMargins(8, 2, 8, 4)
+        blay.setContentsMargins(8, 1, 8, 2)
         self.status_hint = QLabel()
-        self.status_hint.setStyleSheet("color: #888;")
+        # 字号要在每个子控件上显式写：子控件自带样式表时不会继承父级的 QSS font-size
+        self.status_hint.setStyleSheet("color: #888; font-size: 9pt;")
         # 运行任务指示器：显示当前正在运行的任务（单任务显示名称，多任务显示数量），
         # 悬停弹出任务列表；无任务时隐藏；点击切到自动化流程页查看。
         self.run_ind = _RunIndicator()
@@ -138,7 +154,7 @@ class MainWindow(QMainWindow):
         self.run_ind.setToolTip("")
         self.run_ind.setStyleSheet(
             "QPushButton{color:#2f9e5b; font-weight:600; border:none;"
-            " background:transparent; padding:2px 10px; font-size:10pt;}"
+            " background:transparent; padding:1px 8px; font-size:9pt;}"
             "QPushButton:hover{background:#e3f2ea; border-radius:4px;}")
         self.run_ind.clicked.connect(lambda: self.tabs.setCurrentWidget(self.flow_tab))
         self.run_ind.hide()
@@ -146,9 +162,23 @@ class MainWindow(QMainWindow):
         stop_btn.clicked.connect(self.stop_all)
         from .widgets import set_variant
         set_variant(stop_btn, "danger")
+        # 状态栏里的小按钮：字号跟状态栏走、内边距收紧，别把它撑高
+        stop_btn.setStyleSheet(
+            stop_btn.styleSheet()
+            + "\nQPushButton{font-size:9pt; padding:1px 10px;}")
         blay.addWidget(self.status_hint, 1)
         blay.addWidget(self.run_ind)
         blay.addWidget(stop_btn)
+        # 版本号：显示在状态栏最右侧（原来在标题栏，2026-10-01 用户要求挪下来）
+        version = (getattr(self.cfg, "version", "") or "").strip()
+        self.version_label = QLabel(version)
+        self.version_label.setStyleSheet(
+            "color: #8a939c; padding: 0 2px; font-size: 9pt;")
+        if version:
+            self.version_label.setToolTip(f"当前版本：{version}")
+        else:
+            self.version_label.hide()
+        blay.addWidget(self.version_label)
         self.statusBar().addPermanentWidget(bottom)
         self.statusBar().setStyleSheet("QStatusBar{border-top: 1px solid #ddd;}")
         # 状态栏左下角：红点 + 提示文字 + 更新按钮
@@ -159,13 +189,14 @@ class MainWindow(QMainWindow):
         self.update_dot.hide()
         self.statusBar().addWidget(self.update_dot)
         self.update_hint = QLabel()
-        self.update_hint.setStyleSheet("color: #1668a8; font-weight: 600; padding: 2px 6px;")
+        self.update_hint.setStyleSheet(
+            "color: #1668a8; font-weight: 600; padding: 1px 6px; font-size: 9pt;")
         self.update_hint.hide()
         self.statusBar().addWidget(self.update_hint)
         self.update_btn = QPushButton("重启升级")
         self.update_btn.setStyleSheet(
             "QPushButton{background:#1668a8; color:white; border:none;"
-            " border-radius:4px; padding:3px 14px; font-weight:600;}"
+            " border-radius:4px; padding:1px 10px; font-weight:600; font-size:9pt;}"
             "QPushButton:disabled{background:#9bb8d4;}")
         self.update_btn.clicked.connect(self._restart_upgrade)
         self.update_btn.hide()
@@ -207,6 +238,8 @@ class MainWindow(QMainWindow):
 
         self.flow_tab.changed.connect(self._on_flow_changed)
         self.flow_tab.flowStarted.connect(self._on_flow_started)
+        # 任一流程运行状态变化 → 刷新左上角「运行中流程」红色浮层
+        self.flow_tab.runningStateChanged.connect(self._refresh_running_overlay)
         # 拖动步骤排序只改了步骤，热键/流程名/其它页都无关：仅防抖落盘。
         # 走 changed 会在每次拖放后重注册全部全局热键并重建两个无关页面的列表。
         self.flow_tab.stepsChanged.connect(self._on_flow_steps_changed)
@@ -221,6 +254,9 @@ class MainWindow(QMainWindow):
         self.log_panel.printOnlyChanged.connect(self._on_print_only_setting)
 
         self.settings_tab.changed.connect(self._on_settings_changed)
+        # 左上角「运行中流程」浮层读这份配置（设置页改动后 set_config 即时换样式）
+        from .. import running_overlay
+        running_overlay.set_config(self.cfg)
         manager.triggered.connect(self._dispatch_hotkey)
 
         # 初始化期间信号被各标签页守卫屏蔽，这里统一同步一次快照
@@ -237,12 +273,20 @@ class MainWindow(QMainWindow):
         self.log_panel.clear_on_run = cfg.clear_log_on_run
         self.log_panel.print_only = cfg.log_print_only
 
+        # ---- 中键菜单：两种触发方式（鼠标中键 / 全局快捷键）----
+        # 状态必须在下面登记全局热键**之前**就绪：快捷键一注册，keyboard 的监听
+        # 线程立刻生效，用户此时按下它就会直接进 show_middle_menu()，
+        # 属性还没建好就会 AttributeError。顺序有源码级契约测试钉着，别调换。
+        self._middle_menu_open = False      # 正在走「弹菜单」循环，防重入
+        self._middle_menu = None            # 当前弹着的菜单（再次触发时要关掉它）
+        self._pending_middle_pos = None     # 挂起的新位置：关掉旧菜单后据此重开
+        # 触发方式快照：只在「中键开关 / 快捷键」真的变了才重注册全部全局热键。
+        # 增删改菜单项也会发 changed，但那些操作不影响任何热键，不该被打断。
+        self._menu_trigger = (bool(cfg.middle_menu_enabled), cfg.middle_menu_hotkey)
+
         self._register_hotkeys()
 
         # ---- 全局中键监听：中键抬起时在光标处弹出中键菜单 ----
-        self._middle_menu_open = False      # 正在走「弹菜单」循环，防重入
-        self._middle_menu = None            # 当前弹着的菜单（再次按中键时要关掉它）
-        self._pending_middle_pos = None     # 挂起的新位置：关掉旧菜单后据此重开
         self.mouse_watcher = MouseMenuWatcher(self)
         self.mouse_watcher.middleClicked.connect(self._on_middle_click)
         self.mouse_watcher.set_suppress(cfg.middle_menu_suppress)
@@ -322,7 +366,10 @@ class MainWindow(QMainWindow):
 
         展开优先向下增高；若底部会超出屏幕可用区域，则向上平移窗口
         （保持底部贴屏幕边缘），避免日志面板跑到屏幕外。
+        最大化时不动窗口尺寸（那会把最大化状态改掉）。
         """
+        if self.isMaximized():
+            return
         from .log_panel import _TEXT_HEIGHT
         screen = self.screen() or QApplication.primaryScreen()
         delta = _TEXT_HEIGHT if expanded else -_TEXT_HEIGHT
@@ -367,64 +414,37 @@ class MainWindow(QMainWindow):
         else:
             self.run_ind.hide()
 
-    def _apply_tab_theme(self) -> None:
-        """顶部导航栏配色：选中项蓝色文字 + 底部指示条，hover 浅蓝反馈。
+    def window_qss(self) -> str:
+        """窗口级样式：圆角卡片 + 自绘标题栏（基类）+ 按钮 + 顶部导航栏。
 
-        单独成一个方法，避免和按钮样式混在一起（setStyleSheet 是整体覆盖，
-        分两次调用后面的会覆盖前面的，所以这里用 append 累加）。
+        窗口级 QSS 优先级高于应用级基线（theme.build_base_qss），
+        控件级内联样式（set_variant 等）优先级最高——三层配合，
+        所以这里一次写入即可，不需要像以前那样「先按钮、再追加标签页」。
         """
-        tabs = """\
-            QTabWidget::pane {
-                border: none; border-top: 1px solid #e6eaef;
-                background: #f7f9fb; top: -1px;
-            }
-            QTabBar { background: #ffffff; border: none; }
-            QTabBar::tab {
-                background: transparent; color: #57606a;
-                border: none; border-radius: 6px;
-                padding: 4px 16px; margin: 5px 2px;
-                font-size: 10pt; font-weight: 500;
-            }
-            QTabBar::tab:hover {
-                color: #1668a8; background: #eef5fb;
-            }
-            QTabBar::tab:selected {
-                color: #ffffff; background: #1668a8; font-weight: 600;
-            }
+        from . import theme
+        return (super().window_qss()
+                + theme.build_button_qss() + theme.build_tab_qss())
+
+    def _apply_window_theme(self) -> None:
+        """主题切换 / 最大化状态变化时重刷窗口级样式（含自绘标题栏）。"""
+        self.apply_window_qss()
+
+    def statusBar(self) -> QStatusBar:
+        """卡片内的状态栏。
+
+        `QMainWindow.statusBar()` **不是虚函数**，这里覆盖只是让 Python 侧的
+        `self.statusBar().xxx`（本文件十几处）拿到卡片内那个，同时避免
+        QMainWindow 在自己的窗口底部再留一条系统状态栏（那就跑到圆角外面去了）。
         """
-        self.setStyleSheet(self.styleSheet() + tabs)
+        return self.status_bar()
+
+    def _apply_tab_theme(self) -> None:
+        """兼容旧调用点：顶部导航栏配色（现已并入 _apply_window_theme）。"""
+        self._apply_window_theme()
 
     def _apply_button_theme(self) -> None:
-        """全局按钮配色：默认灰白、蓝=编辑/打开、绿=启动/运行、红=停止/删除。"""
-        self.setStyleSheet("""
-            QPushButton {
-                background: white; color: #24292f;
-                border: 1px solid #c9d1d9; border-radius: 4px;
-                padding: 4px 12px; font-size: 10pt;
-            }
-            QPushButton:hover { border-color: #1668a8; color: #1668a8; background: #f3f8fd; }
-            QPushButton:pressed { background: #e3edf7; }
-            QPushButton:disabled { color: #aab2bb; background: #f2f4f6; border-color: #e1e4e8; }
-            QPushButton#btnPrimary {
-                background: #1668a8; color: white; border: 1px solid #125a93;
-            }
-            QPushButton#btnPrimary:hover { background: #1d78c0; color: white; }
-            QPushButton#btnPrimary:pressed { background: #125a93; }
-            QPushButton#btnSuccess {
-                background: #2f9e5b; color: white; border: 1px solid #278a4f;
-            }
-            QPushButton#btnSuccess:hover { background: #35b168; color: white; }
-            QPushButton#btnSuccess:pressed { background: #278a4f; }
-            QPushButton#btnDanger {
-                background: #d64541; color: white; border: 1px solid #c0392b;
-            }
-            QPushButton#btnDanger:hover { background: #e2544f; color: white; }
-            QPushButton#btnDanger:pressed { background: #c0392b; }
-            QPushButton#btnDanger:disabled, QPushButton#btnSuccess:disabled,
-            QPushButton#btnPrimary:disabled {
-                color: #f0f3f6; background: #b9c2cb; border-color: #b9c2cb;
-            }
-        """)
+        """兼容旧调用点：全局按钮配色（现已并入 _apply_window_theme）。"""
+        self._apply_window_theme()
 
     # ---------- 快照与保存 ----------
     def _on_clicker_changed(self) -> None:
@@ -456,14 +476,37 @@ class MainWindow(QMainWindow):
         """
         self._save_timer.start()
 
-    def _on_flow_started(self) -> None:
-        """有流程开始运行：勾选了「每次运行清空日志」就清空底部日志。"""
+    def _on_flow_started(self, has_status_log: bool = True) -> None:
+        """有流程开始运行：底部日志按开关清空；状态日志按需显示。
+
+        只有流程内部**含有「状态日志」模块**时才显示浮层；否则隐藏，避免显示
+        上一轮留下的空日志框（2026-10-01 用户要求）。内容不清空。
+        """
         if self.log_panel.clear_on_run:
             self.log_panel.clear()
+        from .. import running_overlay
+        if has_status_log:
+            running_overlay.reset_for_new_run()
+        else:
+            running_overlay.suppress_status()
+
+    def _refresh_running_overlay(self) -> None:
+        """把正在运行的流程（含来源/分组/热键）刷到屏幕上的悬浮窗。
+
+        状态日志的清空不在这里做：它是「浮层重新打开时才清」（见
+        running_overlay.StatusLogOverlay.append_status），与流程运行与否无关。
+        """
+        from .. import running_overlay
+        running_overlay.refresh(self.flow_tab.running_overview())
 
     # ---------- 中键菜单 ----------
     def _on_middle_menu_changed(self) -> None:
-        """中键菜单配置变化：把开关同步到监听器，并触发防抖保存。"""
+        """中键菜单配置变化：同步监听器/热键，并触发防抖保存。
+
+        菜单项增删改也会走到这里（同一个 changed 信号），但那种改动与
+        「鼠标钩子开关」「快捷键」都无关，故只在触发方式真的变了时重注册热键
+        ——unregister_all + 重注册会短暂卸掉所有全局热键，没必要白挨一次。
+        """
         enabled = bool(self.cfg.middle_menu_enabled)
         self.mouse_watcher.set_suppress(bool(self.cfg.middle_menu_suppress))
         if enabled and not self.mouse_watcher.is_running():
@@ -471,21 +514,30 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("中键菜单启动失败（无法安装鼠标钩子）", 5000)
         elif not enabled and self.mouse_watcher.is_running():
             self.mouse_watcher.stop()
+        trigger = (enabled, self.cfg.middle_menu_hotkey)
+        if trigger != self._menu_trigger:
+            self._menu_trigger = trigger
+            self._register_hotkeys()        # 快捷键触发中键菜单：增删注册
+            self._refresh_status_hint()
         self._save_timer.start()
 
     def _on_middle_click(self, x: int, y: int) -> None:
-        """全局中键抬起：在光标处弹出中键菜单，选中条目则运行对应流程。
+        """全局中键抬起：在光标处弹出中键菜单（鼠标中键这一路触发）。"""
+        if not self.cfg.middle_menu_enabled:
+            return
+        self.show_middle_menu()
 
-        运行在 Qt 主线程（信号由钩子线程跨线程排队过来）。若已有关闭中的模态
-        对话框则不打扰。
+    def show_middle_menu(self) -> None:
+        """在光标处弹出中键菜单，选中条目则运行对应流程。
 
-        菜单开着时**再按一次中键不会被忽略**：以前那样直接 return，菜单位置会
-        一直卡在第一次的地方，用户得先手动关掉、再按一次才能换位置。现在改为——
+        两种触发方式共用（鼠标中键抬起 / 用户设置的全局快捷键），运行在 Qt
+        主线程。若已有关闭中的模态对话框则不打扰。
+
+        菜单开着时**再次触发不会被忽略**：以前那样直接 return，菜单位置会
+        一直卡在第一次的地方，用户得先手动关掉、再触发一次才能换位置。现在改为——
         记下这次的光标位置、关掉旧菜单（`exec` 随之返回），再在外层循环里按新
         位置重开；选中条目即结束循环，期间挂起的按键不再理会。
         """
-        if not self.cfg.middle_menu_enabled:
-            return
         if self._middle_menu is not None:
             # 已弹着菜单：记下新位置并关掉旧的；关掉会让 exec 返回，循环随即重开
             self._pending_middle_pos = QCursor.pos()
@@ -502,7 +554,7 @@ class MainWindow(QMainWindow):
         try:
             while self._pending_middle_pos is not None:
                 pos = self._pending_middle_pos
-                # 先清空：只有「这一轮弹窗期间」按下的中键才算是新位置
+                # 先清空：只有「这一轮弹窗期间」再次触发的才算新位置
                 self._pending_middle_pos = None
                 menu = build_menu(self.cfg.middle_menu_items, self.cfg.flows, self)
                 if menu is None:
@@ -516,9 +568,9 @@ class MainWindow(QMainWindow):
                     flow_id = str(chosen.data() or "") if chosen is not None else ""
                 finally:
                     self._middle_menu = None
-                    menu.deleteLater()   # 菜单挂在 self 名下，不删会每按一次积一个
+                    menu.deleteLater()   # 菜单挂在 self 名下，不删会每触发一次积一个
                 if not flow_id:
-                    continue             # 可能只是又被按了一次中键 → 回循环看有无新位置
+                    continue             # 可能只是又被触发了一次 → 回循环看有无新位置
                 self._run_flow_from_middle_menu(flow_id)
                 break                    # 选中条目即结束；挂起的按键不再理会
         finally:
@@ -527,7 +579,10 @@ class MainWindow(QMainWindow):
             self._middle_menu_open = False
 
     def _run_flow_from_middle_menu(self, flow_id: str) -> None:
-        """运行中键菜单选中的流程：已在运行则跳过，不打断用户手动运行。"""
+        """运行中键菜单选中的流程：已在运行/排队则跳过，不打断用户手动运行。
+
+        同步流程（默认）遇忙会排队，所以「已启动」要区分是真的在跑还是进了队列。
+        """
         flow = next((f for f in self.cfg.flows if f.id == flow_id), None)
         if flow is None:
             return
@@ -535,9 +590,13 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"「{flow.name}」还没有步骤，无法运行", 5000)
             return
         if self.flow_tab.start_flow_if_idle(flow_id, silent=True):
-            self.statusBar().showMessage(f"中键菜单：已启动「{flow.name}」", 5000)
+            if self.flow_tab.is_queued(flow_id):
+                self.statusBar().showMessage(
+                    f"中键菜单：「{flow.name}」已加入排队，等前面的流程结束后自动开始", 6000)
+            else:
+                self.statusBar().showMessage(f"中键菜单：已启动「{flow.name}」", 5000)
         else:
-            self.statusBar().showMessage(f"「{flow.name}」已在运行中，已跳过", 4000)
+            self.statusBar().showMessage(f"「{flow.name}」已在运行或排队中，已跳过", 4000)
 
     def _on_clear_log_setting(self, checked: bool) -> None:
         """「每次运行清空日志」勾选状态变化：持久化到配置。"""
@@ -553,12 +612,53 @@ class MainWindow(QMainWindow):
         """底部状态栏热键提示，随设置实时刷新。"""
         toggle_hk = hotkey_display(self.cfg.show_hide_hotkey) or "未设置"
         stop_hk = hotkey_display(self.cfg.stop_all_hotkey) or "未设置"
-        self.status_hint.setText(f"显示/隐藏窗口：{toggle_hk}    紧急停止：{stop_hk}")
+        text = f"显示/隐藏窗口：{toggle_hk}    紧急停止：{stop_hk}"
+        menu_hk = hotkey_display(self.cfg.middle_menu_hotkey)
+        if menu_hk:
+            text += f"    快捷菜单：{menu_hk}"
+        self.status_hint.setText(text)
 
     def _on_settings_changed(self) -> None:
         toggle_hk, stop_hk = self.settings_tab.values()
         self.cfg.show_hide_hotkey = toggle_hk
         self.cfg.stop_all_hotkey = stop_hk
+        # 界面主题与全局字体百分比（都已在设置页里实时应用，这里只负责写回配置
+        # → 防抖保存持久化）
+        self.cfg.ui_theme = self.settings_tab.theme_value()
+        self.cfg.ui_font_scale = self.settings_tab.font_scale_value()
+        # 运行状态浮层外观（标题/流程名称各自的字号字体颜色 + 背景/位置/开关）：
+        # 写回配置并让可见浮层立即换样式
+        ov = self.settings_tab.overlay_values()
+        self.cfg.run_overlay_enabled = ov["enabled"]
+        for kind in ("title", "flow"):
+            setattr(self.cfg, f"run_overlay_{kind}_font_size",
+                    ov[f"{kind}_font_size"])
+            setattr(self.cfg, f"run_overlay_{kind}_font_family",
+                    ov[f"{kind}_font_family"])
+            setattr(self.cfg, f"run_overlay_{kind}_text_color",
+                    ov[f"{kind}_text_color"])
+        self.cfg.run_overlay_bg_color = ov["bg_color"]
+        self.cfg.run_overlay_pos = ov["pos"]
+        # 状态日志（浮层透明控制台）的字体/字号/三级颜色/最多行数
+        self.cfg.run_overlay_log_font_size = ov["log_font_size"]
+        self.cfg.run_overlay_log_font_family = ov["log_font_family"]
+        self.cfg.run_overlay_log_color = ov["log_color"]
+        self.cfg.run_overlay_log_warn_color = ov["log_warn_color"]
+        self.cfg.run_overlay_log_error_color = ov["log_error_color"]
+        self.cfg.run_overlay_log_max_lines = ov["log_max_lines"]
+        # 状态日志浮层是独立窗口：开关 / 位置 / 背景
+        self.cfg.run_overlay_log_enabled = ov["log_enabled"]
+        self.cfg.run_overlay_log_pos = ov["log_pos"]
+        self.cfg.run_overlay_log_bg_color = ov["log_bg_color"]
+        self.cfg.run_overlay_log_bg_transparent = ov["log_bg_transparent"]
+        self.cfg.run_overlay_log_max_width = ov["log_max_width"]
+        self.cfg.run_overlay_log_max_height = ov["log_max_height"]
+        self.cfg.run_overlay_log_auto_hide_sec = ov["log_auto_hide_sec"]
+        # 在设置页重新选了坐标位置 → 清掉手动拖动记下的位置（让九宫格设置生效）
+        if ov["log_pos"] != self.cfg.run_overlay_log_pos:
+            self.cfg.run_overlay_log_custom_pos = ""
+        from .. import running_overlay
+        running_overlay.set_config(self.cfg)
         self._refresh_status_hint()
         self._register_hotkeys()
         self._save_timer.start()
@@ -579,6 +679,12 @@ class MainWindow(QMainWindow):
 
         bind(self.cfg.show_hide_hotkey, self.toggle_show_hide)
         bind(self.cfg.stop_all_hotkey, self.stop_all)
+        # 每个分组一个热键：按一下运行**本组的异步流程**，再按一下停止本组异步流程
+        # （开关语义）。用 lambda 包一层：绑定时不解析 flow_tab 的属性
+        # （替身/裁剪过的窗口也能注册）
+        for name, hk in (getattr(self.cfg, "group_hotkeys", {}) or {}).items():
+            bind(hk, (lambda g: lambda: self.flow_tab.toggle_group_async(g))(name))
+        bind(self.cfg.middle_menu_hotkey, self.show_middle_menu)
         bind(self.cfg.clicker.hotkey, self.toggle_clicker)
         bind(self.cfg.presser.hotkey, self.toggle_presser)
         for t in self.cfg.find_tasks:
@@ -845,7 +951,11 @@ class MainWindow(QMainWindow):
 
     def shutdown(self) -> None:
         from ..overlay_actor import close_all as close_floating_images
+        from ..power_overlay import close_all as close_power_countdown
+        from .. import running_overlay
         close_floating_images()        # 销毁还留在桌面上的悬浮图片
+        close_power_countdown()        # 销毁可能还留在屏幕下方的关机倒计时浮层
+        running_overlay.close()        # 销毁左上角「运行中流程」红色浮层
         stop_capture()          # 停止定时截屏上报线程
         self.schedule_tab.shutdown()   # 停止定时任务调度线程
         self.mouse_watcher.stop()      # 卸载全局鼠标钩子

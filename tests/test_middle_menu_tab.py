@@ -1,7 +1,7 @@
 """中键菜单管理页（MiddleMenuTab）的测试。
 
 覆盖：列表渲染（自定义名称 / 流程名回退 / 断链红字）、增删改、上下移排序、
-开关持久化，以及流程增删改后的联动刷新。
+开关持久化、快捷键触发，以及流程增删改后的联动刷新。
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QDialog, QMessageBox
 
+from app import hotkey_policy
 from app.config import AppConfig, Flow, FlowStep, MiddleMenuItem
 from app.ui import middle_menu_tab as tab_mod
 from app.ui.middle_menu_tab import MiddleMenuTab
@@ -196,6 +197,62 @@ class TestMiddleMenuTab(unittest.TestCase):
         self.tab.suppress_check.setChecked(True)
         self.assertTrue(self.cfg.middle_menu_suppress)
         self.assertEqual(self.changed, [1])
+
+    # ---------- 快捷键触发 ----------
+    def test_hotkey_recorded_into_config(self):
+        """录制快捷键后写进配置并发 changed（主窗口据此注册全局热键）。"""
+        self.tab.hotkey_edit.hotkeyChanged.emit("Ctrl+Alt+M")
+        self.assertEqual(self.cfg.middle_menu_hotkey, "ctrl+alt+m")
+        self.assertEqual(self.changed, [1])
+
+    def test_hotkey_cleared(self):
+        self.cfg.middle_menu_hotkey = "f10"
+        tab = MiddleMenuTab(self.cfg)
+        tab.hotkey_edit.hotkeyChanged.emit("")
+        self.assertEqual(self.cfg.middle_menu_hotkey, "")
+
+    def test_initial_hotkey_reflects_config(self):
+        self.cfg.middle_menu_hotkey = "f10"
+        tab = MiddleMenuTab(self.cfg)
+        self.assertEqual(tab.hotkey_edit.hotkey(), "f10")
+        self.assertEqual(tab.hotkey_edit.text(), "F10")
+
+    def test_hotkey_conflict_checker_wired(self):
+        """接的是统一冲突检测，槽位 middle_menu：报别人的冲突、不报自己的。"""
+        hotkey_policy.set_config(self.cfg)
+        self.addCleanup(hotkey_policy.set_config, None)
+        checker = self.tab.hotkey_edit._conflict_checker
+        self.assertIsNotNone(checker)
+        self.assertEqual(checker("shift+f1"), "该热键已被「显示/隐藏窗口」占用，请换一个组合")   # 显示/隐藏占用的键
+        self.cfg.middle_menu_hotkey = "f9"
+        self.assertIsNone(checker("f9"))                         # 自身旧值不算冲突
+
+    # ---------- 触发方式提示 ----------
+    def test_trigger_state_default_mentions_middle_click(self):
+        self.assertIn("鼠标中键", self.tab.trigger_state.text())
+
+    def test_trigger_state_warns_when_nothing_can_trigger(self):
+        """两种方式都关掉时必须明确报警——否则菜单静默失效，按什么都没反应。"""
+        self.tab.enable_check.setChecked(False)
+        self.assertIn("不会弹出", self.tab.trigger_state.text())
+
+    def test_trigger_state_hotkey_only_clears_warning(self):
+        self.tab.enable_check.setChecked(False)
+        self.tab.hotkey_edit.hotkeyChanged.emit("f10")
+        text = self.tab.trigger_state.text()
+        self.assertNotIn("⚠", text)
+        self.assertIn("F10", text)
+
+    def test_trigger_state_lists_both_ways(self):
+        self.tab.hotkey_edit.hotkeyChanged.emit("f10")
+        self.assertIn("鼠标中键", self.tab.trigger_state.text())
+        self.assertIn("F10", self.tab.trigger_state.text())
+
+    def test_suppress_check_follows_middle_switch(self):
+        """不装鼠标钩子时「拦截中键」没有意义，应置灰。"""
+        self.assertTrue(self.tab.suppress_check.isEnabled())
+        self.tab.enable_check.setChecked(False)
+        self.assertFalse(self.tab.suppress_check.isEnabled())
 
     # ---------- 联动 ----------
     def test_on_flows_changed_refreshes_broken_state(self):

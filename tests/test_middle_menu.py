@@ -92,6 +92,7 @@ class TestConfigPersistence(unittest.TestCase):
             cfg = AppConfig()
             cfg.middle_menu_enabled = False
             cfg.middle_menu_suppress = True
+            cfg.middle_menu_hotkey = "ctrl+alt+m"
             cfg.middle_menu_items = [
                 MiddleMenuItem(label="甲", icon="rocket", flow_id="f1", flow_name="流程甲"),
                 MiddleMenuItem(flow_id="f2", flow_name="流程乙", separator_before=True),
@@ -101,6 +102,7 @@ class TestConfigPersistence(unittest.TestCase):
             loaded = AppConfig.load()
             self.assertFalse(loaded.middle_menu_enabled)
             self.assertTrue(loaded.middle_menu_suppress)
+            self.assertEqual(loaded.middle_menu_hotkey, "ctrl+alt+m")
             self.assertEqual(len(loaded.middle_menu_items), 2)
             self.assertEqual(loaded.middle_menu_items[0].label, "甲")
             self.assertEqual(loaded.middle_menu_items[0].icon, "rocket")
@@ -113,7 +115,43 @@ class TestConfigPersistence(unittest.TestCase):
             loaded = AppConfig.load()
             self.assertTrue(loaded.middle_menu_enabled)     # 默认开启
             self.assertFalse(loaded.middle_menu_suppress)   # 默认不拦截中键
+            self.assertEqual(loaded.middle_menu_hotkey, "")  # 默认不设快捷键
             self.assertEqual(loaded.middle_menu_items, [])
+
+    def test_hotkey_normalized_and_clamped(self):
+        """手改 config.json 时也不该让加载失败：统一小写、去空格。"""
+        with TempConfigPaths():
+            AppConfig().save(save_flows=False)
+            self._patch_config({"middle_menu_hotkey": "  Ctrl+Alt+M  "})
+            self.assertEqual(AppConfig.load().middle_menu_hotkey, "ctrl+alt+m")
+
+    def test_hotkey_absent_in_old_config(self):
+        """旧配置没有 middle_menu_hotkey：视为未设置，不当成坏数据。"""
+        with TempConfigPaths():
+            AppConfig().save(save_flows=False)
+            data = self._read_config()
+            data.pop("middle_menu_hotkey", None)
+            self._write_config(data)
+            self.assertEqual(AppConfig.load().middle_menu_hotkey, "")
+
+    @staticmethod
+    def _read_config() -> dict:
+        import json
+        from app.config import CONFIG_PATH
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+
+    @staticmethod
+    def _write_config(data: dict) -> None:
+        import json
+        from app.config import CONFIG_PATH
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    def _patch_config(self, updates: dict) -> None:
+        data = self._read_config()
+        data.update(updates)
+        self._write_config(data)
 
     def test_default_items_helper(self):
         flows = [_flow("甲"), _flow("乙")]

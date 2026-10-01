@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView,
                                QWidget)
 
 from ..config import FindTask, resolve_template_path
+from . import theme
 from ..capture_overlay import run_screen_capture
 from ..keymap import hotkey_display
 from ..tasks import FindTaskRunner
@@ -135,7 +136,7 @@ class FinderTab(QWidget):
                 status_text = "空闲" if not last else f"停止（{last}）"
             status_item = QTableWidgetItem(status_text)
             if running:
-                status_item.setForeground(QColor("#27ae60"))
+                status_item.setForeground(QColor(theme.token("run_marker")))
             self.table.setItem(row, _COL_STATUS, status_item)
         self._updating = False
         # 默认选中第一行，避免"启动/停止选中"无对象可用
@@ -374,7 +375,7 @@ class FinderTab(QWidget):
         if row is not None:
             if state == "running":
                 item = QTableWidgetItem("运行中")
-                item.setForeground(QColor("#27ae60"))
+                item.setForeground(QColor(theme.token("run_marker")))
             else:
                 text = "空闲" if not reason else f"停止（{reason}）"
                 item = QTableWidgetItem(text)

@@ -7,7 +7,7 @@
       "type": "deepseek",
       "name": "DeepSeek 对话",
       "params": {
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-v4.1-flash",
         "api_key": "sk-b18e864131fd479aa43657fa4a3e4c37",
         "system": "You are a helpful assistant",
         "thinking": true,
@@ -53,5 +53,6 @@
   "hotkey": "",
   "loops": 1,
   "created_seq": 7,
-  "order": 1
+  "async_run": false,
+  "order": 4
 }

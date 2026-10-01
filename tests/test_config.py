@@ -25,12 +25,89 @@ from app.config import (
     flow_from_dict,
     flow_to_dict,
     load_flow_files,
+    normalize_hex_color,
     parse_region_str,
     repair_web_pairs,
     safe_filename,
     save_flows_dir,
 )
 from tests._env import TempConfigPaths, write_json
+
+
+class TestNormalizeHexColor(unittest.TestCase):
+    """运行状态浮层颜色的配置校验（2026-09-27）：非法输入回退，不让加载失败。"""
+
+    def test_six_digit_passthrough(self):
+        self.assertEqual(normalize_hex_color("#00E676"), "#00e676")
+
+    def test_hash_optional_and_uppercase(self):
+        self.assertEqual(normalize_hex_color("00e676"), "#00e676")
+        self.assertEqual(normalize_hex_color("#ABC"), "#aabbcc")
+
+    def test_alpha_form(self):
+        self.assertEqual(normalize_hex_color("#11223344"), "#11223344")
+
+    def test_empty_returns_fallback(self):
+        self.assertEqual(normalize_hex_color("", ""), "")
+        self.assertEqual(normalize_hex_color(None, "#fff000"), "#fff000")
+
+    def test_invalid_returns_fallback(self):
+        self.assertEqual(normalize_hex_color("#zzz", "#112233"), "#112233")
+        self.assertEqual(normalize_hex_color("#12345", ""), "")
+        self.assertEqual(normalize_hex_color("red", ""), "")
+        self.assertEqual(normalize_hex_color("javascript:x", ""), "")
+
+
+class TestRunOverlayConfigRoundtrip(unittest.TestCase):
+    """run_overlay_* 字段：写入 -> 读回一致；非法值被夹紧/回退。"""
+
+    def test_fields_default(self):
+        cfg = AppConfig()
+        self.assertTrue(cfg.run_overlay_enabled)
+        self.assertEqual(cfg.run_overlay_title_font_size, 16)
+        self.assertEqual(cfg.run_overlay_title_font_family, "")
+        self.assertEqual(cfg.run_overlay_title_text_color, "#00e676")
+        self.assertEqual(cfg.run_overlay_flow_font_size, 16)
+        self.assertEqual(cfg.run_overlay_flow_font_family, "")
+        self.assertEqual(cfg.run_overlay_flow_text_color, "#00e676")
+        self.assertEqual(cfg.run_overlay_bg_color, "")
+        self.assertEqual(cfg.run_overlay_pos, "top_left")
+
+    def test_load_clamps_and_falls_back(self):
+        with TempConfigPaths() as tmp:
+            write_json(os.path.join(tmp, "config.json"), {
+                "run_overlay_enabled": False,
+                "run_overlay_title_font_size": 500,        # 越界 -> 夹到 72
+                "run_overlay_title_font_family": "  SimHei  ",  # 首尾空白被去掉
+                "run_overlay_title_text_color": "nothex",  # 非法 -> 默认
+                "run_overlay_flow_font_size": 3,           # 越界 -> 夹到 8
+                "run_overlay_flow_text_color": "#ff8800",
+                "run_overlay_bg_color": "#112233aa",
+                "run_overlay_pos": "bottom_center",
+            })
+            cfg = AppConfig.load()
+            self.assertFalse(cfg.run_overlay_enabled)
+            self.assertEqual(cfg.run_overlay_title_font_size, 72)
+            self.assertEqual(cfg.run_overlay_title_font_family, "SimHei")
+            self.assertEqual(cfg.run_overlay_title_text_color, "#00e676")
+            self.assertEqual(cfg.run_overlay_flow_font_size, 8)
+            self.assertEqual(cfg.run_overlay_flow_text_color, "#ff8800")
+            self.assertEqual(cfg.run_overlay_bg_color, "#112233aa")
+            self.assertEqual(cfg.run_overlay_pos, "bottom_center")
+
+    def test_legacy_shared_fields_migrate_to_both_groups(self):
+        """旧版共用字号/字体/颜色（run_overlay_font_*）迁移进标题与流程名称两组。"""
+        with TempConfigPaths() as tmp:
+            write_json(os.path.join(tmp, "config.json"), {
+                "run_overlay_font_size": 22,
+                "run_overlay_font_family": "SimHei",
+                "run_overlay_text_color": "#ff5500",
+            })
+            cfg = AppConfig.load()
+            for kind in ("title", "flow"):
+                self.assertEqual(getattr(cfg, f"run_overlay_{kind}_font_size"), 22)
+                self.assertEqual(getattr(cfg, f"run_overlay_{kind}_font_family"), "SimHei")
+                self.assertEqual(getattr(cfg, f"run_overlay_{kind}_text_color"), "#ff5500")
 
 
 class TestRegionStr(unittest.TestCase):

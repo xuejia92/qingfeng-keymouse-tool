@@ -1,6 +1,8 @@
 """基于 pynput 的输入模拟封装（点击 / 组合键）。"""
 from __future__ import annotations
 
+import time
+
 from pynput.mouse import Button, Controller as MouseController
 
 from .keymap import parse_combo, to_pynput_key
@@ -17,8 +19,13 @@ def click(button: str = "left", times: int = 1, x: int | None = None, y: int | N
     mouse.click(btn, times)
 
 
-def press_combo(keys: str) -> None:
-    """按 keyboard 库格式的按键串，如 'space'、'ctrl+c'。"""
+def press_combo(keys: str, hold_sec: float = 0.0, stop=None) -> None:
+    """按 keyboard 库格式的按键串，如 'space'、'ctrl+c'。
+
+    hold_sec > 0 表示按下后**按住**这么久再松开（「键盘连按」步骤的「每次按住」靠它实现）；
+    按住期间若 stop 被置位（用户点了「停止」）会立刻松开，绝不赖着不放。
+    默认 0 = 按下即松开，行为与旧版一致。
+    """
     mods, main = parse_combo(keys)
     kb = _get_keyboard()
     held = []
@@ -27,6 +34,11 @@ def press_combo(keys: str) -> None:
             kb.press(to_pynput_key(m))
             held.append(m)
         kb.press(to_pynput_key(main))
+        if hold_sec > 0:
+            if stop is not None:
+                stop.wait(hold_sec)
+            else:
+                time.sleep(hold_sec)
         kb.release(to_pynput_key(main))
     finally:
         for m in reversed(held):

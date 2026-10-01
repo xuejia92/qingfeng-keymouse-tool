@@ -16,11 +16,12 @@ from PySide6.QtWidgets import (QFormLayout, QFrame, QHBoxLayout, QInputDialog,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..config import AppConfig, Flow, ScheduleTask
+from . import theme
 from ..logbus import log
 from ..scheduler import (ScheduleRunner, describe_schedule, format_dt,
                          next_run_time, next_run_times)
 from .schedule_dialog import ScheduleDialog
-from .widgets import set_variant
+from .widgets import DISCLOSURE_COLLAPSED, DISCLOSURE_EXPANDED, set_variant
 
 _PREVIEW_N = 5
 
@@ -180,7 +181,7 @@ class ScheduleTab(QWidget):
                 citem.setData(0, Qt.UserRole, ("task", t.id))
                 citem.setToolTip(0, self._item_tooltip(t))
                 if not t.enabled:
-                    citem.setForeground(0, QColor("#a7afb8"))
+                    citem.setForeground(0, QColor(theme.token("text_muted")))
                 gitem.addChild(citem)
             gitem.setExpanded(expanded)
         self.list.blockSignals(False)
@@ -263,7 +264,8 @@ class ScheduleTab(QWidget):
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(2)
-        title = QPushButton(("▾ " if expanded else "▸ ") + name)
+        title = QPushButton((f"{DISCLOSURE_EXPANDED} " if expanded
+                             else f"{DISCLOSURE_COLLAPSED} ") + name)
         title.setObjectName("groupTitle")
         title.setProperty("groupHeader", True)
         title.setCursor(Qt.PointingHandCursor)
@@ -291,7 +293,8 @@ class ScheduleTab(QWidget):
         if header is not None:
             btn = header.findChild(QPushButton, "groupTitle")
             if btn is not None:
-                btn.setText(("▾ " if expanded else "▸ ") + (g if g else "未分组"))
+                btn.setText((f"{DISCLOSURE_EXPANDED} " if expanded
+                             else f"{DISCLOSURE_COLLAPSED} ") + (g if g else "未分组"))
         collapsed = set(self.cfg.collapsed_schedule_groups)
         if expanded:
             collapsed.discard(g)
@@ -646,7 +649,12 @@ class ScheduleTab(QWidget):
         if started:
             task.missed_fires = 0
             task.last_run = now.strftime("%Y-%m-%d %H:%M:%S")
-            log(f"定时任务「{task.name}」触发：运行流程「{flow.name}」")
+            # 同步流程（默认）遇忙会排队：started=True 也可能是「已入队、还没开始跑」
+            is_queued = getattr(self.flow_tab, "is_queued", None)
+            queued = bool(is_queued and is_queued(task.flow_id))
+            log(f"定时任务「{task.name}」触发："
+                + (f"流程「{flow.name}」已加入排队，等当前流程结束后自动运行"
+                   if queued else f"运行流程「{flow.name}」"))
             if task.mode == "once":
                 task.enabled = False
                 task.next_run = ""
