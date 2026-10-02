@@ -18,11 +18,91 @@ import ctypes
 import os
 import shutil
 import subprocess
+import threading
 import time
 from ctypes import wintypes
 
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
+
+
+def _bind_win32_types() -> None:
+    """给本模块用到的 Win32 函数补齐 argtypes / restype。
+
+    ⚠️ 不声明时 ctypes 一律按 `c_int`（**32 位**）传参与接收返回值，而 HWND /
+    HANDLE 在 64 位系统上是 64 位值 —— 句柄一旦超过 32 位就会被截断，
+    轻则 `int(x or 0)` 拿到垃圾指针，重则操作到别的窗口上。
+    `CreateToolhelp32Snapshot` 当初就是因为这个才单独补过（见本文件下方），
+    这里一次性把**全部**用到的都补齐，别再修一处漏其余（2026-10-02 review）。
+    """
+    p, i, b, u = ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint
+    ulong, bool_ = ctypes.c_ulong, ctypes.c_bool
+    non_null = ctypes.POINTER(ctypes.c_ulong)      # 可传 None 的 DWORD*
+
+    # ---- 返回句柄/窗口的（必须 c_void_p）----
+    for name in ("WindowFromPoint", "GetForegroundWindow", "FindWindowW",
+                 "GetAncestor", "GetDesktopWindow"):
+        fn = getattr(_user32, name, None)
+        if fn is not None:
+            fn.restype = p
+    for name in ("OpenProcess",):
+        fn = getattr(_kernel32, name, None)
+        if fn is not None:
+            fn.restype = p
+
+    # ---- 句柄入参 ----
+    for name in ("IsWindow", "SetForegroundWindow", "SetFocus", "ShowWindow",
+                 "BringWindowToTop", "SetWindowPos"):
+        fn = getattr(_user32, name, None)
+        if fn is not None and name in ("IsWindow", "SetForegroundWindow",
+                                       "SetFocus", "ShowWindow",
+                                       "BringWindowToTop"):
+            fn.argtypes = [p]
+    for name in ("CloseHandle",):
+        fn = getattr(_kernel32, name, None)
+        if fn is not None:
+            fn.argtypes = [p]
+            fn.restype = bool_
+
+    # ---- 线程 / 焦点切换 ----
+    _user32.AttachThreadInput.argtypes = [ulong, ulong, bool_]
+    _user32.AttachThreadInput.restype = bool_
+    _user32.GetWindowThreadProcessId.argtypes = [p, non_null]
+    _user32.GetWindowThreadProcessId.restype = ulong
+    _kernel32.GetCurrentThreadId.restype = ulong
+
+    # ---- 文本 / 标题 ----
+    _user32.GetWindowTextLengthW.argtypes = [p]
+    _user32.GetWindowTextLengthW.restype = i
+    _user32.GetWindowTextW.argtypes = [p, ctypes.c_wchar_p, i]
+    _user32.GetWindowTextW.restype = i
+    _user32.GetClassNameW.argtypes = [p, ctypes.c_wchar_p, i]
+    _user32.GetClassNameW.restype = i
+
+    # ---- 位置 / 样式 ----
+    _user32.GetWindowRect.argtypes = [p, ctypes.c_void_p]
+    _user32.GetWindowRect.restype = bool_
+    _user32.GetCursorPos.argtypes = [ctypes.c_void_p]
+    _user32.GetCursorPos.restype = bool_
+    _user32.SetCursorPos.argtypes = [i, i]
+    _user32.SetCursorPos.restype = bool_
+    _user32.ScreenToClient.argtypes = [p, ctypes.c_void_p]
+    _user32.ScreenToClient.restype = bool_
+    _user32.GetWindowLongW.argtypes = [p, i]
+    _user32.GetWindowLongW.restype = ctypes.c_long
+    _user32.SetWindowLongW.argtypes = [p, i, ctypes.c_long]
+    _user32.SetWindowLongW.restype = ctypes.c_long
+
+    # ---- 消息 / 键盘 ----
+    _user32.PostMessageW.argtypes = [p, u, ctypes.c_size_t, ctypes.c_ssize_t]
+    _user32.PostMessageW.restype = bool_
+    _user32.MapVirtualKeyW.argtypes = [u, u]
+    _user32.MapVirtualKeyW.restype = u
+    _user32.VkKeyScanW.argtypes = [ctypes.c_wchar]
+    _user32.VkKeyScanW.restype = ctypes.c_short
+
+
+_bind_win32_types()
 
 # ---- 窗口样式常量（窗口识别遮罩穿透自身用）----
 _GWL_EXSTYLE = -20
@@ -279,32 +359,51 @@ def background_press(hwnd: int, keys: str) -> bool:
 # 用 AttachThreadInput 把当前线程与目标窗口线程绑定，可以绕过 Windows 对
 # SetForegroundWindow 的「后台进程不得抢前台」限制，让激活几乎必定成功。
 
-_prev_foreground = 0
-_attached_tids: list[int] = []
+# 每个线程各自的「原前台窗口 + 本线程已绑定的线程输入队列」。
+# 原来这两个是**模块级全局**：并行的异步流程各自调 activate_window 时会互相覆盖
+# ——B 进来把 _prev_foreground 覆盖成它当时看到的前台（此时已是 A 的目标窗口），
+# 又把 _attached_tids 清空；A 之后 restore_foreground() 会按 B 记的值把前台设成
+# 「A 的目标窗口」而非真正的原始窗口，并且**只解绑 B 那份 tid，A 绑的永远解不开**
+# ——两个线程的输入队列被永久 Attach 在一起，A 的按键会被送进 B 的窗口
+# （2026-10-02 review）。thread-local 让每个流程线程只认自己那份，无需改调用点。
+_fg_state = threading.local()
+
+
+def _fg_store() -> dict:
+    """当前线程的前台窗口记录（首次调用时建）。"""
+    st = getattr(_fg_state, "st", None)
+    if st is None:
+        st = {"prev": 0, "tids": []}
+        _fg_state.st = st
+    return st
 
 
 def activate_window(hwnd: int) -> bool:
     """临时把目标窗口设为前台（AttachThreadInput 绕过抢焦点限制）。
 
-    记录原前台窗口，配合 restore_foreground() 使用。返回是否成功。
+    记录原前台窗口（本线程私有），配合 restore_foreground() 使用。返回是否成功。
     """
-    global _prev_foreground, _attached_tids
     if not hwnd or not window_exists(hwnd):
         return False
+    st = _fg_store()
     hw = wintypes.HWND(hwnd)
-    _prev_foreground = int(_user32.GetForegroundWindow() or 0)
+    st["prev"] = int(_user32.GetForegroundWindow() or 0)
     target_tid = int(_user32.GetWindowThreadProcessId(hw, None) or 0)
     cur_tid = int(_kernel32.GetCurrentThreadId())
-    _attached_tids = []
-    if target_tid and target_tid != cur_tid:
-        _user32.AttachThreadInput(cur_tid, target_tid, True)
-        _attached_tids.append(target_tid)
-    if _prev_foreground and _prev_foreground != hwnd:
+    tids: list[int] = []
+    st["tids"] = tids          # 本线程从头开始记（重入只覆盖自己，不影响别的线程）
+    # ⚠️ 只记录**附加成功**的 tid：失败的 AttachThreadInput 若也记下来，
+    # restore 时会多解一次（无害），但反过来漏记就会永久泄漏绑定。
+    if target_tid and target_tid != cur_tid and target_tid not in tids:
+        if _user32.AttachThreadInput(cur_tid, target_tid, True):
+            tids.append(target_tid)
+    if st["prev"] and st["prev"] != hwnd:
         fg_tid = int(_user32.GetWindowThreadProcessId(
-            wintypes.HWND(_prev_foreground), None) or 0)
-        if fg_tid and fg_tid != cur_tid and fg_tid != target_tid:
-            _user32.AttachThreadInput(cur_tid, fg_tid, True)
-            _attached_tids.append(fg_tid)
+            wintypes.HWND(st["prev"]), None) or 0)
+        if (fg_tid and fg_tid != cur_tid and fg_tid != target_tid
+                and fg_tid not in tids):
+            if _user32.AttachThreadInput(cur_tid, fg_tid, True):
+                tids.append(fg_tid)
     _user32.SetForegroundWindow(hw)
     _user32.SetFocus(hw)
     return True
@@ -418,21 +517,29 @@ def show_running_instance(pid: int, title: str = "") -> bool:
 
 
 def restore_foreground() -> None:
-    """恢复 activate_window() 之前的前台窗口，并断开线程绑定。"""
-    global _prev_foreground, _attached_tids
-    if _prev_foreground:
+    """恢复 activate_window() 之前的前台窗口，并断开**本线程**绑定的线程输入。
+
+    只认当前线程自己的记录（thread-local），所以并行的异步流程互不干扰；
+    重复调用是安全的（第二次没有记录就直接返回）。
+    """
+    st = getattr(_fg_state, "st", None)
+    if st is None:
+        return
+    prev = st.get("prev", 0)
+    tids = st.get("tids") or []
+    if prev:
         try:
-            _user32.SetForegroundWindow(wintypes.HWND(_prev_foreground))
+            _user32.SetForegroundWindow(wintypes.HWND(prev))
         except Exception:
             pass
     cur_tid = int(_kernel32.GetCurrentThreadId())
-    for tid in _attached_tids:
+    for tid in tids:
         try:
             _user32.AttachThreadInput(cur_tid, tid, False)
         except Exception:
             pass
-    _attached_tids = []
-    _prev_foreground = 0
+    st["prev"] = 0
+    st["tids"] = []
 
 
 # ---------- 启动应用 ----------
@@ -471,19 +578,31 @@ _version32.VerQueryValueW.argtypes = [
     ctypes.c_void_p, wintypes.LPCWSTR,
     ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_uint),
 ]
+_psapi.EnumProcesses.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                ctypes.POINTER(ctypes.c_uint)]
+_psapi.EnumProcesses.restype = ctypes.c_bool
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 
 def _enum_pids() -> list[int]:
-    """枚举所有进程 PID。"""
+    """枚举所有进程 PID。
+
+    `EnumProcesses` 在缓冲区不够时**不报错**，只把 `needed` 填成真实需求——按固定
+    槽位截断会让部分进程静默消失（多开 Chrome/IDE/虚拟机的机器上「打开应用/关闭应用」
+    列表会少东西，2026-10-02 review）。不够就按 needed 扩容再来一次。
+    """
     n = 2048
-    buf = (ctypes.c_uint * n)()
-    needed = ctypes.c_uint()
-    if not _psapi.EnumProcesses(buf, ctypes.sizeof(buf), ctypes.byref(needed)):
-        return []
-    count = min(needed.value // ctypes.sizeof(ctypes.c_uint), n)
-    return [int(buf[i]) for i in range(count)]
+    for _ in range(3):                       # 最多重试两轮，防御坏数据导致的死循环
+        buf = (ctypes.c_uint * n)()
+        needed = ctypes.c_uint()
+        if not _psapi.EnumProcesses(buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+            return []
+        count = needed.value // ctypes.sizeof(ctypes.c_uint)
+        if count <= n or n >= 65536:
+            return [int(buf[i]) for i in range(min(count, n))]
+        n = count + 64
+    return []
 
 
 def _process_path(pid: int) -> str:
@@ -528,7 +647,15 @@ def _file_description(path: str) -> str:
             desc_len = ctypes.c_uint()
             if _version32.VerQueryValueW(buf, key, ctypes.byref(desc_ptr),
                                          ctypes.byref(desc_len)):
-                desc = ctypes.wstring_at(desc_ptr.value)
+                # ⚠️ 必须按 VerQueryValue 返回的**长度**切片：`wstring_at` 是「一直扫到
+                # NUL 为止」，遇到损坏/构造异常的 exe（StringFileInfo 里没有合法终止）
+                # 会跑出已映射的版本资源块，越界读（2026-10-02 review）。
+                n = int(desc_len.value or 0)
+                if n > 0:
+                    desc = ctypes.string_at(
+                        desc_ptr, n * 2).decode("utf-16-le", "ignore").rstrip("\x00")
+                else:
+                    desc = ""
                 if desc.strip():
                     return desc.strip()
     except Exception:

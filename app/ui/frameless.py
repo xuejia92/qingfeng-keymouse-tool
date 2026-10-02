@@ -11,8 +11,9 @@ border 只包住内容区，标题栏一行"裸"着，视觉不统一。所以�
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel,
                                QPushButton, QVBoxLayout, QWidget)
 
 from . import theme
@@ -53,6 +54,7 @@ class FramelessDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground, True)   # 圆角外的四角透明
         self.setObjectName("framelessDialog")
         self._drag_offset = None
+        self._centered = False            # showEvent 里只居中一次（见下方注释）
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -74,8 +76,13 @@ class FramelessDialog(QDialog):
         self._title_label = QLabel("")
         self._title_label.setObjectName("dlgTitle")
         tb.addWidget(self._title_label, 1)
-        self._close_btn = QPushButton("✕")
+        # 关闭叉用 **QPainter 自绘图标**：字体方案两头堵——×（U+00D7）字形太小，
+        # ✕（U+2715）在雅黑下缺字形渲染成小点（2026-10-02 用户两次反馈）。
+        # 自绘则大小/粗细可控；Normal=次要文字色，Active(hover)=白色（配 danger 红底）。
+        self._close_btn = QPushButton()
         self._close_btn.setObjectName("dlgClose")
+        self._close_btn.setIcon(self._close_icon())
+        self._close_btn.setIconSize(QSize(16, 16))
         self._close_btn.setFixedSize(26, 22)
         self._close_btn.setCursor(Qt.PointingHandCursor)
         self._close_btn.setToolTip("关闭")
@@ -96,6 +103,75 @@ class FramelessDialog(QDialog):
     def setWindowTitle(self, title: str) -> None:
         super().setWindowTitle(title)
         self._title_label.setText(title)
+
+    @staticmethod
+    def _close_icon() -> QIcon:
+        """自绘关闭叉：两条圆头线，16px，2x 超采样抗锯齿。
+
+        Normal 态 = 正文色（明显可见）；Active(hover) 态 = 白色——QSS 里 hover
+        背景是 danger 红，白叉才看得清。颜色取构造时的当前主题（弹窗生命周期
+        短，不跟随中途换主题）。
+        """
+        t = theme.current().get
+        icon = QIcon()
+        for mode, color in ((QIcon.Mode.Normal, QColor(t("text"))),
+                            (QIcon.Mode.Active, QColor("white"))):
+            pm = QPixmap(32, 32)
+            pm.setDevicePixelRatio(2)        # 2x 超采样：高分屏线条不糊
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            try:
+                p.setRenderHint(QPainter.Antialiasing, True)
+                pen = QPen(color, 2.2)
+                pen.setCapStyle(Qt.RoundCap)
+                p.setPen(pen)
+                p.drawLine(2, 2, 14, 14)     # 16px 内的叉，两端留 2px 圆头
+                p.drawLine(14, 2, 2, 14)
+            finally:
+                p.end()
+            icon.addPixmap(pm, mode)
+        return icon
+
+    # ---------- 居中显示 ----------
+    def showEvent(self, event) -> None:     # noqa: N802（Qt 命名）
+        super().showEvent(event)
+        # QDialog 首次显示会被定位到「父窗口中心」（Qt 内建行为）——父窗口被拖到
+        # 屏幕外时弹窗也会跟着跑出去（Windows 报 Unable to set geometry ...-213，
+        # 2026-10-02 用户反馈定时关机编辑弹窗在界面外）。且 showEvent 里直接 move
+        # 会被随后的初始定位覆盖，所以**延迟一拍**（等 Qt 完成首次布局/定位）再居中，
+        # 并用 _centered 标志只做一次（exec 期间用户拖动弹窗不被拽回）。
+        if not self._centered:
+            self._centered = True
+            QTimer.singleShot(0, self._center_into_screen)
+
+    def _center_into_screen(self) -> None:
+        """居中于主窗口所在屏幕的可用区域中心，并限位在屏内。
+
+        注意是「所在屏」而不是「父窗口矩形」：无边框主窗口能被拖出屏幕，
+        跟着父窗口矩形居中会把弹窗也顶出屏幕。
+        """
+        parent = self.parentWidget()
+        parent_win = parent.window() if parent is not None else None
+        screen = None
+        if parent_win is not None and parent_win is not self:
+            screen = parent_win.screen()
+        if screen is None:
+            screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        geo = self.frameGeometry()
+        if geo.width() > avail.width():
+            geo.setWidth(avail.width())
+        if geo.height() > avail.height():
+            geo.setHeight(avail.height())
+        geo.moveCenter(avail.center())
+        # 居中天然在屏内；防取整误差再夹一次
+        geo.moveLeft(max(avail.left(),
+                         min(geo.left(), avail.right() - geo.width() + 1)))
+        geo.moveTop(max(avail.top(),
+                        min(geo.top(), avail.bottom() - geo.height() + 1)))
+        self.move(geo.topLeft())
 
     # ---------- 拖动（只响应标题栏区域，点内容不拖） ----------
     def mousePressEvent(self, e):

@@ -1,0 +1,44 @@
+{
+  "id": "afa4bcfa7cbe",
+  "name": "定时关机",
+  "group": "",
+  "steps": [
+    {
+      "type": "shutdown",
+      "name": "定时关机",
+      "params": {
+        "trigger_mode": "countdown",
+        "at_time": "19:43",
+        "at_time_if_passed": "next_day",
+        "count_hours": 0,
+        "count_minutes": 0,
+        "count_seconds": 5,
+        "cond_mode": "text",
+        "image": "",
+        "image_path": "",
+        "confidence": 0.85,
+        "text": "0",
+        "tolerance": 0.8,
+        "region": "754,1208,63,37",
+        "interval_sec": 1.0,
+        "cond_timeout_sec": 0.0,
+        "hold_sec": 0.0,
+        "power_action": "shutdown",
+        "warn_sec": 5,
+        "warn_overlay": true,
+        "warn_overlay_font_size": 40,
+        "force_close_apps": true,
+        "dry_run": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 21,
+  "async_run": false,
+  "order": 18
+}

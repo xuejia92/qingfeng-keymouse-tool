@@ -106,8 +106,10 @@ class _FakeSMTP:
     def ehlo(self):
         pass
 
-    def starttls(self):
-        pass
+    def starttls(self, context=None):
+        # mail_actor 现在显式传 ssl.create_default_context()（否则等于不验证证书，
+        # 2026-10-02 review），替身要能接住这个参数。
+        self.tls_context = context
 
 
 class _AuthFailSMTP(_FakeSMTP):

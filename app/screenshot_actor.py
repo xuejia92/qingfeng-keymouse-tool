@@ -30,43 +30,60 @@ JIETU_DIR = os.path.join(TEMPLATE_DIR, "jietu")
 # 后台线程 -> 主线程桥接
 # ---------------------------------------------------------------------------
 
+class _UiCall:
+    """一次 `ui_call` 的请求上下文：**自带独立的等待事件与结果槽**。
+
+    并行的异步流程会同时用到这个桥接（截图 / 取色 / 通知 / 关机倒计时 / 找图红框…），
+    所以 Event 与结果**绝不能是桥接上的单槽**：共用会让 B 在 A 醒来之后 `clear()`
+    掉事件（把 A 永久掐醒不了、双方一起耗满 300s 超时），两条请求还会读到同一个
+    `_result`——A 拿到的是 B 的截图区域（2026-10-02 review）。
+    """
+
+    __slots__ = ("fn", "event", "result")
+
+    def __init__(self, fn):
+        self.fn = fn
+        self.event = threading.Event()
+        self.result = None
+
+    def done(self, result) -> None:
+        self.result = result
+        self.event.set()
+
+
 class _UiBridge(QObject):
     """把函数调度到主线程执行并阻塞等待结果（供后台线程调用）。
 
     桥接对象创建后 moveToThread 到主线程；后台线程 emit _request 时按
     auto 连接规则自动走 QueuedConnection -> 主线程事件循环执行 fn，
-    fn 的结果经 _reply 信号（同线程 direct）回填并唤醒等待方。
+    fn 的结果经 _reply 信号回填**到那次调用自己的** `_UiCall` 并唤醒它。
     创建时可能从后台线程首次调用，因此创建后立即 moveToThread 校正归属。
     """
 
-    _request = Signal(object)   # fn
-    _reply = Signal(object)     # 结果
+    _request = Signal(object)       # _UiCall
+    _reply = Signal(object, object)  # (_UiCall, 结果)
 
     def __init__(self):
         super().__init__()
-        self._event = threading.Event()
-        self._result = None
         self._request.connect(self._run, Qt.QueuedConnection)
         self._reply.connect(self._receive, Qt.QueuedConnection)
 
     def call(self, fn) -> object:
-        self._result = None
-        self._event.clear()
-        self._request.emit(fn)
-        if not self._event.wait(timeout=300):   # 超时兜底：交互挂起时不永久卡死步骤
+        call = _UiCall(fn)
+        self._request.emit(call)
+        if not call.event.wait(timeout=300):   # 超时兜底：交互挂起时不永久卡死步骤
             return None
-        return self._result
+        return call.result
 
-    def _run(self, fn):
+    def _run(self, call: _UiCall):
         try:
-            result = fn()
+            result = call.fn()
         except Exception as e:      # 把异常带回调用线程，避免主线程静默吞掉
             result = ("__ui_error__", type(e).__name__, str(e))
-        self._reply.emit(result)
+        self._reply.emit(call, result)
 
-    def _receive(self, result):
-        self._result = result
-        self._event.set()
+    def _receive(self, call: _UiCall, result):
+        call.done(result)
 
 
 _bridge: _UiBridge | None = None

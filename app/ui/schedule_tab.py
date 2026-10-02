@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, Signal
@@ -41,6 +42,7 @@ class ScheduleTab(QWidget):
         self.cfg = cfg
         self.flow_tab = flow_tab
         self._tasks = cfg.schedule_tasks
+        self._last_persist = 0.0      # last_run/next_run 的上次落盘时刻（限流用）
         self.runner = ScheduleRunner(lambda: self._tasks)
         self.runner.due.connect(self._on_due)
         self._build_ui()
@@ -685,8 +687,23 @@ class ScheduleTab(QWidget):
                     task, f"定时任务「{task.name}」触发时流程「{flow.name}」"
                           "正在运行，已跳过本次")
         self.runner.invalidate(task.id)
-        self.cfg.save(save_flows=False)
+        self._persist_times_throttled()
         self.refresh_list()
+
+    def _persist_times_throttled(self, min_interval: float = 60.0) -> None:
+        """把 last_run / next_run 落盘，但**限流**。
+
+        原来每次触发都 `cfg.save(save_flows=False)`，那是把整个内存快照写回
+        config.json。秒级任务（每隔 1~5 秒）等于每秒重写一次，用户手工编辑的
+        任何配置（排除名单、邮箱授权码…）1 秒内就被覆盖回去（2026-10-02 review）。
+        这两个字段只用于界面显示与排期参考（调度读的是内存里的 task 对象），
+        所以限流落盘不影响功能；任务**新增/删除/启停**等真变更仍走立即保存。
+        """
+        now = time.monotonic()
+        if now - self._last_persist < min_interval:
+            return
+        self._last_persist = now
+        self.cfg.save(save_flows=False)
 
     # ---------- 外部联动 ----------
     def on_flows_changed(self):

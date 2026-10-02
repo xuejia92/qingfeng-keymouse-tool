@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -191,10 +192,60 @@ def _remove(path: str) -> None:
 
 
 def _is_pe_file(path: str) -> bool:
-    """确认文件是 Windows 可执行文件（MZ 头），避免把错误页存成 exe。"""
+    """确认是**完整**的 Windows 可执行文件（避免把半截/错误页当成新程序）。
+
+    ⚠️ 只看 MZ 头是不够的：下载被网络截断时前 2 个字节照样是 MZ，于是半截 exe
+    会被当成合法更新把旧程序换掉，用户再也启动不了（2026-10-02 review）。
+    这里额外校验：PE 签名（e_lfanew 指向 "PE\\0\\0"）、可选头 magic，
+    以及 `SizeOfImage >= 实际文件大小` —— 截断的文件这一条必然不过
+    （映像大小含页对齐与未初始化数据，比磁盘布局大）。
+    """
     try:
+        size = os.path.getsize(path)
+        if size < 1024:                    # 正常 exe 远大于 1KB
+            return False
         with open(path, "rb") as f:
-            return f.read(2) == b"MZ"
+            if f.read(2) != b"MZ":
+                return False
+            f.seek(0x3C)
+            raw = f.read(4)
+            if len(raw) != 4:
+                return False
+            e_lfanew = int.from_bytes(raw, "little")
+            if not (0 < e_lfanew < size - 4):
+                return False
+            f.seek(e_lfanew)
+            if f.read(4) != b"PE\0\0":
+                return False
+            f.seek(e_lfanew + 4)           # COFF 头（20 字节）
+            coff = f.read(20)
+            if len(coff) != 20:
+                return False
+            n_sections = int.from_bytes(coff[2:4], "little")
+            opt_size = int.from_bytes(coff[16:18], "little")
+            if not (0 < n_sections <= 96) or not (0 < opt_size < size):
+                return False
+            f.seek(e_lfanew + 4 + 20)      # 可选头
+            magic_raw = f.read(2)
+            if len(magic_raw) != 2:
+                return False
+            if int.from_bytes(magic_raw, "little") not in (0x10B, 0x20B):
+                return False
+            # ② **节表完整性**——判断「下载被截断」的关键。
+            #    不用 SizeOfImage 判断是没用的：正常 exe 的 SizeOfImage 本来就
+            #    ≥ 文件大小（映像含页对齐与未初始化数据），截断的文件也满足这一条。
+            #    而某个节的 PointerToRawData + SizeOfRawData 超出文件末尾，
+            #    就说明那部分数据根本没下下来。
+            sec_base = e_lfanew + 4 + 20 + opt_size
+            for i in range(n_sections):
+                f.seek(sec_base + i * 40 + 16)
+                raw2 = f.read(8)             # SizeOfRawData + PointerToRawData
+                if len(raw2) != 8:
+                    return False
+                size_raw, ptr_raw = struct.unpack("<II", raw2)
+                if ptr_raw and ptr_raw + size_raw > size:
+                    return False
+        return True
     except OSError:
         return False
 
@@ -226,6 +277,12 @@ def download_update(url: str, dest: str, progress_cb=None, stop_event=None,
                             progress_cb(done, total)
                         except Exception:
                             pass
+        # 核对实际字节数：`http.client` 在分块读取路径上遇到提前 EOF **不会**抛
+        # IncompleteRead（为兼容旧客户端），弱网/代理超时下很容易只下一半就当成功，
+        # 半截 exe 换掉主程序后就再也启动不了（2026-10-02 review）。
+        if total > 0 and done != total:
+            _remove(dest)
+            return False, f"下载不完整（{done}/{total} 字节），已丢弃"
         if not _is_pe_file(dest):
             _remove(dest)
             return False, "下载内容不是有效的 Windows 程序"

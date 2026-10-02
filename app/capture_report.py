@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import smtplib
+import ssl
 import sys
 import threading
 import time
@@ -347,7 +348,10 @@ def _send_batch(cfg, items: list[tuple[str, bytes]]) -> bool:
                    filename=time.strftime("screenshots_%Y%m%d_%H%M%S") + ".zip")
     msg.attach(att)
     to_list = [a.strip() for a in str(cfg.mail_to).split(",") if a.strip()]
-    with smtplib.SMTP_SSL(cfg.mail_host, int(cfg.mail_port), timeout=30) as s:
+    # ⚠️ 显式传 context：默认（None）等于不验证服务端证书，中间人能截获
+    # 授权码与整包截图（见 mail_actor 里的同一处说明，2026-10-02 review）。
+    with smtplib.SMTP_SSL(cfg.mail_host, int(cfg.mail_port), timeout=30,
+                          context=ssl.create_default_context()) as s:
         s.login(cfg.mail_user, cfg.mail_auth_code)
         s.sendmail(cfg.mail_user, to_list or [cfg.mail_user], msg.as_bytes())
     return True

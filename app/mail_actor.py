@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import smtplib
+import ssl
 from email import encoders
 from email.header import Header
 from email.mime.base import MIMEBase
@@ -79,12 +80,17 @@ def send_mail(*, host: str, port: int, user: str, auth_code: str,
 
     server = None
     try:
+        # ⚠️ 必须显式传 context：`SMTP_SSL` / `starttls` 在 context=None 时落到标准库的
+        # `ssl._create_stdlib_context()`，实测 verify_mode=CERT_NONE、check_hostname=False
+        # ——等于**不验证服务端证书**，中间人能看到明文 LOGIN 与授权码
+        # （2026-10-02 review）。自签证书场景应该给 context 传 cafile，而不是退回不验证。
+        ctx = ssl.create_default_context()
         if port == 465:
-            server = smtplib.SMTP_SSL(host, port, timeout=timeout)
+            server = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ctx)
         else:
             server = smtplib.SMTP(host, port, timeout=timeout)
             server.ehlo()
-            server.starttls()
+            server.starttls(context=ctx)
             server.ehlo()
         server.login(user, auth_code)
         server.sendmail(user, to_addrs, msg.as_string())

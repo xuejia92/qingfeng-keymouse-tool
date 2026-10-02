@@ -33,23 +33,24 @@
   "flow_groups": [
     "流放之路2",
     "测试使用",
-    "中键菜单"
+    "中键菜单",
+    "地狱三种"
   ],
   "flow_group_seqs": {
     "测试使用": 1,
     "中键菜单": 2,
-    "流放之路2": 3
+    "流放之路2": 3,
+    "地狱三种": 4
   },
   "collapsed_flow_groups": [
     "111",
     "中键菜单",
-    "流放之路2",
+    "地狱三种",
     "测试使用"
   ],
   "clear_log_on_run": true,
   "log_print_only": true,
   "collapsed_module_groups": [
-    "app_web",
     "condition",
     "drission",
     "input",
@@ -127,6 +128,6 @@
   "run_overlay_log_max_height": 185,
   "run_overlay_log_auto_hide_sec": 60,
   "run_overlay_log_custom_pos": "7,882",
-  "ui_theme": "sakura",
+  "ui_theme": "warm_paper",
   "ui_font_scale": 100
 }

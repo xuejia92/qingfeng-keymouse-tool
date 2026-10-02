@@ -167,7 +167,7 @@ class TestRunSpeechStep(unittest.TestCase):
         with mock.patch("app.speech_actor.speak", return_value=(True, "语音播报完成")) as sp:
             ok, why = run_speech_step({"content": "你好", "wait": True}, {"name": "张三"})
         self.assertTrue(ok)
-        sp.assert_called_once_with("你好")
+        sp.assert_called_once_with("你好", stop=mock.ANY)
 
     def test_resolves_variable(self):
         from app.tasks import run_speech_step
@@ -175,7 +175,7 @@ class TestRunSpeechStep(unittest.TestCase):
             ok, _ = run_speech_step({"content": "$name 你好", "wait": True},
                                     {"name": "张三"})
         self.assertTrue(ok)
-        sp.assert_called_once_with("张三 你好")
+        sp.assert_called_once_with("张三 你好", stop=mock.ANY)
 
     def test_wait_false_calls_speak_async(self):
         from app.tasks import run_speech_step
@@ -210,7 +210,7 @@ class TestRunSpeechStep(unittest.TestCase):
         with mock.patch("app.speech_actor.speak", return_value=(True, "语音播报完成")) as sp:
             ok, _ = run_speech_step({"content": "结果是 $unknown", "wait": True}, {})
         self.assertTrue(ok)
-        sp.assert_called_once_with("结果是 $unknown")
+        sp.assert_called_once_with("结果是 $unknown", stop=mock.ANY)
 
     def test_stopped(self):
         import threading

@@ -103,12 +103,36 @@ def _decode_body(data: bytes, content_type: str) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _save_image(data: bytes, content_type: str) -> str:
-    """把响应体字节保存为图片文件，返回绝对路径。"""
+def _image_ext(data: bytes) -> str | None:
+    """按**文件头**判断图片类型；不是图片返回 None。
+
+    原来只按 Content-Type 猜扩展名，目标返回 404/登录页（text/html）时会存成
+    .png，下游拿它去找图必然「找不到」，还很难看出是下载错了（2026-10-02 review）。
+    """
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:2] == b"BM":
+        return ".bmp"
+    return None
+
+
+def _save_image(data: bytes, content_type: str) -> str | None:
+    """把响应体保存为图片文件，返回绝对路径；**不是图片返回 None**。"""
+    ext = _image_ext(data)
+    if ext is None:
+        return None
     os.makedirs(HTTP_IMAGE_DIR, exist_ok=True)
     ct = (content_type or "").split(";", 1)[0].strip().lower()
-    ext = _IMAGE_EXTS.get(ct, ".png")
-    name = f"http_{time.strftime('%Y%m%d_%H%M%S')}{ext}"
+    ext = _IMAGE_EXTS.get(ct, ext)      # Content-Type 说 png 但实际是 jpg 时听内容的
+    # 文件名原来只到**秒**，同一秒发两次请求会互相覆盖（后一份顶掉前一份）。
+    # 补一个微秒后缀。
+    name = f"http_{time.strftime('%Y%m%d_%H%M%S')}_{int(time.time() * 1e6) % 1000000:06d}{ext}"
     path = os.path.join(HTTP_IMAGE_DIR, name)
     with open(path, "wb") as f:
         f.write(data)
@@ -192,6 +216,12 @@ def perform_request(*, url: str, method: str = "get", headers: dict | None = Non
 
     if result_type == "image":
         content = _save_image(raw, content_type)
+        if content is None:
+            # 目标返回的不是图片（404 页面 / 登录页 / 网关错误…）：明确报错，
+            # 别把 HTML 存成 .png 让下游「找不到图」（2026-10-02 review）
+            preview = _decode_body(raw, content_type)[:120].replace("\n", " ")
+            raise HttpError(f"响应不是图片（Content-Type: {content_type or '未知'}）"
+                            f"，前 120 字符：{preview}")
     else:
         content = _decode_body(raw, content_type)
 

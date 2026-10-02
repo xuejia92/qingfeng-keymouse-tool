@@ -30,6 +30,7 @@ QPixmap 和 QWidget 都不能跨线程碰。流程在后台线程里跑，所以
 from __future__ import annotations
 
 import os
+import weakref
 
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QCursor, QPixmap
@@ -97,7 +98,8 @@ class FloatingImage(QWidget):
         # 让鼠标事件穿透到窗口本身，拖动/单击关闭/滚轮缩放才不会被图片吃掉
         self.image_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        self.close_btn = QPushButton("✕", self)
+        # ×（U+00D7）而不是 ✕：后者在雅黑下缺字形渲染成小点（见 frameless.py 注释）
+        self.close_btn = QPushButton("×", self)
         self.close_btn.setFixedSize(_CLOSE_SIZE, _CLOSE_SIZE)
         self.close_btn.setCursor(Qt.PointingHandCursor)
         self.close_btn.setToolTip("关闭悬浮图片")
@@ -417,7 +419,13 @@ def show_image(path: str, *, pos: str = _DEFAULT_POS, x=None, y=None,
     close_image(path)
     win = FloatingImage(pixmap, scale_pct=_initial_pct(pixmap, scale),
                         click_to_close=click_to_close)
-    win.destroyed.connect(lambda *_a, p=path, w=win: _forget(p, w))
+    # ⚠️ lambda 里必须用 **weakref**：直接闭包捕获 win 会和 win 自己的信号连接
+    # 构成引用环（win → connections → lambda → win），Python 侧包装对象要等分代
+    # GC 才释放，大图时是一段可观的无谓占用（2026-10-02 review）。
+    # `_live` 持的是强引用，所以 destroyed 触发时 weakref 仍能取到 win（可用于
+    # `_forget` 的身份比对）；取不到也不误删——`is` 比对天然不成立。
+    win_ref = weakref.ref(win)
+    win.destroyed.connect(lambda *_a, p=path, r=win_ref: _forget(p, r()))
     _live[path] = win
     win.move(*_pos_for(win, str(pos or _DEFAULT_POS), x, y))
     win.show()

@@ -86,8 +86,8 @@ class _Notification(QWidget):
         self._label.setStyleSheet(
             "color: #1f2d3d; font-size: 10pt; border: none; background: transparent;")
 
-        # 手动关闭按钮
-        self._close = QPushButton("✕")
+        # 手动关闭按钮（× 而非 ✕：雅黑下 ✕ 缺字形渲染成小点，见 frameless.py）
+        self._close = QPushButton("×")
         self._close.setFixedSize(20, 20)
         self._close.setCursor(Qt.PointingHandCursor)
         self._close.setToolTip("关闭")

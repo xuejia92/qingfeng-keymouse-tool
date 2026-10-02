@@ -698,6 +698,21 @@ class ColorPickerOverlay(QWidget):
             self._mss = mss.mss()
         return self._mss
 
+    def closeEvent(self, ev) -> None:       # noqa: N802（Qt 命名）
+        """关闭时**必须**释放 mss：它持有桌面 DC / GDI 句柄，而 mss>=6 没有
+        __del__ 兜底，只创建不关就是一次泄漏（2026-10-02 review）。
+
+        放在 closeEvent 而不是某个 close_all 里，是为了让「用户手动关闭 / 取色完成 /
+        父窗口被销毁」等所有关闭路径都覆盖到。
+        """
+        if self._mss is not None:
+            try:
+                self._mss.close()
+            except Exception:
+                pass
+            self._mss = None
+        super().closeEvent(ev)
+
     def _grab_around(self, px: int, py: int):
         """抓取光标周围 grid x grid 物理像素；越出本屏的部分补黑。
 

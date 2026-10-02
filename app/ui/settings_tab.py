@@ -2,10 +2,16 @@
 
 整页包在 `QScrollArea` 里（2026-10-01）：设置项多、分组框自然高度合计接近 800px，
 不滚动的话窗口一矮 Qt 就把分组框压扁，行距/内边距全被吃掉（用户反馈「太紧凑」）。
+
+左侧另有一条**分区导航**（2026-10-02）：定宽竖排按钮，点一下平滑滚到对应分组，
+滚动时反查高亮当前分区（scroll-spy）。导航栏**在滚动区之外**，所以内容滑动时它不动。
+新增分区时只需把 `root.addWidget(box)` 换成 `self._add_section("短名", box)`，
+导航项与跳转就自动接上了（短名与分组框自己的长标题互不影响）。
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, QSize, QUrl, Qt, Signal
+from PySide6.QtCore import (QEasingCurve, QPoint, QPropertyAnimation, QRectF,
+                            QSize, QUrl, Qt, Signal)
 from PySide6.QtGui import (QDesktopServices, QColor, QFontDatabase, QIcon,
                            QPainter, QPainterPath, QPixmap)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
@@ -50,6 +56,15 @@ _OVERLAY_COLOR_BTN_W = 112                # 色块按钮（显示 hex，宽度�
 # 页面里那几个自带内联样式的按钮（set_variant / 色块按钮）拿不到页面规则，
 # 必须显式传同一档字号，否则整页就它们大一号。
 _SETTINGS_FONT_PT = 9
+
+# 左侧设置导航（2026-10-02 用户要求「在左侧加一个设置的导航，可以快速滑动到对应的设置区域」）。
+# 导航项文字用**短名**：分组标题太长（「运行状态浮层（有流程运行时显示在屏幕上）」），
+# 直接当导航文字会把 132px 宽的导航栏撑爆。
+_NAV_W = 132               # 导航栏宽度
+_NAV_ITEM_H = 30           # 单个导航项高度（与左栏流程树条目同一档）
+_NAV_TOP_PAD = 8           # 滚动落点：分区顶部再往上留一点，别贴着视口上缘
+_NAV_SPY_PAD = 12          # scroll-spy 判定线：分区顶部越过「视口上缘 + 12px」即算当前区
+_NAV_ANIM_MS = 260         # 平滑滚动时长
 
 
 def _theme_swatch(key: str) -> QIcon:
@@ -124,8 +139,35 @@ class SettingsTab(QWidget):
             "QWidget#settingsTab QLineEdit"
             f" {{ font-size: {_SETTINGS_FONT_PT}pt; }}")
 
+        # 左侧导航状态（分区项在 _add_section 里逐条登记）
+        self._nav_entries: list[tuple[str, QWidget, QPushButton]] = []
+        self._nav_active = -1
+        self._nav_locked = False        # 程序化滚动期间挂起 scroll-spy，落点项保持高亮
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        outer.addLayout(body)
+
+        # 左导航：定宽竖排按钮，点击平滑滚动到对应分区（见 _scroll_to_section）
+        nav = QFrame()
+        nav.setObjectName("settingsNav")
+        nav.setFixedWidth(_NAV_W)
+        nav_lay = QVBoxLayout(nav)
+        nav_lay.setContentsMargins(8, 12, 8, 12)
+        nav_lay.setSpacing(2)
+        nav_title = QLabel("设置")
+        nav_lay.addWidget(nav_title)
+        nav_lay.addSpacing(6)
+        nav_lay.addStretch(1)           # 导航项 insertWidget(count-1) 插在这个 stretch 之前
+        nav.setStyleSheet(self._nav_qss())
+        self._nav_layout = nav_lay
+        self._nav_frame = nav
+        body.addWidget(nav, 0)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)          # 不要系统凹边框，与其它页观感一致
@@ -136,14 +178,25 @@ class SettingsTab(QWidget):
         # 只对这种视口套一条最窄的规则（不写后代选择器，避免跨控件树级联）。
         scroll.viewport().setAutoFillBackground(False)
         scroll.viewport().setStyleSheet("background: transparent;")
-        outer.addWidget(scroll)
+        body.addWidget(scroll, 1)
+        self._scroll = scroll
+
+        # 平滑滚动动画：直接对滚动条的 value 做补间（QScrollArea 没有内建动画）
+        sb = scroll.verticalScrollBar()
+        self._nav_anim = QPropertyAnimation(sb, b"value", self)
+        self._nav_anim.setDuration(_NAV_ANIM_MS)
+        self._nav_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._nav_anim.finished.connect(self._on_nav_anim_done)
+        sb.valueChanged.connect(self._on_nav_scroll)
 
         content = QWidget()
         content.setAutoFillBackground(False)
         scroll.setWidget(content)
+        self._content = content
         root = QVBoxLayout(content)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(10)                           # 分组框之间留出呼吸感（整页紧凑，2026-10-01）
+        self._root = root
 
         hotkey_box = QGroupBox("全局热键")
         form = _polish_form(QFormLayout(hotkey_box))
@@ -160,7 +213,7 @@ class SettingsTab(QWidget):
         warn.setStyleSheet("color: #c0392b;")
         warn.setWordWrap(True)
         form.addRow("", warn)
-        root.addWidget(hotkey_box)
+        self._add_section("全局热键", hotkey_box)
 
         # 界面主题：统一样式库（令牌化配色），切换后立即生效并自动记住
         look_box = QGroupBox("界面外观")
@@ -201,7 +254,7 @@ class SettingsTab(QWidget):
         look_hint.setStyleSheet("color: #888;")
         look_hint.setWordWrap(True)
         lform.addRow("", look_hint)
-        root.addWidget(look_box)
+        self._add_section("界面外观", look_box)
 
         # 运行状态浮层：左上角（位置可调）显示正在运行的分组和流程
         ro_box = QGroupBox("运行状态浮层（有流程运行时显示在屏幕上）")
@@ -427,7 +480,7 @@ class SettingsTab(QWidget):
         self._sync_overlay_bg()
         self._sync_overlay_log_enabled()
         self._sync_overlay_log_bg()
-        root.addWidget(ro_box)
+        self._add_section("运行状态浮层", ro_box)
 
         # 截屏上报：把「本机设备号」摆出来 + 一键加入/移出排除名单
         # （以前只能靠日志或翻代码猜，抄错一个字符就等于没排除——2026-09-17）
@@ -460,7 +513,7 @@ class SettingsTab(QWidget):
             cap_hint.setWordWrap(True)
             cform.addRow("", cap_hint)
             self._refresh_capture_state()
-            root.addWidget(cap_box)
+            self._add_section("截屏上报", cap_box)
 
         path_box = QGroupBox("文件位置（程序当前目录；目录不存在会自动创建）")
         pform = _polish_form(QFormLayout(path_box))
@@ -491,15 +544,128 @@ class SettingsTab(QWidget):
         log_row.addWidget(log_label, 1)
         log_row.addWidget(open_log)
         pform.addRow("运行日志", log_row)
-        root.addWidget(path_box)
+        self._add_section("文件位置", path_box)
 
         version = (getattr(self.cfg, "version", "") or "1.0.0").strip()
         about = QLabel(f"{APP_NAME}  v{version}\n"
                        "鼠标连点 / 键盘连按 / 屏幕找图点击 / 自动化流程\n"
                        "配置修改后自动保存到 config.json；托盘图标右键可快捷启停与退出。")
         about.setStyleSheet("color: #888;")
-        root.addWidget(about)
+        self._add_section("关于", about)
         root.addStretch(1)
+        self._set_nav_active(0)         # 初始高亮第一个分区
+
+    # ---------- 左侧导航：分区跳转 + 滚动跟随高亮（2026-10-02）----------
+    def _nav_qss(self) -> str:
+        """导航栏底板与标题样式。
+
+        颜色全部取自当前主题令牌，且写入的是**控件级内联样式**：theme 的 hook 会把它
+        登记下来，换主题时按令牌重映射（写进去的正是本主题的令牌色值，能反查回令牌），
+        所以不必自己监听主题切换。
+        """
+        tk = theme.token
+        pt = theme.scaled_pt(_SETTINGS_FONT_PT)
+        return (f"QFrame{{background:{tk('card_bg')};"
+                f"border-right:1px solid {tk('border_light')};}}"
+                f"QLabel{{color:{tk('text_muted')};font-weight:700;"
+                f"font-size:{pt:g}pt;}}")
+
+    def _nav_item_qss(self, active: bool) -> str:
+        """导航项样式：选中 = 主题色浅底 + 左侧竖条；未选中 = 透明底 + 次要文字色。
+
+        两条都用 `border-left:3px solid ...`（未选中时是 transparent），
+        这样切换选中态时文字不会左右跳动。
+        """
+        tk = theme.token
+        pt = theme.scaled_pt(_SETTINGS_FONT_PT)
+        if active:
+            bar, bg, fg, weight = tk("primary"), tk("primary_soft"), tk("primary"), 700
+            hover_bg, hover_fg = tk("primary_soft"), tk("primary")
+        else:
+            bar, bg, fg, weight = "transparent", "transparent", tk("text_dim"), 400
+            hover_bg, hover_fg = tk("hover_bg"), tk("text")
+        return (f"QPushButton{{background:{bg};color:{fg};border:none;"
+                f"border-left:3px solid {bar};padding:6px 8px;text-align:left;"
+                f"font-size:{pt:g}pt;font-weight:{weight};}}"
+                f"QPushButton:hover{{background:{hover_bg};color:{hover_fg};}}")
+
+    def _add_section(self, title: str, widget: QWidget) -> None:
+        """把一个分区加进滚动内容，同时在左侧导航登记一个跳转项。
+
+        `title` 是导航上的**短名**，与分组框自己的标题（可能很长）无关。
+        """
+        self._root.addWidget(widget)
+        btn = QPushButton(title)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedHeight(_NAV_ITEM_H)
+        btn.setFocusPolicy(Qt.NoFocus)      # 不让导航项抢焦点、不留虚线框
+        btn.setStyleSheet(self._nav_item_qss(False))
+        btn.clicked.connect(lambda _=False, w=widget: self._scroll_to_section(w))
+        self._nav_layout.insertWidget(self._nav_layout.count() - 1, btn)
+        self._nav_entries.append((title, widget, btn))
+
+    def _nav_index_of(self, widget: QWidget) -> int:
+        for i, (_title, w, _btn) in enumerate(self._nav_entries):
+            if w is widget:
+                return i
+        return -1
+
+    def _set_nav_active(self, idx: int) -> None:
+        if idx < 0 or idx == self._nav_active:
+            return
+        self._nav_active = idx
+        for i, (_title, _w, btn) in enumerate(self._nav_entries):
+            btn.setStyleSheet(self._nav_item_qss(i == idx))
+
+    def _scroll_to_section(self, widget: QWidget) -> None:
+        """平滑滚动到目标分区。
+
+        动画期间挂起 scroll-spy（`_nav_locked`），否则滚动途中会把高亮临时切到
+        路径上经过的分区；动画结束后也**不**重新反查，落点项就保持用户点的那一项
+        （分区在页面末尾时会因触底而滚不到顶，反查反而会指到别的分区）。
+        """
+        idx = self._nav_index_of(widget)
+        if idx >= 0:
+            self._set_nav_active(idx)
+        sb = self._scroll.verticalScrollBar()
+        y = widget.mapTo(self._content, QPoint(0, 0)).y()
+        target = max(0, min(y - _NAV_TOP_PAD, sb.maximum()))
+        self._nav_anim.stop()
+        if sb.value() == target:            # 已经在位（或内容不需要滚动）
+            self._nav_locked = False
+            return
+        self._nav_locked = True
+        self._nav_anim.setStartValue(sb.value())
+        self._nav_anim.setEndValue(target)
+        self._nav_anim.start()
+
+    def _on_nav_scroll(self, value: int) -> None:
+        """滚动条变化 → 反查当前所在分区并高亮（用户手动滚动时接管）。"""
+        if self._nav_locked or not self._nav_entries:
+            return
+        idx = 0
+        for i, (_title, w, _btn) in enumerate(self._nav_entries):
+            if w.mapTo(self._content, QPoint(0, 0)).y() <= value + _NAV_SPY_PAD:
+                idx = i
+            else:
+                break                        # 分区按 y 递增排列，后面只会更靠下
+        # 触底时末尾的矮分区（「关于」）够不到判定线，这里兜底选最后一项。
+        # 只在**手动滚动**这条路径上做：点击跳转走的是动画，动画结束不反查，
+        # 所以点「文件位置」后因触底滚到同样的位置也不会被抢走高亮。
+        sb = self._scroll.verticalScrollBar()
+        if sb.maximum() > 0 and value >= sb.maximum():
+            idx = len(self._nav_entries) - 1
+        self._set_nav_active(idx)
+
+    def _on_nav_anim_done(self) -> None:
+        self._nav_locked = False
+
+    def resizeEvent(self, event):           # noqa: N802（Qt 命名）
+        super().resizeEvent(event)
+        # _build_ui 期间（_scroll 还没建）也可能被调用，所以要守护
+        scroll = getattr(self, "_scroll", None)
+        if scroll is not None:
+            self._on_nav_scroll(scroll.verticalScrollBar().value())
 
     def _ui_changed(self, *_) -> None:
         if not self._loading:
@@ -822,6 +988,7 @@ class SettingsTab(QWidget):
     def showEvent(self, event):     # noqa: N802（Qt 命名，切回本页时刷新状态）
         super().showEvent(event)
         self._refresh_capture_state()
+        self._on_nav_scroll(self._scroll.verticalScrollBar().value())
 
     def values(self) -> tuple[str, str]:
         """(显示/隐藏窗口, 紧急停止)。分组热键在各自的「分组编辑页」里设置。"""

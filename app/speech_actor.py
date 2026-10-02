@@ -27,6 +27,7 @@ import ctypes
 import gc
 import queue
 import threading
+import time
 
 _jobs: queue.Queue = queue.Queue()
 _worker_started = False
@@ -108,16 +109,28 @@ def _submit(text: str) -> _Job:
     return job
 
 
-def speak(text: str) -> tuple[bool, str]:
-    """同步播报一段文本，阻塞直到播完（或超时）。返回 (成功?, 原因)。
+def speak(text: str, stop=None) -> tuple[bool, str]:
+    """同步播报一段文本，阻塞直到播完（或超时/被停止）。返回 (成功?, 原因)。
 
     text：播报内容（调用方负责 $变量名 解析）；空内容直接判失败。
+    stop：可选的 `threading.Event`，播报期间会轮询它——用户点「停止」后不必
+    干等满 `_WAIT_TIMEOUT`（原实现只 `wait(600)` 一次，停止按钮最长 10 分钟
+    无效；pyttsx3 在无声卡驱动上 runAndWait 卡住正是常见路径，2026-10-02 review）。
     """
     text = (text or "").strip()
     if not text:
         return False, "播报内容为空"
     job = _submit(text)
-    job.done.wait(_WAIT_TIMEOUT)
+    if stop is None:
+        job.done.wait(_WAIT_TIMEOUT)
+    else:
+        # 每 0.1s 看一眼停止标志；播报本身仍由 worker 线程完成
+        deadline = time.monotonic() + _WAIT_TIMEOUT
+        while not job.done.wait(0.1):
+            if stop.is_set():
+                return False, "已手动停止"
+            if time.monotonic() >= deadline:
+                break
     if not job.done.is_set():
         return False, "语音播报超时"
     return job.ok, job.why

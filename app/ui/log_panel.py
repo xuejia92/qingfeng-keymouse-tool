@@ -39,6 +39,7 @@ class LogPanel(QWidget):
         self._expanded = False
         self._summary = ""
         self._entries: list[tuple[str, str]] = []   # [(文本, 种类)]，用于过滤切换时重渲染
+        self._rendered = False   # 是否已渲染过：首条日志走一次全量（顺带初始化字体）
         # 主题切换后重刷日志文字颜色（日志字色不走 QSS，是逐条插入格式）
         theme.register_listener(self._rerender)
 
@@ -154,13 +155,37 @@ class LogPanel(QWidget):
     def append(self, text: str, kind: str = "log") -> None:
         """追加一条日志。kind="print" 用蓝色显示，其余用默认色。
 
-        只缓存文本 + 种类，渲染交给 _rerender：这样切换「只显示打印输出」时
-        普通日志能即时隐藏/恢复，而不是丢弃后无法找回。
+        只缓存文本 + 种类，渲染分两条路：日常追加走 `_append_one` **增量插入**
+        （O(1)）；只有「首次渲染」与「超出上限把旧条目挤掉」才走 `_rerender` 全量重排。
+        原来每条都全量 clear + 重排 400 块，代价随日志条数线性增长（累积 O(n²)），
+        几百行后每打印一句都明显卡顿（2026-10-02 review）。
         """
         self._entries.append((text, kind))
-        if len(self._entries) > _MAX_BLOCKS:
+        dropped = len(self._entries) > _MAX_BLOCKS
+        if dropped:
             del self._entries[:len(self._entries) - _MAX_BLOCKS]
-        self._rerender()
+        if not self._rendered or dropped:
+            self._rendered = True
+            self._rerender()      # 首次顺带初始化字体；截断时文本框里少了头部
+            return
+        self._append_one(text, kind)
+
+    def _format_for(self, kind: str) -> QTextCharFormat:
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(
+            theme.token(_PRINT_TOKEN if kind in ("print", "print_raw")
+                        else _NORMAL_TOKEN)))
+        return fmt
+
+    def _append_one(self, text: str, kind: str) -> None:
+        """只把这一条插到末尾（O(1)）——日常追加的主路径。"""
+        if self.print_only and kind not in ("print", "print_raw"):
+            return
+        cursor = self._text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        suffix = "" if kind == "print_raw" else "\n"   # 原始输出不自动换行
+        cursor.insertText(text + suffix, self._format_for(kind))
+        self._text.moveCursor(QTextCursor.End)
 
     def _refresh_font(self) -> None:
         """按全局字体百分比刷新日志正文字号。
@@ -178,10 +203,7 @@ class LogPanel(QWidget):
 
     def _rerender(self) -> None:
         self._refresh_font()      # 主题/字体百分比变化都会走到这里（已注册为主题监听）
-        print_fmt = QTextCharFormat()
-        print_fmt.setForeground(QColor(theme.token(_PRINT_TOKEN)))
-        normal_fmt = QTextCharFormat()
-        normal_fmt.setForeground(QColor(theme.token(_NORMAL_TOKEN)))
+        self._rendered = True
 
         self._text.clear()
         cursor = self._text.textCursor()
@@ -189,9 +211,8 @@ class LogPanel(QWidget):
             if self.print_only and kind not in ("print", "print_raw"):
                 continue
             cursor.movePosition(QTextCursor.End)
-            fmt = print_fmt if kind in ("print", "print_raw") else normal_fmt
-            suffix = "" if kind == "print_raw" else "\n"   # 原始输出不自动换行
-            cursor.insertText(text + suffix, fmt)
+            suffix = "" if kind == "print_raw" else "\n"
+            cursor.insertText(text + suffix, self._format_for(kind))
         self._text.moveCursor(QTextCursor.End)
 
     def clear(self) -> None:

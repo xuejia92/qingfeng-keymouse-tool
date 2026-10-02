@@ -16,6 +16,23 @@ def _get_sct():
     return _local.sct
 
 
+def shutdown() -> None:
+    """释放本线程的 mss 实例（流程结束时调用）。
+
+    mss 实例绑定创建它的线程、持有桌面 DC / GDI 句柄，而 mss>=6 没有 `__del__`
+    兜底——thread-local 只是让 Python 对象随线程消失，C++ 资源不会自己释放，
+    反复跑流程会一次次泄漏（2026-10-02 review）。
+    """
+    sct = getattr(_local, "sct", None)
+    if sct is None:
+        return
+    try:
+        sct.close()
+    except Exception:
+        pass
+    _local.sct = None
+
+
 def grab_full_screen() -> np.ndarray:
     """抓取整个虚拟桌面，返回 BGR ndarray。"""
     sct = _get_sct()

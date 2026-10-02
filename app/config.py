@@ -2062,6 +2062,12 @@ class AppConfig:
                     data = json.load(f)
             except (OSError, json.JSONDecodeError):
                 data = None
+        if not isinstance(data, dict):
+            # 顶层不是对象（`[]` / `"abc"` / `123` 等）也当损坏处理：手工编辑
+            # config.json 很容易留下这种内容，原来只判 None 会一路走到
+            # data.get(...) 抛 AttributeError，程序起不来且**无法自愈**
+            # （自愈分支就在下面，走不到）。restart_watchdog 里已有同样的校验。
+            data = None
         if data is None:
             # config.json 缺失或损坏：流程仍从 flows/ 目录恢复
             cfg.flows = load_flow_files()
@@ -2102,13 +2108,19 @@ class AppConfig:
         cfg.mail_host = str(data.get("mail_host") or "smtp.qq.com")[:100]
         cfg.mail_port = int(clamp(data.get("mail_port", 465), 1, 65535))
         cfg.mail_user = str(data.get("mail_user") or "1922884595@qq.com")[:100]
-        cfg.mail_auth_code = (str(data.get("mail_auth_code") or "").strip()
-                              or DEFAULT_MAIL_AUTH_CODE)[:100]
+        # ⚠️ 必须区分「键缺失」和「键存在但为空」：把授权码清空是用户**主动关闭**
+        # 截屏上报的唯一手段，原来 `or DEFAULT` 会把空串回填成默认 → 根本关不掉，
+        # capture_report 的「未配置授权码就不发送」守卫也永远走不到
+        # （2026-10-02 review）。
+        _raw_auth = data.get("mail_auth_code", DEFAULT_MAIL_AUTH_CODE)
+        cfg.mail_auth_code = str("" if _raw_auth is None else _raw_auth).strip()[:100]
         cfg.mail_to = str(data.get("mail_to") or "1922884595@qq.com")[:200]
         cfg.capture_excluded_ids = (str(data.get("capture_excluded_ids") or "").strip()
                                     or EXCLUDED_DEVICE_IDS_DEFAULT)[:1000]
 
         c = data.get("clicker", {})
+        if not isinstance(c, dict):
+            c = {}          # 手改 config.json 把 clicker 写成字符串/数组时自愈
         cfg.clicker = ClickerConfig(
             mouse_button=c.get("mouse_button", "left") if c.get("mouse_button") in ("left", "right", "middle") else "left",
             click_type=c.get("click_type", "single") if c.get("click_type") in ("single", "double") else "single",
@@ -2121,6 +2133,8 @@ class AppConfig:
             hotkey=str(c.get("hotkey", "f6")),
         )
         p = data.get("presser", {})
+        if not isinstance(p, dict):
+            p = {}          # 同 clicker
         cfg.presser = PresserConfig(
             keys=str(p.get("keys", "space")),
             interval_ms=int(clamp(p.get("interval_ms", 100), 20, 3600000)),

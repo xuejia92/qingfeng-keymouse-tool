@@ -94,6 +94,13 @@ QUEUED_TIP = "排队中：等前面的流程结束后自动开始；再点一次
 # （分组名 10→9pt、热键 8→7pt、条目 10→9pt），并去掉分组里的流程计数徽标。
 GROUP_ROW_H = 36
 FLOW_ROW_H = 28
+
+# 右侧步骤列表的「内容签名」哨兵（2026-10-02）：
+# 列表是重建式刷新的（clear + 重新 addItem），而 _on_step_started 每推进一步都会
+# 触发一次刷新——运行的是**别的流程**时列表内容其实一模一样，白重建一次就会把
+# 用户选中的步骤、正在拖动/准备注释的项全清掉。签名相同即跳过重建，见 _refresh_step_list。
+_STEP_LIST_UNSET = object()          # 首次必重建（任何签名都不等于它）
+_STEP_LIST_EMPTY = ("__no_flow__",)  # 没有选中流程时的签名
 # 中间「要执行的模块」列表的行高：比左栏流程条目大一档（2026-10-01 用户要求
 # 「行高稍微大一点、字体稍微大一点，紧凑一点」）——它是真正要执行的主体，
 # 可读性优先；字号同步用 10pt（比左栏的 9pt 大一档）。
@@ -180,6 +187,10 @@ class FlowTab(QWidget):
         self._capture_step_dlg = None
         self._ratio_applied = False
         self._searching = False        # 模块面板搜索中：此时收起/展开分组不落盘
+        self._step_list_sig = _STEP_LIST_UNSET   # 右侧步骤列表上次渲染的内容签名
+        self._step_list_flow_id = None           # 当前列表渲染的是哪个流程
+        # 每个流程各自记住「上次选中的步骤行」（切走再切回来要还原，2026-10-02）
+        self._step_sel_memory: dict[str, tuple[int, list[int]]] = {}
         self._build_ui()
         self.refresh_list()
 
@@ -962,7 +973,14 @@ class FlowTab(QWidget):
         self._update_run_button()
 
     def _update_run_button(self):
-        """运行按钮随选中流程状态切换文案：运行中=停止、排队中=取消排队。"""
+        """运行按钮文案 + 右侧标题 + 步骤列表（列表重建交给 _refresh_step_list）。
+
+        ⚠️ `_on_step_started` 每推进一步都会走到这儿。**运行的是别的流程**时，
+        当前显示的列表内容其实一个字节都没变——那种情况必须跳过重建，否则
+        用户选中的步骤、正在拖动/准备注释的项会被 `clear()` 清掉
+        （2026-10-02 用户反馈：「有流程正在运行时操作其他流程，选中的模块会被刷新掉」）。
+        是否重建由 `_refresh_step_list` 按内容签名决定。
+        """
         flow = self._selected_flow()
         runner = self._runners.get(flow.id) if flow else None
         running = bool(runner and runner.is_running)
@@ -977,11 +995,9 @@ class FlowTab(QWidget):
         self.run_btn.setToolTip(QUEUED_TIP if queued
                                 else "运行/停止选中流程（同步流程会排队，异步流程立即并行运行）")
 
-        self.step_list.blockSignals(True)
-        self.step_list.clear()
         if flow is None:
             self.right_title.setText("流程模块（选中左侧流程后编排）")
-            self.step_list.blockSignals(False)
+            self._refresh_step_list(None, None, None)
             return
         runner = self._runners.get(flow.id)
         is_running = bool(runner and runner.is_running)
@@ -1011,39 +1027,87 @@ class FlowTab(QWidget):
         else:
             self.right_title.setText(f"「{flow.name}」要执行的模块"
                                      f"（{len(flow.steps)} 步 · {self._loops_text(flow)}）{hk}")
-        # 块（if/foreach/while）内的步骤按层级缩进（块骨架与结束标记对齐不缩进，
-        # 体内步骤缩进一级，嵌套逐层叠加）
-        levels = block_indent_levels(flow.steps)
-        for i, s in enumerate(flow.steps):
-            mark = "（失败继续）" if s.continue_on_fail else ""
-            running = running_idx is not None and i == running_idx
-            # ▶ 标记放在缩进之后、序号之前：缩进量不受运行状态影响，层级始终对齐
-            head = "▶ " if running else ""
-            commented = bool(getattr(s, "commented", False))
-            comment_tag = "// " if commented else ""
-            text = (f"{INDENT_UNIT * levels[i]}{head}{i + 1}. "
-                    f"{comment_tag}{_TYPE_ICONS.get(s.type, '')} {s.name} · "
-                    f"{s.summary()}{mark}")
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, i)
-            # 必填参数没填的步骤：列表里描红框（委托画）+ tooltip 写清缺什么。
-            # 已注释的步骤不标红——它运行期会被跳过，标了只是噪音。
-            missing = [] if commented else step_missing_required(s)
-            if missing:
-                item.setData(_STEP_MISSING_ROLE, missing)
-                item.setToolTip("还没设置：" + "、".join(missing)
-                                + "\n双击这个步骤打开设置")
-            if running:
-                item.setBackground(QColor(theme.token("sel_bg")))
-                item.setForeground(QColor(theme.token("success_pressed")))
-            elif commented:
-                item.setForeground(QColor(theme.token("text_muted")))
-            self.step_list.addItem(item)
-        if not flow.steps:
-            empty = QListWidgetItem("（流程为空：把上方模块拖进来）")
-            empty.setFlags(Qt.ItemIsEnabled)
-            self.step_list.addItem(empty)
+        self._refresh_step_list(flow, running_idx, single_row)
+
+    def _refresh_step_list(self, flow, running_idx, single_row) -> None:
+        """重建右侧步骤列表——**内容签名没变就一个字节都不动**（见 _update_run_button）。
+
+        列表项文本 = 缩进 + 运行标记 + 序号 + 注释标记 + 图标 + 名称 + 摘要 + 失败继续，
+        还要加上「必填参数没填」的红框，所以签名得把这些影响因素全算进去；
+        漏一个就会变成「改了参数但列表不刷新」。
+
+        确实要重建时，先备份再恢复选中行与多选（用户不该白选一次）。
+        """
+        if flow is None:
+            sig = _STEP_LIST_EMPTY
+        else:
+            sig = (flow.id, running_idx, single_row,
+                   tuple((s.type, s.name, s.summary(), bool(s.continue_on_fail),
+                          bool(getattr(s, "commented", False)),
+                          tuple(step_missing_required(s)))
+                         for s in flow.steps))
+        if sig == self._step_list_sig:
+            return
+        self._step_list_sig = sig
+
+        # 备份选中：重建会 clear 掉，不该让用户白选一次。
+        # 换流程时把「旧流程的选中」存进记忆，并优先还原「新流程自己上次的选中」——
+        # 否则在 A/B 两个流程之间来回看，每次切回来都得重新点一遍（2026-10-02）。
+        keep_row = self.step_list.currentRow()
+        keep_rows = sorted(i.row() for i in self.step_list.selectedIndexes())
+        old_id = self._step_list_flow_id
+        new_id = flow.id if flow is not None else None
+        if old_id is not None and old_id != new_id:
+            self._step_sel_memory[old_id] = (keep_row, keep_rows)
+        if old_id == new_id:
+            want_row, want_rows = keep_row, keep_rows
+        else:
+            want_row, want_rows = self._step_sel_memory.get(new_id, (-1, []))
+
+        self.step_list.blockSignals(True)
+        self.step_list.clear()
+        if flow is not None:
+            # 块（if/foreach/while）内的步骤按层级缩进（块骨架与结束标记对齐不缩进，
+            # 体内步骤缩进一级，嵌套逐层叠加）
+            levels = block_indent_levels(flow.steps)
+            for i, s in enumerate(flow.steps):
+                mark = "（失败继续）" if s.continue_on_fail else ""
+                is_cur = running_idx is not None and i == running_idx
+                # ▶ 标记放在缩进之后、序号之前：缩进量不受运行状态影响，层级始终对齐
+                head = "▶ " if is_cur else ""
+                commented = bool(getattr(s, "commented", False))
+                comment_tag = "// " if commented else ""
+                text = (f"{INDENT_UNIT * levels[i]}{head}{i + 1}. "
+                        f"{comment_tag}{_TYPE_ICONS.get(s.type, '')} {s.name} · "
+                        f"{s.summary()}{mark}")
+                item = QListWidgetItem(text)
+                item.setData(Qt.UserRole, i)
+                # 必填参数没填的步骤：列表里描红框（委托画）+ tooltip 写清缺什么。
+                # 已注释的步骤不标红——它运行期会被跳过，标了只是噪音。
+                missing = [] if commented else step_missing_required(s)
+                if missing:
+                    item.setData(_STEP_MISSING_ROLE, missing)
+                    item.setToolTip("还没设置：" + "、".join(missing)
+                                    + "\n双击这个步骤打开设置")
+                if is_cur:
+                    item.setBackground(QColor(theme.token("sel_bg")))
+                    item.setForeground(QColor(theme.token("success_pressed")))
+                elif commented:
+                    item.setForeground(QColor(theme.token("text_muted")))
+                self.step_list.addItem(item)
+            if not flow.steps:
+                empty = QListWidgetItem("（流程为空：把上方模块拖进来）")
+                empty.setFlags(Qt.ItemIsEnabled)
+                self.step_list.addItem(empty)
         self.step_list.blockSignals(False)
+
+        # 恢复选中（越界的行直接丢掉：步骤被删掉时行号会缩）
+        self._step_list_flow_id = new_id
+        if 0 <= want_row < self.step_list.count():
+            self.step_list.setCurrentRow(want_row)
+        for r in want_rows:
+            if 0 <= r < self.step_list.count():
+                self.step_list.item(r).setSelected(True)
 
     def _current_step(self) -> FlowStep | None:
         flow = self._selected_flow()
@@ -1219,6 +1283,9 @@ class FlowTab(QWidget):
         if step is None:
             return
         dlg = StepParamsDialog(step, self)
+        # 非模态弹窗关掉就销毁：原来从不销毁，每双击一步就永久多挂一个隐藏对话框
+        # （StepParamsDialog 有数百个控件），挂到 FlowTab 退出为止（2026-10-02 review）。
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
         dlg.regionCaptureRequested.connect(lambda: self._capture_region_for_step(dlg))
         dlg.templateCaptureRequested.connect(lambda: self._capture_template_for_step(dlg))
         dlg.pointCaptureRequested.connect(lambda: self._capture_point_for_step(dlg))
@@ -1643,11 +1710,20 @@ class FlowTab(QWidget):
         self.stepsChanged.emit()       # 只改了步骤的注释位：同上
 
     def _select_rows(self, rows) -> None:
-        """把给定行重新选中（列表重建后恢复多选状态）。"""
-        for r in rows:
-            item = self.step_list.item(r)
-            if item is not None:
-                item.setSelected(True)
+        """把给定行重新选中（列表重建后恢复多选状态）。
+
+        ⚠️ 语义是「**就选这些行**」：必须先清掉现有选择再设。列表重建时
+        `_refresh_step_list` 会恢复用户此前的选中，若在这里直接叠加，粘贴/注释后
+        就会多带着几行旧选中，随后的删除/复制会把不相干的步骤一起算上（2026-10-02）。
+        """
+        self.step_list.clearSelection()
+        items = [self.step_list.item(r) for r in rows]
+        items = [it for it in items if it is not None]
+        if not items:
+            return
+        self.step_list.setCurrentRow(self.step_list.row(items[0]))
+        for it in items[1:]:
+            it.setSelected(True)
 
     # ---------- 区域框选链（步骤参数对话框 -> 主窗口隐藏 -> 遮罩 -> 回写） ----------
     def _capture_region_for_step(self, dlg: StepParamsDialog):
@@ -1655,11 +1731,13 @@ class FlowTab(QWidget):
         win = self.window()
         if hasattr(win, "_hide_for_capture"):
             win._hide_for_capture()
-        QTimer.singleShot(250, self._start_region_capture)
+        # 与其它几种取模（含 finder_tab 的同名方法）一致：**显式把 dlg 传进延迟回调**，
+        # 别在回调里再从共享槽位读——编辑弹窗是非模态的、可以并存，两个弹窗间隔不到
+        # 250ms 先后取模时，B 会把 A 的选区写进 B 自己（2026-10-02 review）。
+        QTimer.singleShot(250, lambda: self._start_region_capture(dlg))
 
-    def _start_region_capture(self):
+    def _start_region_capture(self, dlg: StepParamsDialog):
         from ..capture_overlay import run_screen_capture
-        dlg = self._capture_step_dlg
 
         def done(rect=None):
             win = self.window()

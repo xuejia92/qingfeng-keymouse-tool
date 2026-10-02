@@ -263,20 +263,38 @@ class MouseMenuWatcher(QObject):
         return bool(self._started_ok)
 
     def _stop_thread(self) -> None:
-        """停止监听线程并卸载钩子。"""
+        """停止监听线程并卸载钩子。
+
+        ⚠️ join 超时**不能**把 `_thread` 直接丢掉：那之后 `is_running()` 看不到这条
+        还活着的线程，`_ensure_running()` 会再装一个钩子；而旧线程退出时若 Unhook
+        实例字段，卸掉的是**新线程**的句柄（表现为中键重复弹菜单 / 钩子永久泄漏）。
+        钩子回调正卡在 GIL 竞争上时 join 必然超时（实测单次可卡 859~1000ms），
+        宁可让 `is_running()` 误报「还活着」，也不能让上层以为干净而装第二个钩子。
+        """
         tid, self._thread_id = self._thread_id, 0
         if tid:
             try:
                 self._user32.PostThreadMessageW(tid, WM_QUIT, 0, 0)
             except Exception:
                 log.debug("结束中键钩子线程失败", exc_info=True)
-        thread, self._thread = self._thread, None
-        if thread is not None and thread.is_alive():
+        thread = self._thread
+        if thread is None:
+            return
+        if thread.is_alive():
             thread.join(timeout=2.0)
+        if thread.is_alive():
+            log.warning("中键钩子线程未在 2 秒内退出，暂不视为已停止（避免重复装钩子）")
+        else:
+            self._thread = None
 
     # ---------- 钩子线程 ----------
     def _run(self) -> None:
         user32 = self._user32
+        # 钩子句柄存**局部变量**：finally 里要 Unhook 的必须是「本线程装的那个」，
+        # 用实例字段会误卸后来新线程的钩子——旧线程 join 超时退出时正会这样
+        # （2026-10-02 review）。
+        hook = 0
+        proc = None
         try:
             # 先 PeekMessage 建出本线程的消息队列，确保之后 PostThreadMessageW(WM_QUIT)
             # 一定能投递到（消息队列懒创建，不先建可能丢消息导致线程退不出来）。
@@ -286,13 +304,15 @@ class MouseMenuWatcher(QObject):
 
             hookproc = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
                                           ctypes.c_size_t, ctypes.c_ssize_t)
-            self._proc = hookproc(self._hook_proc)
-            self._hook = user32.SetWindowsHookExW(
-                WH_MOUSE_LL, self._proc, self._kernel32.GetModuleHandleW(None), 0)
-            if not self._hook:
+            proc = hookproc(self._hook_proc)
+            hook = user32.SetWindowsHookExW(
+                WH_MOUSE_LL, proc, self._kernel32.GetModuleHandleW(None), 0)
+            if not hook:
                 log.warning("SetWindowsHookExW(WH_MOUSE_LL) 失败，GetLastError=%s",
                             self._kernel32.GetLastError())
                 return
+            self._proc = proc
+            self._hook = hook
             self._started_ok = True
             self._ready.set()
 
@@ -306,13 +326,15 @@ class MouseMenuWatcher(QObject):
             log.exception("中键菜单监听线程异常")
         finally:
             try:
-                if self._hook:
-                    user32.UnhookWindowsHookEx(self._hook)
+                if hook:
+                    user32.UnhookWindowsHookEx(hook)
             except Exception:
                 log.debug("卸载鼠标钩子失败", exc_info=True)
-            self._hook = None
-            self._proc = None
-            self._started_ok = False
+            # 只有实例字段仍指向本线程的钩子时才清（已被新线程接管就别碰）
+            if self._hook == hook:
+                self._hook = None
+                self._proc = None
+                self._started_ok = False
             self._ready.set()     # 兜底：装载失败时也要放行 start() 的等待
 
     def _hook_proc(self, n_code, w_param, l_param):

@@ -71,6 +71,7 @@ class PhysicalHotkeyEngine(QObject):
         self._handlers: dict[str, list[tuple[int, object, bool]]] = {}
         self._pressed: set[str] = set()
         self._listener = None
+        self._paused = False        # 拖拽期间临时卸钩子（见 pause）
         self._lock = threading.Lock()
         self._next_id = 0
 
@@ -88,7 +89,8 @@ class PhysicalHotkeyEngine(QObject):
             self._next_id += 1
             self._handlers.setdefault(hk, []).append(
                 (self._next_id, callback, bool(suppress)))
-            need_start = self._listener is None
+            # 暂停期间注册热键**不要**把钩子装回来（拖拽还没结束）
+            need_start = self._listener is None and not self._paused
         if need_start:
             self._start()
         return True
@@ -129,6 +131,39 @@ class PhysicalHotkeyEngine(QObject):
         except Exception:
             log.exception("物理热键引擎停止失败")
         self._listener = None
+
+    # ---------- 拖拽期间临时让位（与 mouse_menu.pause 对称） ----------
+    def pause(self) -> None:
+        """拖拽期间**真的卸掉**键盘钩子（配对 unpause）。
+
+        为什么必须有：低级键盘钩子的回调也是 Python 回调，必须抢到 GIL 才能返回，
+        而 Windows 会**同步等**它返回才继续投递键盘输入。本程序自己的拖拽
+        （OLE 的 DoDragDrop）会让**主线程连握 GIL 待在原生模态循环里**，
+        钩子线程拿不到 GIL；`LowLevelHooksTimeout` 到点后 Windows 会
+        **静默摘掉**钩子——不抛异常、不回调通知，pynput 也不会告诉你，
+        `_start()` 之后也不会被重新调用（`_listener` 还非 None）。
+        结果就是**所有全局热键永久失效**，直到重启程序。
+        （鼠标钩子那边早就做了同样的让位，见 mouse_menu.pause。）
+
+        这里必须**真的停 listener**：只是「忽略事件」没用——超时被摘掉的是
+        系统钩子本身。注意与 `suspend()`（无热键时提前返回）不同，这里
+        无论有没有热键都要把状态记上，unpause 时再决定装不装。
+        """
+        with self._lock:
+            if self._paused:
+                return
+            self._paused = True
+        self._stop()
+
+    def unpause(self) -> None:
+        """与 pause 配对：装回钩子（期间热键已全部注销则不再装）。"""
+        with self._lock:
+            if not self._paused:
+                return
+            self._paused = False
+            if not self._handlers:
+                return
+        self._start()
 
     # ---------- 事件处理（都在 pynput 监听线程） ----------
     def _win32_event_filter(self, msg, data):
@@ -177,3 +212,19 @@ class PhysicalHotkeyEngine(QObject):
 
 # 进程内单例：低级键盘钩子全局只能装一份
 engine = PhysicalHotkeyEngine()
+
+
+def pause() -> None:
+    """拖拽期间临时卸掉全局键盘钩子（配对 unpause）。
+
+    流程编排区拖动步骤/拖入模块时调用（见 ui/flow_dialog.StepList.startDrag）：
+    那段时间主线程握着 GIL 待在 OLE 原生模态循环里，钩子线程拿不到 GIL，
+    Windows 超时后会**静默摘掉**钩子且不通知 → 全局热键永久失效。
+    鼠标钩子的对应让位见 mouse_menu.pause()。
+    """
+    engine.pause()
+
+
+def unpause() -> None:
+    """与 pause 配对：装回键盘钩子。"""
+    engine.unpause()

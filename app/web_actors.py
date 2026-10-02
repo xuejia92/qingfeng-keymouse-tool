@@ -322,40 +322,45 @@ def open_url(url: str, mode: str = DEFAULT_MODE, new_tab: bool = False,
             note = (f"（沿用已启动的浏览器，{LAUNCH_MODES.get(active_mode(), '?')}）")
         else:
             note = ""
+
+    # ---- 以下都在锁外 ----
+    # 导航（tab.get 最长 timeout 秒）与「打开后等待」（wait_after 最长 60 秒纯 sleep）
+    # 都是长时间阻塞操作，放在锁内会让并行的异步流程互相干等——表现为「网页步骤卡住
+    # 不返回」（2026-10-02 review）。锁只用来保护浏览器单例的创建/替换。
+    try:
+        if new_tab:
+            tab = browser.new_tab(url, timeout=max(float(timeout or 0), 1.0))
+        else:
+            tab = browser.latest_tab
+            tab.get(url, timeout=max(float(timeout or 0), 1.0))
+    except _conn_errors():
+        # 旧实例连接已断开（浏览器被手动关闭/崩溃）：清掉单例重新建立再试一次
+        _reset_browser()
         try:
+            browser = (get_browser(mode) if mode != "attach"
+                       else get_browser(mode, attach_port))
             if new_tab:
-                tab = browser.new_tab(url)
+                tab = browser.new_tab(url, timeout=max(float(timeout or 0), 1.0))
             else:
                 tab = browser.latest_tab
                 tab.get(url, timeout=max(float(timeout or 0), 1.0))
-        except _conn_errors():
-            # 旧实例连接已断开（浏览器被手动关闭/崩溃）：清掉单例重新建立再试一次
-            _reset_browser()
-            try:
-                browser = (get_browser(mode) if mode != "attach"
-                           else get_browser(mode, attach_port))
-                if new_tab:
-                    tab = browser.new_tab(url)
-                else:
-                    tab = browser.latest_tab
-                    tab.get(url, timeout=max(float(timeout or 0), 1.0))
-            except Exception as e:
-                return False, f"打开失败：{type(e).__name__}: {e}"
-        except ValueError as e:
-            return False, str(e)
         except Exception as e:
             return False, f"打开失败：{type(e).__name__}: {e}"
+    except ValueError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, f"打开失败：{type(e).__name__}: {e}"
 
-        if wait_after and wait_after > 0:
-            import time
-            time.sleep(min(wait_after, 60.0))
+    if wait_after and wait_after > 0:
+        import time
+        time.sleep(min(wait_after, 60.0))
 
-        try:
-            title = (tab.title or "").strip()
-        except Exception:
-            title = ""
-        where = "新标签" if new_tab else "当前标签"
-        return True, f"{where}已打开 {url}" + (f" · {title}" if title else "") + note
+    try:
+        title = (tab.title or "").strip()
+    except Exception:
+        title = ""
+    where = "新标签" if new_tab else "当前标签"
+    return True, f"{where}已打开 {url}" + (f" · {title}" if title else "") + note
 
 
 def close_tab(scope: str = "current", match_text: str = "") -> tuple[bool, str]:

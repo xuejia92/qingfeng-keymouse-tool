@@ -282,7 +282,9 @@ class TestZombieBrowser(unittest.TestCase):
             title = "测试页"
 
         class FakeBrowser:
-            def new_tab(self, url):
+            def new_tab(self, url, timeout=None):
+                # open_url 现在给 new_tab 也带上 timeout（原先只有 latest_tab 有，
+                # 2026-10-02 review），替身要能接住。
                 calls["new"] += 1
                 if calls["new"] == 1:
                     raise PageDisconnectedError("连接已断开")

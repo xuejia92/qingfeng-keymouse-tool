@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 
-from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMessageBox,
                                QProgressBar, QPushButton, QStatusBar, QTabWidget,
@@ -88,7 +88,7 @@ class MainWindow(FramelessMainWindow):
         theme.apply_theme(getattr(cfg, "ui_theme", "light"))
         # 窗口样式：无边框 + 四角圆角卡片 + 自绘标题栏（标题栏随主题换色，见 frameless_window）
         # 点 X 隐藏到托盘，退出走托盘菜单（见 closeEvent）
-        # 版本号不放标题栏，改显示在底部状态栏最右侧（2026-10-01 用户要求）
+        # 版本号 2026-10-01 曾挪到状态栏最右侧，2026-10-02 用户要求彻底去掉（界面上不再显示）
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(*_MIN_WINDOW)    # 无边框窗口没有系统下限，自己兜住
         self.resize(*self._window_size())
@@ -133,12 +133,15 @@ class MainWindow(FramelessMainWindow):
         theme.register_listener(self._apply_window_theme)
         # 接受外部文件拖放（拖入 .json 直接导入为自动化流程）
         self.setAcceptDrops(True)
+        # 「显示/隐藏」置顶链的状态：_force_foreground 置为 True，失焦/隐藏时清除
+        # （见 _force_foreground 注释——TOPMOST 不能定时取消，否则窗口会掉回被遮挡处）
+        self._pinned_topmost = False
 
         bottom = QWidget()
         bottom.setObjectName("statusBarBody")
         # 状态栏统一小字号（9pt）+ 内边距压到最小 → 整条更矮（2026-10-01 用户要求）。
         # ⚠️ 这条只是兜底：**自带样式表的子控件不会继承父级的 QSS font-size**
-        #（实测 status_hint / version_label 仍是应用字体 10pt），所以每个子控件
+        #（实测 status_hint 仍是应用字体 10pt），所以每个子控件
         # 都得自己显式写 font-size: 9pt。
         bottom.setStyleSheet(
             "QWidget#statusBarBody { font-size: 9pt; }")
@@ -169,16 +172,6 @@ class MainWindow(FramelessMainWindow):
         blay.addWidget(self.status_hint, 1)
         blay.addWidget(self.run_ind)
         blay.addWidget(stop_btn)
-        # 版本号：显示在状态栏最右侧（原来在标题栏，2026-10-01 用户要求挪下来）
-        version = (getattr(self.cfg, "version", "") or "").strip()
-        self.version_label = QLabel(version)
-        self.version_label.setStyleSheet(
-            "color: #8a939c; padding: 0 2px; font-size: 9pt;")
-        if version:
-            self.version_label.setToolTip(f"当前版本：{version}")
-        else:
-            self.version_label.hide()
-        blay.addWidget(self.version_label)
         self.statusBar().addPermanentWidget(bottom)
         self.statusBar().setStyleSheet("QStatusBar{border-top: 1px solid #ddd;}")
         # 状态栏左下角：红点 + 提示文字 + 更新按钮
@@ -648,6 +641,10 @@ class MainWindow(FramelessMainWindow):
         self.cfg.run_overlay_log_max_lines = ov["log_max_lines"]
         # 状态日志浮层是独立窗口：开关 / 位置 / 背景
         self.cfg.run_overlay_log_enabled = ov["log_enabled"]
+        # ⚠️ 旧值必须在赋值**之前**留住：紧跟着那行已经把 cfg 改成了新位置，
+        # 再拿新值跟它自己比永远相等，条件恒为假 → 在设置页重选位置后，
+        # 之前手动拖动记下的 custom_pos 永远清不掉，九宫格设置不生效（2026-10-02 review）。
+        old_log_pos = self.cfg.run_overlay_log_pos
         self.cfg.run_overlay_log_pos = ov["log_pos"]
         self.cfg.run_overlay_log_bg_color = ov["log_bg_color"]
         self.cfg.run_overlay_log_bg_transparent = ov["log_bg_transparent"]
@@ -655,7 +652,7 @@ class MainWindow(FramelessMainWindow):
         self.cfg.run_overlay_log_max_height = ov["log_max_height"]
         self.cfg.run_overlay_log_auto_hide_sec = ov["log_auto_hide_sec"]
         # 在设置页重新选了坐标位置 → 清掉手动拖动记下的位置（让九宫格设置生效）
-        if ov["log_pos"] != self.cfg.run_overlay_log_pos:
+        if ov["log_pos"] != old_log_pos:
             self.cfg.run_overlay_log_custom_pos = ""
         from .. import running_overlay
         running_overlay.set_config(self.cfg)
@@ -898,6 +895,7 @@ class MainWindow(FramelessMainWindow):
         self._force_foreground()
 
     def hide_window(self) -> None:
+        self._clear_topmost()       # 隐藏前解除置顶，下次显示从正常 z 序开始
         self.hide()
 
     def toggle_show_hide(self) -> None:
@@ -913,7 +911,15 @@ class MainWindow(FramelessMainWindow):
         """把窗口顶到屏幕最前面。
 
         Qt.Tool 窗口从后台 activateWindow 常被系统拒绝（只闪烁不置前），
-        这里用 Win32：临时 TOPMOST + AttachThreadInput 借用前台线程权限。
+        这里用 Win32：TOPMOST + AttachThreadInput 借用前台线程权限。
+
+        两个关键点（都是实测踩过的坑，2026-10-02）：
+        1. **ctypes 必须设 argtypes 并用 c_void_p 传句柄**：不设时 HWND_TOPMOST(-1)
+           会被当 32 位 c_int 传，SetWindowPos 拿到的是 0x00000000FFFFFFFF（而非
+           0xFFFFFFFFFFFFFFFF），等于没置顶（实测 EXSTYLE 的 WS_EX_TOPMOST 位不变）。
+           这正是「可见但被遮挡时按快捷键没置顶」的真根因——TOPMOST 从来没设上去过。
+        2. TOPMOST 不搞定时取消：SetForegroundWindow 受前台锁定限制可能被拒，
+           被拒时窗口必须停在最前可见（失焦时解除，见 _on_activation_changed）。
         """
         self.raise_()
         self.activateWindow()
@@ -924,29 +930,80 @@ class MainWindow(FramelessMainWindow):
 
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
-            hwnd = int(self.winId())
-            swp = 0x1 | 0x2  # SWP_NOSIZE | SWP_NOMOVE
-            HWND_TOPMOST, HWND_NOTOPMOST = -1, -2
-            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, swp)
-            if user32.GetForegroundWindow() != hwnd:
-                fg = user32.GetForegroundWindow()
+            SWP = 0x1 | 0x2  # SWP_NOSIZE | SWP_NOMOVE
+
+            user32.SetWindowPos.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            user32.SetWindowPos.restype = ctypes.c_int
+            user32.GetForegroundWindow.restype = ctypes.c_void_p
+            user32.GetWindowThreadProcessId.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+            user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
+            user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+            user32.SetForegroundWindow.restype = ctypes.c_int
+            user32.AttachThreadInput.argtypes = [
+                ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int]
+            user32.AttachThreadInput.restype = ctypes.c_int
+            kernel32.GetCurrentThreadId.restype = ctypes.c_ulong
+
+            hwnd_val = int(self.winId())
+            hwnd = ctypes.c_void_p(hwnd_val)
+            user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, SWP)  # TOPMOST
+            self._pinned_topmost = True
+
+            fg = user32.GetForegroundWindow()
+            if fg and fg.value != hwnd_val:
+                # 前台窗口可能恰为空（切换瞬间 fg=0）：没线程可借，直接调用即可，
+                # 失败也有上面的 TOPMOST 兜底，窗口照样在最前可见。
                 fg_tid = user32.GetWindowThreadProcessId(fg, None)
-                this_tid = kernel32.GetCurrentThreadId()
-                if fg_tid and fg_tid != this_tid:
-                    user32.AttachThreadInput(this_tid, fg_tid, True)
+                # 附加「拥有本窗口的线程」（GUI 线程）而不是当前执行线程——
+                # 这才是 AttachThreadInput 的正确姿势。
+                my_tid = user32.GetWindowThreadProcessId(hwnd, None) \
+                    or kernel32.GetCurrentThreadId()
+                if fg_tid and fg_tid != my_tid:
+                    user32.AttachThreadInput(my_tid, fg_tid, True)
                     user32.SetForegroundWindow(hwnd)
-                    user32.AttachThreadInput(this_tid, fg_tid, False)
+                    user32.AttachThreadInput(my_tid, fg_tid, False)
                 else:
                     user32.SetForegroundWindow(hwnd)
-            QTimer.singleShot(300, lambda: user32.SetWindowPos(
-                hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, swp))
         except Exception:
             logging.getLogger(__name__).debug("强制置前失败", exc_info=True)
+
+    def _clear_topmost(self) -> None:
+        """解除 TOPMOST，让窗口回到正常 z 序（失焦 / 隐藏时调用）。"""
+        self._pinned_topmost = False
+        if sys.platform != "win32" or not self.isVisible():
+            return
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            user32.SetWindowPos.restype = ctypes.c_int
+            user32.SetWindowPos(ctypes.c_void_p(int(self.winId())),
+                                ctypes.c_void_p(-2), 0, 0, 0, 0, 0x1 | 0x2)  # NOTOPMOST
+        except Exception:
+            logging.getLogger(__name__).debug("解除置顶失败", exc_info=True)
+
+    def changeEvent(self, ev) -> None:      # noqa: N802（Qt 命名）
+        super().changeEvent(ev)
+        if ev.type() == QEvent.Type.ActivationChange:
+            self._on_activation_changed(self.isActiveWindow())
+
+    def _on_activation_changed(self, active: bool) -> None:
+        """置顶后一旦失焦就解除 TOPMOST（抽出来便于离屏测试）。"""
+        # SetForegroundWindow 成功后用户切走 -> 失焦 -> 取消，回到正常 z 序；
+        # 被拒绝时窗口保持 TOPMOST 可见，用户点它激活 -> 之后再切走 -> 同样解除。
+        if getattr(self, "_pinned_topmost", False) and not active:
+            self._clear_topmost()
 
     def closeEvent(self, ev) -> None:
         # 点 X 隐藏到托盘，不退出；退出走托盘菜单
         ev.ignore()
-        self.hide()
+        self.hide_window()
         self.hideToTrayNotice.emit()
 
     def shutdown(self) -> None:

@@ -29,6 +29,7 @@ from ..config import (ASYNC_MARK, ASYNC_TIP, PRESS_HOLD_DEFAULT_MS,
                       shutdown_countdown_seconds)
 from .. import hotkey_policy
 from .. import mouse_menu
+from .. import physical_hotkeys
 from ..conditions import check_condition_variables
 from ..dp_actors import (DP_ELE_ACTIONS, DP_LISTEN_ACTIONS, DP_LOCATORS,
                          DP_MATCHES, DP_TAB_MODES)
@@ -277,6 +278,19 @@ class StepList(QListWidget):
             return
         super().keyPressEvent(ev)
 
+    def setCurrentRow(self, row: int):    # noqa: N802（Qt 命名）
+        """把某一行设为当前行，并**单选**它。
+
+        ⚠️ 必须自己先 `clearSelection()`：父类在 ExtendedSelection 下的
+        `setCurrentRow` 只会「加选」而不清除已有选中——实测先选中第 3 行、
+        再 `setCurrentRow(1)` 得到的是 `[1, 3]`。而列表刷新会**恢复**用户的选中，
+        于是「程序化设当前行」的调用点（拖入模块后选中新行等）就会意外带上旧的选中，
+        让随后的删除/复制被误判成「多选」而删掉一串步骤（2026-10-02 排查所得）。
+        这里统一成单选，语义与「用户点了一下这一行」一致。
+        """
+        self.clearSelection()
+        super().setCurrentRow(row)
+
     # ---------- 「▶ 执行」单步按钮 ----------
     def _run_btn_rect_at(self, pos):
         """pos 落在某行的「▶ 执行」按钮上时返回该行号，否则 None。"""
@@ -338,21 +352,27 @@ class StepList(QListWidget):
         self.viewport().update(rect.adjusted(-2, -2, 2, 2))
 
     def startDrag(self, supported_actions):
-        """内部拖动排序：拖动期间临时卸掉全局鼠标钩子（见 mouse_menu.pause）。
+        """内部拖动排序：拖动期间临时卸掉全局鼠标钩子与键盘钩子。
 
         拖动走 OLE 的 DoDragDrop，主线程在这段原生模态循环里一直握着 GIL、
-        且不执行 Python 字节码 —— 而全局鼠标钩子的回调是 Python、必须拿到 GIL
-        才能返回，Windows 又要等它返回才继续投递鼠标输入。两者互锁，表现就是
+        且不执行 Python 字节码 —— 而全局钩子的回调是 Python、必须拿到 GIL
+        才能返回，Windows 又要等它返回才继续投递输入。两者互锁，表现就是
         拖动冻住（实测：装钩子时一次真实拖动只推进 2~4 个事件、单次卡 1000ms
         以上；同一份代码不装钩子 62 个事件、间隔中位 3ms）。拖动期间左键按着，
         中键菜单本来也用不到，先让位给输入通路。
+
+        ⚠️ 键盘钩子**同样**要让位（2026-10-02 review）：它超时后会被 Windows
+        **静默摘掉**且不通知、不重装 → 所有全局热键永久失效。
+        鼠标钩子那边是"让输入通路顺畅"，键盘这边是"保热键不死"，两条都要。
         """
         paused = mouse_menu.pause()
+        physical_hotkeys.pause()
         try:
             super().startDrag(supported_actions)
         finally:
             if paused:
                 mouse_menu.unpause()
+            physical_hotkeys.unpause()
 
     # QListWidget 默认只接受模型数据/URL 格式，自定义 MIME 必须显式放行
     def _accepted(self, ev) -> bool:

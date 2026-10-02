@@ -469,7 +469,9 @@ def run_speech_step(p: dict, variables: dict,
     wait = bool(p.get("wait", True))
     try:
         if wait:
-            ok, why = speech_actor.speak(content)
+            # 把 stop 传进去：播报期间点「停止」能立刻结束，不必干等满超时
+            # （speak 内部会轮询这个事件，见 speech_actor.speak，2026-10-02 review）
+            ok, why = speech_actor.speak(content, stop=stop)
             return ok, why
         ok, why = speech_actor.speak_async(content)
         return ok, why
@@ -815,6 +817,13 @@ def run_shot_translate_step(p: dict, variables: dict,
         proxy=str(p.get("proxy") or ""),
     )
     if not ok:
+        # 翻译中断（长文本分块时后面某块超时/限流）时，translate_actor 会把
+        # **已译的部分**一起带回来（result["partial"]=True）——别让它白跑，
+        # 写进结果变量，用户至少能拿到前半段译文（2026-10-02 review）。
+        res = result or {}
+        partial = str(res.get("text") or "").strip()
+        if res.get("partial") and partial:
+            variables[var] = partial
         return False, why
     translated = str((result or {}).get("text") or "").strip()
     if not translated:
@@ -1130,6 +1139,37 @@ def _cached_network_image(url: str) -> str:
     return ""
 
 
+def _trim_image_cache(cache_dir: str, max_bytes: int = 200 * 1024 * 1024,
+                      max_files: int = 300) -> None:
+    """给网络图片缓存加上限：按「最近访问时间」淘汰旧的。
+
+    原来只按 URL 哈希去重、**永不清理**：每用到一个新网址就往缓存目录落一个文件，
+    长期使用的用户目录会一直膨胀（2026-10-02 review）。
+    """
+    try:
+        names = os.listdir(cache_dir)
+    except OSError:
+        return
+    files = []
+    for name in names:
+        path = os.path.join(cache_dir, name)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        files.append((st.st_atime, st.st_size, path))
+    files.sort(reverse=True)           # 最近访问的在前
+    kept = 0
+    for idx, (_atime, size, path) in enumerate(files):
+        if idx >= max_files or kept + size > max_bytes:
+            try:
+                os.remove(path)      # 只删本函数逐个枚举出来的具体文件，不用通配
+            except OSError:
+                pass
+        else:
+            kept += size
+
+
 def _cache_network_image(src: str, url: str) -> str:
     """把下载下来的临时图片挪到按 URL 命名的稳定路径。
 
@@ -1157,6 +1197,10 @@ def _cache_network_image(src: str, url: str) -> str:
             shutil.move(src, dst)
         except OSError:
             return src
+    try:
+        _trim_image_cache(cache_dir)     # 顺手裁一次，防止缓存目录无限膨胀
+    except Exception:
+        pass
     return dst
 
 
@@ -1741,6 +1785,12 @@ def _warn_before_power(p: dict, stop: threading.Event | None, act_label: str) ->
         # 浮层按「秒」刷新：轮询是每 0.5 秒一次，但文案同一秒内不该重画
         # （白跑一次跨线程调度，浮层宽度还会随字数反复跳）。
         overlay_on = show_overlay and _show_warn_overlay(p, act_label, warn, note)
+        if show_overlay and not overlay_on:
+            # 浮层画不出来（无 Qt 实例 / 平台不支持）时降级成「只有日志」。
+            # 这里记一笔：否则用户看不到倒计时浮层、却不知道自己有没有设过提醒
+            # （overlay_on 为 False 后本轮不再重试，2026-10-02 review）。
+            log(f"定时关机：倒计时浮层未能显示（无 Qt 实例或平台不支持），"
+                f"本次仅写日志（{format_duration(warn)}后{act_label}）")
         shown_sec = int(math.ceil(warn))
         try:
             while True:
@@ -2201,19 +2251,35 @@ def run_find_step(p: dict, stop: threading.Event, progress,
     if template is None:
         return "模板图加载失败"
     region = parse_region_str(str(p.get("region", "") or ""))
-    timeout = float(p.get("search_timeout_sec", 10) or 0)
-    count = int(p.get("count", 1) or 0)
-    duration = float(p.get("duration_sec", 0) or 0)
+    # ⚠️ 数值一律走 _num_or：输入框被清空时值是 ""（**不是缺失**），裸调 float()/int()
+    # 会抛异常把步骤打断；而 `or 0` 又会把「未填」变成「0 = 一直等下去」，
+    # _wait_hit 里 timeout<=0 表示无限等 —— 找图步骤就永久挂住了（2026-10-02 review）。
+    # 空串/None 回落各字段默认；**显式 0 必须保留**（timeout=0 = 无限等待），
+    # 所以判空不能用 `or`：0 本身是 falsy，会被一起吞掉。
+    def _val(key, default):
+        v = p.get(key, default)
+        return default if v is None or str(v).strip() == "" else v
+
+    timeout = _num_or(_val("search_timeout_sec", 10), 10.0, 0.0)
+    raw_count = p.get("count", 1)          # 键缺失 = 1 次（沿用原语义）
+    if raw_count is None or str(raw_count).strip() == "":
+        raw_count = 0                      # 空值 = 0（主界面「找图点击」里表示无限）
+    count = int(_num_or(raw_count, 0, 0))
+    duration = _num_or(_val("duration_sec", 0), 0.0, 0.0)
+    # confidence/偏移量原来在循环里每次重新 float()/int()，既慢又会抛异常，提到循环外
+    confidence = _num_or(_val("confidence", 0.85), 0.85, 0.0, 1.0)
+    offset_x = int(_num_or(_val("offset_x", 0), 0))
+    offset_y = int(_num_or(_val("offset_y", 0), 0))
     if zero_count_as_one and count <= 0 and duration <= 0:
         count = 1
     done, t0 = 0, time.monotonic()
     while True:
         interval = _interval_seconds(_live_params(p_source), 500, 50)
-        hit = _wait_hit(template, float(p.get("confidence", 0.85)), timeout, region, stop)
+        hit = _wait_hit(template, confidence, timeout, region, stop)
         if hit is None:
             return "已手动停止" if stop.is_set() else "等待目标超时"
         cx, cy, _score = hit
-        x, y = cx + int(p.get("offset_x", 0) or 0), cy + int(p.get("offset_y", 0) or 0)
+        x, y = cx + offset_x, cy + offset_y
         click_type = p.get("click_type", "single")
         if click_type == "right":
             input_actors.click("right", 1, x, y)

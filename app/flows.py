@@ -11,6 +11,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal
 
+from . import finder
 from .conditions import (MAX_FOR_ITERATIONS, MAX_WHILE_ITERATIONS,
                          build_control_flow, build_loop_flow, eval_condition)
 from .config import FLOW_STEP_TYPES, Flow, while_iter_interval
@@ -38,6 +39,26 @@ from .tasks import (run_app_step, run_click_step, run_clip_get_step,
                     run_var_step, run_wait_image_step, run_wait_text_step,
                     run_web_step, run_yolo_detect_step)
 from .values import eval_expression_value, format_value, resolve_variable
+
+
+_REASON_SUCCESS_EXACT = frozenset({"已到设定时长", "等待完成"})
+_REASON_SUCCESS_PREFIX = ("已完成 ",)
+
+
+def _reason_is_success(reason: str) -> bool:
+    """click / press / find / wait 这四类步骤的成败判定：**只认成功白名单**。
+
+    这四类的成功结束原因只有三种：`_limit_reason` 给的「已完成 N 次」/「已到设定时长」，
+    以及 wait 步骤自己的「等待完成」。其余（已手动停止 / 等待目标超时 / 模板图加载失败 /
+    未设置按键 / 按键无效 / **未绑定目标窗口** / **目标窗口不存在** / 未知步骤类型）
+    都是失败或中止。
+
+    原来用的是「失败前缀黑名单」，漏掉了「未绑定目标窗口」「目标窗口不存在」和
+    「未知步骤类型: …」——后台模式下窗口找不到时点击根本没发生，却被判成成功，
+    流程带着错误的前提继续往下跑（2026-10-02 review）。白名单不会漏：
+    以后再加新的失败原因，不用记得回来补这张表。
+    """
+    return reason in _REASON_SUCCESS_EXACT or reason.startswith(_REASON_SUCCESS_PREFIX)
 
 
 class FlowVariableStore:
@@ -120,6 +141,13 @@ class FlowRunner(QObject):
             reason = self._run_loops()
         except Exception as e:  # 保护线程不静默死亡
             reason = f"出错: {e}"
+        finally:
+            # 释放本线程的 mss 抓屏实例（GDI/桌面 DC 句柄，mss>=6 无 __del__ 兜底；
+            # 流程线程复用/重建时不清就会一次次泄漏，2026-10-02 review）
+            try:
+                finder.shutdown()
+            except Exception:
+                pass
         self.is_running = False
         ok = (reason == "已手动停止" or reason.startswith("已完成")
               or reason.startswith("已退出流程"))
@@ -158,7 +186,11 @@ class FlowRunner(QObject):
           等待可被「停止」打断）再跳回循环体开头，靠 iterations 计数做死循环保护；
         - endForeach/endWhile 为结构标记，不执行不判成败。
         """
-        vars = getattr(self, "vars", FlowVariableStore(self.flow))
+        # ⚠️ 别写成 `getattr(self, "vars", FlowVariableStore(self.flow))`：
+        # getattr 的默认实参**先于**调用求值，所以每次进这里都会白构造一个
+        # FlowVariableStore（要解析全部变量声明）再立刻丢弃——单步执行路径正是
+        # 在 start() 之后才走到这里，构造纯属浪费（2026-10-02 review）。
+        vars = getattr(self, "vars", None) or FlowVariableStore(self.flow)
         steps = self.flow.steps
         false_jump, block_end = build_control_flow(steps)
         loop_ends = build_loop_flow(steps)   # {foreach/while 索引: 结束标记索引}
@@ -644,5 +676,4 @@ class FlowRunner(QObject):
             return run_close_app_step(step.params, self._stop)  # 自带成败判定
         else:
             reason = f"未知步骤类型: {step.type}（应为 {'/'.join(FLOW_STEP_TYPES)}）"
-        ok = reason not in ("已手动停止",) and not reason.startswith(("等待目标超时", "模板图", "未设置", "按键无效", "出错"))
-        return ok, reason
+        return _reason_is_success(reason), reason

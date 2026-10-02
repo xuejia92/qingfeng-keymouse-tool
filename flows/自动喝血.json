@@ -1,14 +1,14 @@
 {
-  "id": "6689af0ecf64",
-  "name": "半血自动恢复嗑药回血",
-  "group": "流放之路2",
+  "id": "2066c5f71f7c",
+  "name": "自动喝血",
+  "group": "地狱三种",
   "steps": [
     {
       "type": "while",
       "name": "while 循环",
       "params": {
         "condition": "true",
-        "interval_sec": 0.8
+        "interval_sec": 1.0
       },
       "continue_on_fail": false,
       "pair_id": "",
@@ -18,7 +18,7 @@
       "type": "ocr",
       "name": "文字识别",
       "params": {
-        "region": "146,1072,133,48",
+        "region": "765,1262,150,62",
         "variable": "life_list",
         "lang": "ch",
         "multi_ocr": true
@@ -72,7 +72,7 @@
       "type": "wait",
       "name": "延时等待",
       "params": {
-        "seconds": 1.0
+        "seconds": 0.5
       },
       "continue_on_fail": false,
       "pair_id": "",
@@ -111,7 +111,7 @@
   "variables": [],
   "hotkey": "",
   "loops": 1,
-  "created_seq": 16,
+  "created_seq": 20,
   "async_run": true,
-  "order": 15
+  "order": 17
 }

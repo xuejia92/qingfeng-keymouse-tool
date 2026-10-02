@@ -120,6 +120,17 @@ def translate(text: str, source: str = DEFAULT_SOURCE, target: str = DEFAULT_TAR
             detected = detected or lang
             used += 1
     except TranslateError as e:
+        if parts:
+            # 部分成功：把**已译的部分**一并交回去。原实现直接丢弃前面所有成功的
+            # 块，第 3 块遇到限流/超时时前两块白译（2026-10-02 review）。
+            # ok 仍为 False（步骤确实没完成），但流程变量里能拿到已译内容。
+            return False, {
+                "text": "".join(parts),
+                "source_lang": detected or src,
+                "target_lang": dst,
+                "requests": used,
+                "partial": True,
+            }, f"翻译中断（已译 {used} 块）：{e}"
         return False, None, str(e)
     except Exception as e:  # 兜底：不让未预期异常冒泡到流程引擎
         return False, None, f"翻译失败：{type(e).__name__}: {e}"

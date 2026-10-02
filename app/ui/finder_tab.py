@@ -216,6 +216,8 @@ class FinderTab(QWidget):
                 sb.showMessage("请先在列表中点选一个找图任务", 4000)
             return
         dlg = FindTaskDialog(task, self)
+        # 非模态弹窗关掉即销毁，别每编辑一次就永久多挂一个隐藏对话框（同 flow_tab）
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
         dlg.regionCaptureRequested.connect(lambda: self._capture_region_for_dialog(dlg))
         dlg.templateCaptureRequested.connect(lambda: self._capture_template_for_dialog(dlg))
 

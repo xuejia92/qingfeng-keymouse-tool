@@ -50,6 +50,15 @@ class HotkeyEdit(QLineEdit):
             if changed:
                 self.hotkeyChanged.emit("")
             return
+        # Tab / Backspace 必须走默认处理，不能录成热键：
+        # 它们在 keymap 里有映射（"tab"/"backspace"），录进去后**没有修饰符**
+        # → hotkey_manager 判定 suppress=True → 低级钩子把全系统的这个键吞掉；
+        # 而 Tab 被吞后焦点再也移不出这个控件（设置页直接卡死），Backspace 被吞
+        # 则全局删字失效（2026-10-02 review）。本控件是 readOnly，这两个键在此
+        # 也没有正常用途，放行最安全。
+        if ev.key() in (Qt.Key_Tab, Qt.Key_Backspace):
+            super().keyPressEvent(ev)
+            return
         hk = qt_key_event_to_hotkey(ev)
         if hk:
             if self._conflict_checker is not None:
