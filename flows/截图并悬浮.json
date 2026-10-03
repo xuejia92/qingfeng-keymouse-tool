@@ -1,7 +1,7 @@
 {
   "id": "79e891f0a720",
   "name": "截图并悬浮",
-  "group": "中键菜单",
+  "group": "测试",
   "steps": [
     {
       "type": "manual_shot",
@@ -30,6 +30,23 @@
         "y": 0,
         "scale": 80,
         "click_to_close": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "qq_mail",
+      "name": "邮件发送",
+      "params": {
+        "mail_host": "smtp.qq.com",
+        "mail_port": 465,
+        "mail_user": "",
+        "mail_auth_code": "",
+        "mail_to": "",
+        "subject": "",
+        "content": "",
+        "attachments": []
       },
       "continue_on_fail": false,
       "pair_id": "",

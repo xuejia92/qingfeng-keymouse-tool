@@ -30,11 +30,8 @@ from app.ui.settings_tab import SettingsTab
 
 
 def _expected_titles() -> list[str]:
-    titles = ["全局热键", "界面外观", "运行状态浮层"]
-    if settings_mod.SHOW_CAPTURE_SECTION:
-        titles.append("截屏上报")
-    titles += ["文件位置", "关于"]
-    return titles
+    # 「截屏上报」分区与相关代码已于 2026-10-03 整体删除，导航里不再有它
+    return ["全局热键", "界面外观", "运行状态浮层", "文件位置", "关于"]
 
 
 class NavCase(unittest.TestCase):

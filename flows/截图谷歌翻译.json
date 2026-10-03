@@ -1,7 +1,7 @@
 {
   "id": "bb3313283d5a",
   "name": "截图谷歌翻译",
-  "group": "中键菜单",
+  "group": "测试",
   "steps": [
     {
       "type": "shot_translate",

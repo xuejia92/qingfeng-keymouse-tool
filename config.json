@@ -1,59 +1,44 @@
 {
-  "version": "v999.9.0",
+  "version": "v999.0.3",
   "show_hide_hotkey": "shift+f1",
   "stop_all_hotkey": "shift+f2",
   "group_hotkeys": {},
-  "capture_interval_sec": 10,
-  "send_interval_min": 5,
-  "mail_host": "smtp.qq.com",
-  "mail_port": 465,
-  "mail_user": "1922884595@qq.com",
-  "mail_auth_code": "mloqacymmetreige",
-  "mail_to": "1922884595@qq.com",
-  "capture_excluded_ids": "6EBFD7E0-63DC-4E00-9CCE-0484589402AE,030521b0-8805-4cce-a102-39b7999982b8,30f08972-7a52-4591-a645-1002511977db",
   "clicker": {
     "mouse_button": "left",
     "click_type": "single",
     "interval_ms": 100,
     "fixed_position": false,
-    "pos_x": 1380,
-    "pos_y": 540,
-    "count": 10,
+    "pos_x": 0,
+    "pos_y": 0,
+    "count": 0,
     "duration_sec": 0.0,
-    "hotkey": ""
+    "hotkey": "f6"
   },
   "presser": {
     "keys": "space",
     "interval_ms": 100,
-    "count": 10,
+    "count": 0,
     "duration_sec": 0.0,
-    "hotkey": ""
+    "hotkey": "f7"
   },
   "find_tasks": [],
   "flow_groups": [
-    "流放之路2",
-    "测试使用",
-    "中键菜单",
-    "地狱三种"
+    "测试"
   ],
   "flow_group_seqs": {
-    "测试使用": 1,
-    "中键菜单": 2,
-    "流放之路2": 3,
-    "地狱三种": 4
+    "测试": 1
   },
   "collapsed_flow_groups": [
-    "111",
-    "中键菜单",
-    "地狱三种",
-    "测试使用"
+    "测试"
   ],
   "clear_log_on_run": true,
   "log_print_only": true,
   "collapsed_module_groups": [
+    "app_web",
     "condition",
     "drission",
     "input",
+    "logic",
     "perceive",
     "python"
   ],
@@ -63,71 +48,69 @@
   "module_groups_explicit": true,
   "schedule_tasks": [
     {
-      "id": "a71cbf5a9910",
+      "id": "cb4d4468d8d4",
       "name": "新建定时任务",
       "group": "",
-      "flow_id": "f3b3da16ecc3",
-      "flow_name": "打印九九乘法表",
+      "flow_id": "ecefa3b1ff25",
+      "flow_name": "定时任务测试",
       "enabled": false,
-      "mode": "minute",
-      "interval": 1,
+      "mode": "second",
+      "interval": 2,
       "at_time": "09:00",
       "weekdays": [],
       "monthdays": [],
-      "once_at": "2026-09-05 13:04",
+      "once_at": "2026-10-03 23:01",
       "cron": "",
-      "last_run": "2026-10-01 19:08:00",
+      "last_run": "2026-10-03 22:04:22",
       "next_run": "",
       "missed_fires": 0,
-      "last_alert_date": ""
+      "last_alert_date": "2026-10-03"
     }
   ],
   "schedule_groups": [],
   "collapsed_schedule_groups": [],
   "middle_menu_enabled": false,
   "middle_menu_suppress": false,
-  "middle_menu_hotkey": "",
+  "middle_menu_hotkey": "alt+q",
+  "middle_menu_tools": [
+    "calculator",
+    "lan_transfer",
+    "startup_items",
+    "clipboard_history"
+  ],
   "middle_menu_items": [
     {
-      "id": "0d027897d458",
-      "label": "截图并悬浮",
-      "icon": "camera",
+      "id": "9e73cac5ce2a",
+      "label": "",
+      "icon": "play",
       "flow_id": "79e891f0a720",
       "flow_name": "截图并悬浮",
-      "separator_before": true
-    },
-    {
-      "id": "4f104280bae4",
-      "label": "截图谷歌翻译",
-      "icon": "target",
-      "flow_id": "bb3313283d5a",
-      "flow_name": "截图谷歌翻译",
       "separator_before": true
     }
   ],
   "run_overlay_enabled": true,
-  "run_overlay_title_font_size": 22,
-  "run_overlay_title_font_family": "爱奇艺黑体 Black",
-  "run_overlay_title_text_color": "#ffff7f",
-  "run_overlay_flow_font_size": 22,
-  "run_overlay_flow_font_family": "爱奇艺黑体 Black",
-  "run_overlay_flow_text_color": "#ffff7f",
+  "run_overlay_title_font_size": 19,
+  "run_overlay_title_font_family": "",
+  "run_overlay_title_text_color": "#00e676",
+  "run_overlay_flow_font_size": 19,
+  "run_overlay_flow_font_family": "",
+  "run_overlay_flow_text_color": "#00e676",
   "run_overlay_bg_color": "",
-  "run_overlay_pos": "bottom_left",
-  "run_overlay_log_font_size": 13,
-  "run_overlay_log_font_family": "爱奇艺黑体 Medium",
+  "run_overlay_pos": "top_left",
+  "run_overlay_log_font_size": 12,
+  "run_overlay_log_font_family": "Consolas",
   "run_overlay_log_color": "#dcdfe3",
   "run_overlay_log_warn_color": "#f0b429",
   "run_overlay_log_error_color": "#ff5d5d",
-  "run_overlay_log_max_lines": 15,
+  "run_overlay_log_max_lines": 8,
   "run_overlay_log_enabled": true,
   "run_overlay_log_pos": "bottom_left",
-  "run_overlay_log_bg_color": "#060606",
+  "run_overlay_log_bg_color": "#000000cc",
   "run_overlay_log_bg_transparent": false,
-  "run_overlay_log_max_width": 330,
-  "run_overlay_log_max_height": 185,
+  "run_overlay_log_max_width": 320,
+  "run_overlay_log_max_height": 180,
   "run_overlay_log_auto_hide_sec": 60,
-  "run_overlay_log_custom_pos": "7,882",
-  "ui_theme": "warm_paper",
+  "run_overlay_log_custom_pos": "",
+  "ui_theme": "sakura",
   "ui_font_scale": 100
 }

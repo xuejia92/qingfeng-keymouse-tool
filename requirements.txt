@@ -10,6 +10,9 @@ pyperclip>=1.9
 pyttsx3>=2.90
 DrissionPage>=4.1
 rapidocr_onnxruntime>=1.2.3
+# 二维码编码（「小工具 -> 局域网文件传输」用）：纯 Python、无额外依赖、约 76KB 的
+# py3-none-any wheel；只用来把 URL 编码成模块矩阵，绘制由 QPainter 自己画。
+segno>=1.5
 
 # 文字识别（可选，仅「文字识别」步骤需要）：
 # 用 RapidOCR（onnxruntime 推理版），依赖只有 onnxruntime + PP-OCR 模型，

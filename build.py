@@ -37,8 +37,11 @@ import sys
 import time
 
 # 打包期必须能 import 到的模块（缺任何一个都说明这个解释器没装项目依赖）
+# segno：二维码编码（「小工具 -> 局域网文件传输」）；纯 Python，静态 import，
+# 缺了会导致打包后的 exe 生成不了二维码（界面会降级，但那是缺陷不是设计）。
 REQUIRED_MODULES = ("PySide6", "cv2", "keyboard", "pynput", "mss", "PIL",
-                    "DrissionPage", "rapidocr_onnxruntime", "onnxruntime")
+                    "DrissionPage", "rapidocr_onnxruntime", "onnxruntime",
+                    "segno")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "清风自动化键鼠工具"
 DIST_DIR = os.path.join(BASE_DIR, "dist")

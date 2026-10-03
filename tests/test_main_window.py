@@ -16,12 +16,12 @@ from app.ui.main_window import MainWindow, auto_window_size
 
 class TestAutoWindowSize(unittest.TestCase):
     def test_2k_base(self):
-        """2560x1440（基准）→ 1400x960。"""
-        self.assertEqual(auto_window_size(2560, 1440), (1400, 960))
+        """2560x1440（基准）→ 1500x1030。"""
+        self.assertEqual(auto_window_size(2560, 1440), (1500, 1030))
 
     def test_4k_capped(self):
         """4K 大屏不放大，保持设计尺寸。"""
-        self.assertEqual(auto_window_size(3840, 2160), (1400, 960))
+        self.assertEqual(auto_window_size(3840, 2160), (1500, 1030))
 
     def test_1080p_scaled(self):
         """1080p 等比缩小且不超屏。"""
@@ -30,6 +30,15 @@ class TestAutoWindowSize(unittest.TestCase):
         self.assertLessEqual(h, 1080)
         self.assertGreaterEqual(w, 980)      # 不小于最小宽度
         self.assertGreaterEqual(h, 660)      # 不小于最小高度
+        # 2026-10-03 加大基准后：1920x1080 → 1125x772（原为 1050x720）
+        self.assertEqual((w, h), (1125, 772))
+
+    def test_default_size_is_larger_than_before(self):
+        """回归：默认尺寸要比 2026-10-03 之前大（原基准 1400x960）。"""
+        for sw, sh in ((1920, 1080), (2560, 1440), (3840, 2160)):
+            w, h = auto_window_size(sw, sh)
+            self.assertGreaterEqual(w, 1125, f"{sw}x{sh} 宽度没变大")
+            self.assertGreaterEqual(h, 772, f"{sw}x{sh} 高度没变大")
 
     def test_small_screen_floor(self):
         """小屏不缩到最小尺寸以下。"""
@@ -46,8 +55,8 @@ class TestAutoWindowSize(unittest.TestCase):
 
     def test_invalid_input_falls_back(self):
         """异常输入（0 或负）回退到设计尺寸。"""
-        self.assertEqual(auto_window_size(0, 0), (1400, 960))
-        self.assertEqual(auto_window_size(-1, 500), (1400, 960))
+        self.assertEqual(auto_window_size(0, 0), (1500, 1030))
+        self.assertEqual(auto_window_size(-1, 500), (1500, 1030))
 
 
 class TestMainWindowScreenSize(unittest.TestCase):

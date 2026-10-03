@@ -1,0 +1,55 @@
+{
+  "id": "82c57b2f3b59",
+  "name": "流程 16",
+  "group": "测试使用",
+  "steps": [
+    {
+      "type": "wait_text",
+      "name": "等待文字出现",
+      "params": {
+        "text": "开启通知",
+        "region": "1291,1316,182,86",
+        "interval_sec": 0.3,
+        "tolerance": 0.8,
+        "timeout_sec": 0.0,
+        "result_var": "y",
+        "pos_var": "x"
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "y",
+        "text": "",
+        "raw": false,
+        "show_type": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "x",
+        "text": "",
+        "raw": false,
+        "show_type": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 17,
+  "async_run": false,
+  "order": 20
+}

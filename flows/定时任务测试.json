@@ -1,0 +1,36 @@
+{
+  "id": "ecefa3b1ff25",
+  "name": "定时任务测试",
+  "group": "测试",
+  "steps": [
+    {
+      "type": "wait",
+      "name": "延时等待",
+      "params": {
+        "seconds": 10.0
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    },
+    {
+      "type": "log",
+      "name": "打印输出",
+      "params": {
+        "variables": "8787",
+        "text": "",
+        "raw": false,
+        "show_type": false
+      },
+      "continue_on_fail": false,
+      "pair_id": "",
+      "commented": false
+    }
+  ],
+  "variables": [],
+  "hotkey": "",
+  "loops": 1,
+  "created_seq": 22,
+  "async_run": false,
+  "order": 21
+}

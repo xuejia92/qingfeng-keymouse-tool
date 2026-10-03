@@ -145,6 +145,7 @@ class _Shell:
         self.win._middle_menu_open = False
         self.win._middle_menu = None
         self.win._pending_middle_pos = None
+        self.win._pending_tool = ""          # 九宫格工具：菜单里点了哪个工具
         # 触发方式快照：与 cfg 对齐，这样「增删菜单项」不该触发重注册
         self.win._menu_trigger = (bool(enabled), hotkey)
         self.win.flow_tab = _FakeFlowTab(flow_result, queued=flow_queued)

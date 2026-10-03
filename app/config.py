@@ -1628,6 +1628,27 @@ def schedule_from_dict(data: dict) -> ScheduleTask:
 
 # ---------------- 中键菜单 ----------------
 
+# 中键菜单顶部「九宫格工具」的容量：3×3 = 9 格（2026-10-03）。
+# 存的是小程序的 key（见 app/mini_apps），**不校验 key 是否存在**——认不出的 key
+# 在显示端跳过即可，与图标 key 同一策略（配置可跨版本/可手改，不能因为多了个
+# 不认识的 key 就当作坏配置）。
+MIDDLE_MENU_MAX_TOOLS = 9
+
+
+def clean_tool_keys(raw) -> list[str]:
+    """清洗中键菜单九宫格的工具 key 列表：去空白、去重、截断到 9 个。"""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    keys: list[str] = []
+    for item in raw:
+        key = str(item or "").strip()[:40]
+        if key and key not in keys:
+            keys.append(key)
+        if len(keys) >= MIDDLE_MENU_MAX_TOOLS:
+            break
+    return keys
+
+
 @dataclass
 class MiddleMenuItem:
     """中键菜单项：鼠标中键弹出的快捷菜单里的一个条目。
@@ -1933,13 +1954,6 @@ def assign_missing_group_seqs(groups: "list[str]", seqs: "dict[str, int]") -> bo
     return changed
 
 
-
-DEFAULT_MAIL_AUTH_CODE = "mloqacymmetreige"
-# 截屏上报排除名单默认值（写入 config.json 的 capture_excluded_ids 字段，逗号分隔）
-EXCLUDED_DEVICE_IDS_DEFAULT = ("6EBFD7E0-63DC-4E00-9CCE-0484589402AE,"
-                               "030521b0-8805-4cce-a102-39b7999982b8")
-
-
 @dataclass
 class AppConfig:
     version: str = "1.0.0"               # 当前程序版本（在线更新检查用）
@@ -1950,15 +1964,6 @@ class AppConfig:
     # （见 flow_tab.toggle_group_async）。
     group_hotkeys: dict[str, str] = field(default_factory=dict)
 
-    # 定时截屏与邮箱上报
-    capture_interval_sec: int = 10            # 截屏间隔（秒）
-    send_interval_min: int = 5                # 发送间隔（分钟）
-    mail_host: str = "smtp.qq.com"            # SMTP 服务器（SSL）
-    mail_port: int = 465
-    mail_user: str = "1922884595@qq.com"      # 发件邮箱
-    mail_auth_code: str = DEFAULT_MAIL_AUTH_CODE   # SMTP 授权码（内置默认）
-    mail_to: str = "1922884595@qq.com"        # 收件邮箱（可逗号分隔多个）
-    capture_excluded_ids: str = EXCLUDED_DEVICE_IDS_DEFAULT  # 不截屏上报的设备ID（逗号分隔）
     clicker: ClickerConfig = field(default_factory=ClickerConfig)
     presser: PresserConfig = field(default_factory=PresserConfig)
     find_tasks: list[FindTask] = field(default_factory=list)
@@ -1983,13 +1988,14 @@ class AppConfig:
     schedule_tasks: list[ScheduleTask] = field(default_factory=list)  # 定时任务
     schedule_groups: list[str] = field(default_factory=list)          # 定时任务分组（顺序即显示顺序）
     collapsed_schedule_groups: list[str] = field(default_factory=list)  # 收起的定时任务分组名
-    # 中键菜单：系统范围内按鼠标中键**或**用户设置的全局快捷键弹出快捷菜单，
-    # 每个菜单项关联一个流程，点击即运行。两种触发方式互相独立、可只开一种，
-    # 也可同时开（见 ui/middle_menu_tab.py 的触发方式提示）。
+    # 中键菜单：系统范围内按鼠标中键**或**用户设置的全局快捷键弹出快捷菜单。
+    # 菜单分两段：**上面是九宫格工具**（把「🧰 小工具」里的小程序摆成最多 9 格，
+    # 点一下直接打开），**下面是关联流程的菜单项**（原有的点击即运行流程）。
     middle_menu_enabled: bool = True             # 鼠标中键是否弹菜单（同时决定装不装鼠标钩子）
     middle_menu_suppress: bool = False           # 是否拦截中键（不让它落到目标窗口）
     middle_menu_hotkey: str = ""                 # 全局快捷键触发（空 = 不设快捷键）
-    middle_menu_items: list[MiddleMenuItem] = field(default_factory=list)  # 菜单项（顺序即菜单顺序）
+    middle_menu_tools: list[str] = field(default_factory=list)  # 九宫格工具 key（顺序即宫格顺序，最多 9 个）
+    middle_menu_items: list[MiddleMenuItem] = field(default_factory=list)  # 流程菜单项（顺序即菜单顺序）
 
     # 左上角「运行中流程」悬浮窗外观（2026-09-27，见 app/running_overlay.py）
     # 字号/字体/颜色分「标题」（分组「名」·…/「流程」行）与「流程名称」（每条流程）两组
@@ -2073,7 +2079,7 @@ class AppConfig:
             cfg.flows = load_flow_files()
             if assign_missing_flow_seqs(cfg.flows):   # 旧流程文件补发创建序号
                 save_flows_dir(cfg.flows)
-            cfg.save()   # 全新/损坏配置：写入默认值（含 mail_auth_code）
+            cfg.save()   # 全新/损坏配置：写入默认值
             return cfg
         # 热键迁移：合并版切换键优先；旧"显示/隐藏分离"字段的旧默认值直接升级新默认
         seqs_migrated = False    # 本次 load 是否补发了流程/分组创建序号（需回写）
@@ -2101,22 +2107,6 @@ class AppConfig:
                     cfg.group_hotkeys[name] = hk
 
         cfg.version = (str(data.get("version") or "").strip() or "1.0.0")[:20]
-
-        # 定时截屏与邮箱上报
-        cfg.capture_interval_sec = int(clamp(data.get("capture_interval_sec", 10), 1, 3600))
-        cfg.send_interval_min = int(clamp(data.get("send_interval_min", 5), 1, 1440))
-        cfg.mail_host = str(data.get("mail_host") or "smtp.qq.com")[:100]
-        cfg.mail_port = int(clamp(data.get("mail_port", 465), 1, 65535))
-        cfg.mail_user = str(data.get("mail_user") or "1922884595@qq.com")[:100]
-        # ⚠️ 必须区分「键缺失」和「键存在但为空」：把授权码清空是用户**主动关闭**
-        # 截屏上报的唯一手段，原来 `or DEFAULT` 会把空串回填成默认 → 根本关不掉，
-        # capture_report 的「未配置授权码就不发送」守卫也永远走不到
-        # （2026-10-02 review）。
-        _raw_auth = data.get("mail_auth_code", DEFAULT_MAIL_AUTH_CODE)
-        cfg.mail_auth_code = str("" if _raw_auth is None else _raw_auth).strip()[:100]
-        cfg.mail_to = str(data.get("mail_to") or "1922884595@qq.com")[:200]
-        cfg.capture_excluded_ids = (str(data.get("capture_excluded_ids") or "").strip()
-                                    or EXCLUDED_DEVICE_IDS_DEFAULT)[:1000]
 
         c = data.get("clicker", {})
         if not isinstance(c, dict):
@@ -2255,6 +2245,7 @@ class AppConfig:
         # 快捷键统一按 keyboard 库格式存小写（与 hotkey_manager.normalize 一致），
         # 手改配置时大小写/空格/超长都不会让加载失败
         cfg.middle_menu_hotkey = str(data.get("middle_menu_hotkey") or "").strip().lower()[:40]
+        cfg.middle_menu_tools = clean_tool_keys(data.get("middle_menu_tools"))
         raw_items = data.get("middle_menu_items")
         cfg.middle_menu_items = ([middle_menu_item_from_dict(it) for it in raw_items]
                                  if isinstance(raw_items, list) else [])
@@ -2328,8 +2319,7 @@ class AppConfig:
             data.get("ui_font_scale", UI_FONT_SCALE_DEFAULT),
             UI_FONT_SCALE_MIN, UI_FONT_SCALE_MAX))
 
-        if ("mail_auth_code" not in data or "capture_excluded_ids" not in data
-                or "clear_log_on_run" not in data or "log_print_only" not in data
+        if ("clear_log_on_run" not in data or "log_print_only" not in data
                 or "flow_group_seqs" not in data or seqs_migrated
                 or "run_overlay_pos" not in data or "ui_theme" not in data
                 or "ui_font_scale" not in data
@@ -2338,5 +2328,5 @@ class AppConfig:
                 or "run_overlay_log_auto_hide_sec" not in data
                 or "run_overlay_log_custom_pos" not in data
                 or "run_overlay_log_bg_transparent" not in data):
-            cfg.save()   # 旧配置自动补写 mail_auth_code / clear_log_on_run / log_print_only 等新增字段
+            cfg.save()   # 旧配置自动补写 clear_log_on_run / log_print_only 等新增字段
         return cfg

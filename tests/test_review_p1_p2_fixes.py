@@ -83,20 +83,9 @@ class TestConfigLoadRobustness(unittest.TestCase):
         with open(config_mod.CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
 
-    def test_blank_mail_auth_code_stays_blank(self):
-        """★ 回归：清空授权码是用户主动关闭截屏上报的唯一手段，不能被回填。"""
-        self._write({"mail_auth_code": ""})
-        self.assertEqual(config_mod.AppConfig.load().mail_auth_code, "")
-
-    def test_missing_mail_auth_code_uses_default(self):
-        """键**缺失**时仍走默认值（保持原有行为）。"""
-        self._write({})
-        self.assertEqual(config_mod.AppConfig.load().mail_auth_code,
-                         config_mod.DEFAULT_MAIL_AUTH_CODE)
-
-    def test_null_mail_auth_code_becomes_blank(self):
-        self._write({"mail_auth_code": None})
-        self.assertEqual(config_mod.AppConfig.load().mail_auth_code, "")
+    # 原先这里还有三条 mail_auth_code 的用例（空串不回填默认 / 键缺失用默认 / null 变空）：
+    # 那是「清空授权码 = 用户主动关闭截屏上报」的守卫。2026-10-03 截图上报功能整体删除后，
+    # 该字段不复存在，用例一并移除。
 
     def test_top_level_array_self_heals(self):
         """顶层是数组：不该 AttributeError 崩掉，要走「损坏配置」自愈分支。"""
@@ -135,12 +124,6 @@ class TestSmtpCertificateVerification(unittest.TestCase):
             if m.call_args:
                 self.assertIn("context", m.call_args.kwargs,
                               "SMTP 必须显式传 context（默认是 CERT_NONE）")
-
-    def test_capture_report_passes_context(self):
-        src = Path(inspect.getfile(http_actor)).read_text(encoding="utf-8")
-        cap = Path(inspect.getfile(__import__("app.capture_report",
-                                              fromlist=["x"]))).read_text(encoding="utf-8")
-        self.assertIn("create_default_context", cap)
 
     def test_default_context_verifies(self):
         import ssl

@@ -8,14 +8,13 @@ import logging
 import os
 import sys
 
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QCursor
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMessageBox,
                                QProgressBar, QPushButton, QStatusBar, QTabWidget,
-                               QToolTip, QWidget)
+                               QToolButton, QToolTip, QWidget)
 
 from ..config import APP_NAME, AppConfig, ClickerConfig, PresserConfig
-from ..capture_report import stop as stop_capture
 from .. import hotkey_policy
 from ..hotkey_manager import HotkeyManager
 from ..keymap import hotkey_display
@@ -28,13 +27,19 @@ from .flow_tab import FlowTab
 from .frameless_window import FramelessMainWindow
 from .middle_menu_tab import MiddleMenuTab, build_menu
 from .presser_tab import PresserTab
+from .quick_access_tab import QuickAccessTab
 from .schedule_tab import ScheduleTab
 from .settings_tab import SettingsTab
+from .tools_tab import ToolsTab
 from .update_dialog import AutoDownloader, VersionFetcher
 
-# 基准设计分辨率与对应窗口尺寸：2560x1440 屏 → 1400x960（2026-09-04 由 1300x900 加大）
+# 基准设计分辨率与对应窗口尺寸：2560x1440 屏 → 1500x1030
+# （2026-09-04 由 1300x900 加大到 1400x960；2026-10-03 用户要求「默认打开尺寸稍微大一点」
+#  再加到 1500x1030。改基准而不是改缩放比例，可以让**所有分辨率**都同比例变大：
+#  1920x1080 由 1050x720 → 1125x772，2K/4K 由 1400x960 → 1500x1030；
+#  而小屏（≤1366 宽）本来就走 _MIN_WINDOW 下限，不受影响。）
 _BASE_SCREEN = (2560, 1440)
-_BASE_WINDOW = (1400, 960)
+_BASE_WINDOW = (1500, 1030)
 # 窗口尺寸下限（防止屏幕太小时缩到没法用）
 _MIN_WINDOW = (980, 660)
 
@@ -42,9 +47,9 @@ _MIN_WINDOW = (980, 660)
 def auto_window_size(screen_w: int, screen_h: int) -> tuple[int, int]:
     """按显示器分辨率动态计算主窗口尺寸。
 
-    以 2560x1440 屏对应 1400x960 为基准，按宽高各自比例取较小的缩放系数
+    以 2560x1440 屏对应 1500x1030 为基准，按宽高各自比例取较小的缩放系数
     （保证窗口完整落在屏幕内）：
-    - 分辨率 >= 基准（如 4K/2K）：保持 1400x960，不放大
+    - 分辨率 >= 基准（如 4K/2K）：保持 1500x1030，不放大
     - 分辨率 < 基准：等比缩小，但宽高都不小于最小窗口尺寸
     """
     if screen_w <= 0 or screen_h <= 0:
@@ -52,7 +57,7 @@ def auto_window_size(screen_w: int, screen_h: int) -> tuple[int, int]:
     scale = min(screen_w / _BASE_SCREEN[0], screen_h / _BASE_SCREEN[1])
     w = max(int(_BASE_WINDOW[0] * scale), _MIN_WINDOW[0])
     h = max(int(_BASE_WINDOW[1] * scale), _MIN_WINDOW[1])
-    # 大屏不放大：封顶到设计尺寸（1080p 以上保持 1400x960）
+    # 大屏不放大：封顶到设计尺寸（1080p 以上保持 1500x1030）
     w = min(w, _BASE_WINDOW[0])
     h = min(h, _BASE_WINDOW[1])
     return w, h
@@ -70,6 +75,110 @@ class _RunIndicator(QPushButton):
         if self.isVisible() and self.text():
             QToolTip.showText(self.mapToGlobal(QPoint(0, self.height() + 4)),
                               self.toolTip(), self)
+
+
+# 「设置」角标（标签栏最右侧的齿轮图标）的尺寸节奏（2026-10-03）
+CORNER_ICON = 18            # 齿轮图标尺寸
+CORNER_BTN = 28             # 按钮边长（正方形，才像"图标按钮"）
+CORNER_RADIUS = 7           # 悬停/选中底色的圆角
+CORNER_RIGHT_PAD = 12       # 按钮右边距：贴着窗口边缘会很局促（用户反馈"位置太丑"）
+
+
+def gear_icon(size: int = CORNER_ICON, color: str = "") -> QIcon:
+    """自绘的齿轮图标（**不依赖任何 emoji / 图标字体**）。
+
+    为什么不用字体图标：这是**常驻**的窗口元素，一旦系统缺那个字形就会变成一个空白按钮
+    （`frameless_window.CaptionButton` 里的窗口按钮就是因为这个才自绘的）。
+    颜色默认取当前主题的文字色，所以深色主题下也是亮的——主题切换时重生成一次即可
+    （见 `MainWindow._apply_window_theme`）。
+    """
+    from . import theme
+    color = color or theme.token("text")
+    scale = 4                       # 4x 超采样：小尺寸下边缘才干净
+    pixmap = QPixmap(size * scale, size * scale)
+    pixmap.setDevicePixelRatio(scale)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(color))
+        center = size / 2.0
+        r_body = size * 0.335       # 轮体半径
+        r_hole = size * 0.135       # 中心孔
+        r_tip = size * 0.47         # 齿顶半径
+        teeth, tooth_w = 8, size * 0.125
+        for i in range(teeth):
+            painter.save()
+            painter.translate(center, center)
+            painter.rotate(i * 360.0 / teeth)
+            painter.drawRoundedRect(
+                QRectF(-tooth_w / 2, -r_tip, tooth_w, r_tip - r_body + 1.0),
+                size * 0.02, size * 0.02)
+            painter.restore()
+        painter.drawEllipse(QPointF(center, center), r_body, r_body)
+        painter.setCompositionMode(QPainter.CompositionMode_Clear)
+        painter.drawEllipse(QPointF(center, center), r_hole, r_hole)
+    finally:
+        painter.end()
+    return QIcon(pixmap)
+
+
+def add_settings_corner(tabs: QTabWidget, settings_page: QWidget) -> QToolButton:
+    """把「设置」做成标签栏**最右侧**的齿轮图标入口，返回那个按钮。
+
+    为什么用 cornerWidget 而不是普通页签：`QTabBar` 的页签**只能从左往右排**，
+    多余空间一律留在右边，没有"把某个页签右对齐"的接口。而「设置」是配置入口、
+    不是日常操作页，放最右侧 + 只留图标更符合直觉。做法是：页签**照常加进
+    QTabWidget**（这样 `setCurrentWidget`、页面信号接线、`settings_tab` 属性
+    全都不受影响），只把它的页签按钮隐藏掉，改用这个角标按钮当入口。
+
+    ⚠️ 角标按钮**不能直接塞给 setCornerWidget**：cornerWidget 是**紧贴标签栏右端**
+    摆放的，直接放会顶到窗口右边缘、连悬停底色都被边界切一刀（2026-10-03 用户反馈
+    「位置太丑」）。这里套一层容器专门留出右侧呼吸位，并把按钮在垂直方向居中，
+    与页签的 `margin: 5px` 节奏对齐。
+    """
+    button = QToolButton()
+    button.setObjectName("settingsCorner")
+    button.setAutoRaise(True)
+    button.setCursor(Qt.PointingHandCursor)
+    button.setIconSize(QSize(CORNER_ICON, CORNER_ICON))
+    button.setFixedSize(CORNER_BTN, CORNER_BTN)     # 正方形，才像"图标按钮"
+    button.setFocusPolicy(Qt.NoFocus)               # 别抢 Tab 焦点
+    button.setToolTip("设置")
+
+    holder = QWidget()
+    holder.setObjectName("settingsCornerHolder")
+    lay = QHBoxLayout(holder)
+    lay.setContentsMargins(0, 0, CORNER_RIGHT_PAD, 0)
+    lay.setSpacing(0)
+    lay.addWidget(button, 0, Qt.AlignVCenter)
+    tabs.setCornerWidget(holder, Qt.TopRightCorner)
+
+    button.clicked.connect(lambda: tabs.setCurrentWidget(settings_page))
+    sync_settings_corner(button, tabs, settings_page)   # 初始外观
+    return button
+
+
+def sync_settings_corner(button: QToolButton, tabs: QTabWidget,
+                         settings_page: QWidget) -> None:
+    """按「当前是不是停在设置页」刷新齿轮的外观（图标色 + 悬停/选中底色）。
+
+    页签按钮被隐藏后，切到设置页时标签栏不会高亮任何一项——不给反馈的话
+    用户不知道自己"在设置里"。颜色走主题令牌，切主题由 hook 自动重映射；
+    但**图标像素不吃 QSS 的颜色重映射**，所以这里连图标一起重画。
+    """
+    from . import theme
+    tk = theme.token
+    active = tabs.currentWidget() is settings_page
+    # 常态用次要文字色：齿轮是"工具"而不是内容，压低一档才不与页签抢视线
+    button.setIcon(gear_icon(CORNER_ICON, tk("primary") if active
+                             else tk("text_dim")))
+    background = tk("primary_soft") if active else "transparent"
+    button.setStyleSheet(
+        f"QToolButton{{background:{background};border:none;"
+        f"border-radius:{CORNER_RADIUS}px;}}"
+        f"QToolButton:hover{{background:{tk('hover_bg')};}}")
 
 
 class MainWindow(FramelessMainWindow):
@@ -109,15 +218,33 @@ class MainWindow(FramelessMainWindow):
         self.flow_tab = FlowTab(cfg)
         self.schedule_tab = ScheduleTab(cfg, self.flow_tab)
         self.middle_menu_tab = MiddleMenuTab(cfg)
+        self.tools_tab = ToolsTab()
         self.settings_tab = SettingsTab(cfg)
+        # 中键菜单 / 鼠标连点 / 键盘连按 / 找图点击 合成「⚡ 快捷操作」一页
+        # （左侧导航 + 右侧内容）；四个控件对象与信号接线原样复用，只是不再各自占一个标签。
+        # ⚠️ 导航项**不带 emoji**：🖱/⌨/🖼 在按钮文本里实测渲染成缺字方块（只有 📋 正常），
+        # 设置页左侧导航也是纯文字，两页保持一致。
+        self.quick_tab = QuickAccessTab([
+            ("中键菜单", self.middle_menu_tab),
+            ("鼠标连点", self.clicker_tab),
+            ("键盘连按", self.presser_tab),
+            ("找图点击", self.finder_tab),
+        ])
         # 自动化流程是主功能，放第一个
         tabs.addTab(self.flow_tab, "🚀 自动化流程")
         tabs.addTab(self.schedule_tab, "⏰ 定时任务")
-        tabs.addTab(self.middle_menu_tab, "📋 中键菜单")
-        tabs.addTab(self.clicker_tab, "🖱 鼠标连点")
-        tabs.addTab(self.presser_tab, "⌨ 键盘连按")
-        tabs.addTab(self.finder_tab, "🖼 找图点击")
-        tabs.addTab(self.settings_tab, "⚙ 设置")
+        tabs.addTab(self.quick_tab, "⚡ 快捷操作")
+        # 「小工具」是日常使用页里最靠右的一个
+        tabs.addTab(self.tools_tab, "🧰 小工具")
+        # 「设置」是配置入口：页签加在最后但**隐藏按钮**，改用标签栏最右侧的齿轮图标
+        # 进入（见 add_settings_corner 的说明）。页签按钮反正不显示，就不给它设图标/文字了。
+        self.settings_tab_index = tabs.addTab(self.settings_tab, "")
+        tabs.tabBar().setTabVisible(self.settings_tab_index, False)
+        self.settings_btn = add_settings_corner(tabs, self.settings_tab)
+        tabs.currentChanged.connect(
+            lambda *_: sync_settings_corner(self.settings_btn, tabs,
+                                            self.settings_tab))
+        sync_settings_corner(self.settings_btn, tabs, self.settings_tab)
 
         # centralWidget = 标签页 + 底部可折叠日志面板 + 状态栏（都在圆角卡片的内容区里）
         from .log_panel import LogPanel
@@ -273,6 +400,7 @@ class MainWindow(FramelessMainWindow):
         self._middle_menu_open = False      # 正在走「弹菜单」循环，防重入
         self._middle_menu = None            # 当前弹着的菜单（再次触发时要关掉它）
         self._pending_middle_pos = None     # 挂起的新位置：关掉旧菜单后据此重开
+        self._pending_tool = ""             # 菜单里点了哪个九宫格工具（exec 返回后据此打开）
         # 触发方式快照：只在「中键开关 / 快捷键」真的变了才重注册全部全局热键。
         # 增删改菜单项也会发 changed，但那些操作不影响任何热键，不该被打断。
         self._menu_trigger = (bool(cfg.middle_menu_enabled), cfg.middle_menu_hotkey)
@@ -421,6 +549,10 @@ class MainWindow(FramelessMainWindow):
     def _apply_window_theme(self) -> None:
         """主题切换 / 最大化状态变化时重刷窗口级样式（含自绘标题栏）。"""
         self.apply_window_qss()
+        # 齿轮是按当前主题的颜色**画**出来的像素（不吃 QSS 颜色重映射），换主题要重画
+        button = getattr(self, "settings_btn", None)
+        if button is not None:
+            sync_settings_corner(button, self.tabs, self.settings_tab)
 
     def statusBar(self) -> QStatusBar:
         """卡片内的状态栏。
@@ -520,6 +652,28 @@ class MainWindow(FramelessMainWindow):
             return
         self.show_middle_menu()
 
+    def _on_middle_menu_tool(self, key: str) -> None:
+        """菜单里点了九宫格工具：先记下来再关菜单。
+
+        菜单里点工具**不能**靠 `menu.exec()` 的返回值回传——返回值只承载
+        「被触发的 QAction」，而工具是 QWidgetAction 里的普通按钮。所以统一走这条
+        回调：记进 `_pending_tool`，关掉菜单让 exec 返回，再由 `show_middle_menu`
+        的循环统一打开（保证「关闭菜单」这件事只有一处做）。
+        """
+        self._pending_tool = str(key or "")
+        if self._middle_menu is not None:
+            self._middle_menu.close()
+
+    def _open_middle_menu_tool(self, key: str) -> None:
+        """打开菜单里选中的小工具：与在「🧰 小工具」页点卡片走**同一条路径**。"""
+        from ..mini_apps import find_app
+        from .mini_window import open_mini_app
+        app = find_app(key)
+        if app is None:
+            self.statusBar().showMessage("中键菜单：该小工具已不存在，请重新配置", 4000)
+            return
+        open_mini_app(app, anchor=self)
+
     def show_middle_menu(self) -> None:
         """在光标处弹出中键菜单，选中条目则运行对应流程。
 
@@ -540,7 +694,8 @@ class MainWindow(FramelessMainWindow):
             return
         if QApplication.activeModalWidget() is not None:
             return
-        if not self.cfg.middle_menu_items:
+        # 只要「九宫格工具」或「流程菜单项」还有一样，菜单就值得弹
+        if not self.cfg.middle_menu_items and not self.cfg.middle_menu_tools:
             return
         self._middle_menu_open = True
         self._pending_middle_pos = QCursor.pos()
@@ -549,19 +704,27 @@ class MainWindow(FramelessMainWindow):
                 pos = self._pending_middle_pos
                 # 先清空：只有「这一轮弹窗期间」再次触发的才算新位置
                 self._pending_middle_pos = None
-                menu = build_menu(self.cfg.middle_menu_items, self.cfg.flows, self)
+                menu = build_menu(self.cfg.middle_menu_items, self.cfg.flows, self,
+                                  tools=self.cfg.middle_menu_tools,
+                                  on_tool=self._on_middle_menu_tool)
                 if menu is None:
                     self.statusBar().showMessage(
-                        "中键菜单：没有可运行的菜单项（关联流程可能已被删除）", 4000)
+                        "中键菜单：没有可运行的菜单项"
+                        "（关联流程可能已被删除，且没配置九宫格工具）", 4000)
                     break
                 self._middle_menu = menu
                 try:
                     chosen = menu.exec(pos)
                     # 必须在 deleteLater 之前把 data 取出来——菜单一删 QAction 也没了
                     flow_id = str(chosen.data() or "") if chosen is not None else ""
+                    tool_key = self._pending_tool
+                    self._pending_tool = ""
                 finally:
                     self._middle_menu = None
                     menu.deleteLater()   # 菜单挂在 self 名下，不删会每触发一次积一个
+                if tool_key:             # 点了九宫格工具 → 打开它，本轮结束
+                    self._open_middle_menu_tool(tool_key)
+                    break
                 if not flow_id:
                     continue             # 可能只是又被触发了一次 → 回循环看有无新位置
                 self._run_flow_from_middle_menu(flow_id)
@@ -569,6 +732,7 @@ class MainWindow(FramelessMainWindow):
         finally:
             self._middle_menu = None
             self._pending_middle_pos = None
+            self._pending_tool = ""
             self._middle_menu_open = False
 
     def _run_flow_from_middle_menu(self, flow_id: str) -> None:
@@ -1010,10 +1174,11 @@ class MainWindow(FramelessMainWindow):
         from ..overlay_actor import close_all as close_floating_images
         from ..power_overlay import close_all as close_power_countdown
         from .. import running_overlay
+        from .mini_window import close_all as close_mini_windows
+        close_mini_windows()           # 关掉还开着的小工具独立窗口
         close_floating_images()        # 销毁还留在桌面上的悬浮图片
         close_power_countdown()        # 销毁可能还留在屏幕下方的关机倒计时浮层
         running_overlay.close()        # 销毁左上角「运行中流程」红色浮层
-        stop_capture()          # 停止定时截屏上报线程
         self.schedule_tab.shutdown()   # 停止定时任务调度线程
         self.mouse_watcher.stop()      # 卸载全局鼠标钩子
         self.stop_all()

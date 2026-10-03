@@ -522,12 +522,13 @@ class TestAppConfigMigration(unittest.TestCase):
         with TempConfigPaths():
             write_json(config.CONFIG_PATH, {
                 "clicker": {"interval_ms": 1, "count": -5},
-                "capture_interval_sec": 99999,
+                "ui_font_scale": 9999,
             })
             cfg = AppConfig.load()
             self.assertEqual(cfg.clicker.interval_ms, 20)      # 下限
             self.assertEqual(cfg.clicker.count, 0)
-            self.assertEqual(cfg.capture_interval_sec, 3600)   # 上限
+            # 上限（原来这里用的是已随「截屏上报」一起删除的 capture_interval_sec）
+            self.assertEqual(cfg.ui_font_scale, config.UI_FONT_SCALE_MAX)
 
     def test_bad_region_dropped(self):
         with TempConfigPaths():

@@ -18,7 +18,7 @@ from PySide6.QtGui import QColor, QCursor
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog,
                                QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QMenu, QMessageBox, QPushButton,
-                               QVBoxLayout, QWidget)
+                               QVBoxLayout, QWidget, QWidgetAction)
 
 from .. import hotkey_policy
 from . import theme
@@ -27,6 +27,7 @@ from ..keymap import hotkey_display
 from .hotkey_edit import HotkeyEdit
 from .middle_menu_dialog import MiddleMenuDialog
 from .middle_menu_icons import ICON_SIZE, blank_icon, icon_for
+from .middle_menu_tools import ToolGridEditor, ToolGridWidget, resolve_tools
 from .widgets import set_variant
 
 _ROLE_ID = Qt.UserRole
@@ -34,50 +35,62 @@ _ROLE_ID = Qt.UserRole
 # 弹出菜单样式：文字左对齐、只留一点左边距。
 # 为什么要显式指定：QMenu 默认（Qt 会在左侧预留图标/勾选列）会把文字推到约 28px 处，
 # 菜单又窄，看上去像居中而不是靠左。这里用内联样式接管渲染，让文字紧贴左侧
-# 12px 处，并统一 hover 高亮与分隔线，与主界面配色（#1668a8 / #e8f1fa）保持一致。
+# 12px 处，并统一 hover 高亮与分隔线。
 # QMenu::icon 的 left 必须与 QMenu::item 的 padding-left 相同：图标占的就是这块空隙，
 # 两者不一致时「有图标的条目」和「留空的条目」文字左边缘会错开。
-_MENU_QSS = """
-QMenu {
-    background-color: #ffffff;
-    border: 1px solid #d8dee4;
+# 颜色走**主题令牌**（2026-10-03 改）：以前是写死的浅色，深色主题下菜单会白得刺眼；
+# 令牌在弹菜单那一刻求值（不是模块导入时），所以换主题后下一次弹出就是新配色。
+def menu_qss() -> str:
+    tk = theme.token
+    return f"""
+QMenu {{
+    background-color: {tk('card_bg')};
+    border: 1px solid {tk('border')};
     border-radius: 6px;
     padding: 4px 0px;
-}
-QMenu::item {
+}}
+QMenu::item {{
     padding: 6px 24px 6px 12px;
-    color: #24292f;
+    color: {tk('text')};
     background-color: transparent;
-}
-QMenu::icon {
+}}
+QMenu::icon {{
     left: 12px;
     width: 16px;
     height: 16px;
-}
-QMenu::item:selected {
-    background-color: #e8f1fa;
-    color: #1668a8;
-}
-QMenu::item:disabled {
-    color: #aab2bb;
-}
-QMenu::separator {
+}}
+QMenu::item:selected {{
+    background-color: {tk('primary_soft')};
+    color: {tk('primary')};
+}}
+QMenu::item:disabled {{
+    color: {tk('text_muted')};
+}}
+QMenu::separator {{
     height: 1px;
-    background-color: #eef1f4;
+    background-color: {tk('border_light')};
     margin: 4px 10px;
-}
+}}
 """
 
 
-def build_menu(items, flows, parent=None) -> "QMenu | None":
+def build_menu(items, flows, parent=None, tools=None, on_tool=None) -> "QMenu | None":
     """按菜单项列表构造运行时弹出的 QMenu；无可展示条目时返回 None。
+
+    菜单分两段（2026-10-03 重新设计）：
+    - **上面**：九宫格工具（`tools` 里的小程序 key，最多 9 格，3 列）——
+      `on_tool(key)` 由调用方负责打开小程序并关菜单；
+    - **下面**：关联流程的菜单项，点一下运行对应流程。
 
     关联流程已被删除的菜单项在运行时直接跳过（管理页会用红字提示去修）；
     返回的 QMenu 只把条目摆好，动作连接由调用方负责。
+
+    `tools` 为空（或全部 key 都认不出来）时**整段不插入**，菜单与改造前完全一致。
     """
     by_id = {f.id: f for f in flows or []}
     entries = [(it, by_id[it.flow_id]) for it in (items or []) if it.flow_id in by_id]
-    if not entries:
+    grid_keys = [key for key, _app in resolve_tools(tools or [])]
+    if not entries and not grid_keys:
         return None
     # 图标是「可选」的：先把 key 解析成真实图标（认不出的 key 会解析成空图标），
     # 只要有**一条真能画出图标**，就给没图标的条目补一个透明占位图标，否则 Qt 只让
@@ -88,8 +101,19 @@ def build_menu(items, flows, parent=None) -> "QMenu | None":
     resolved = [icon_for(it.icon) for it, _ in entries]
     mixed_icons = any(not ic.isNull() for ic in resolved)
     menu = QMenu(parent)
-    menu.setStyleSheet(_MENU_QSS)
+    menu.setStyleSheet(menu_qss())
     menu.setToolTipsVisible(True)      # 悬停显示所关联流程名（自定义名称时尤其有用）
+
+    # ---- 上段：九宫格工具 ----
+    if grid_keys:
+        grid = ToolGridWidget(grid_keys, on_tool or (lambda _key: None))
+        holder = QWidgetAction(menu)
+        holder.setDefaultWidget(grid)
+        menu.addAction(holder)
+        if entries:
+            menu.addSeparator()        # 与下面的流程条目之间拉一条分隔线
+
+    # ---- 下段：关联流程 ----
     for idx, ((it, flow), icon) in enumerate(zip(entries, resolved)):
         if it.separator_before and idx > 0:      # 首条目的分隔线没有意义，跳过
             menu.addSeparator()
@@ -141,9 +165,8 @@ class MiddleMenuTab(QWidget):
         root.setSpacing(6)
 
         top = QHBoxLayout()
-        title = QLabel("📋 中键菜单")
-        title.setStyleSheet("font-size: 13pt; font-weight: 600; color: #24292f;")
-        top.addWidget(title)
+        # 页内不再重复标题：本页已被「⚡ 快捷操作」页托管，左侧导航里就写着「📋 中键菜单」
+        # （与「小工具」页去掉页内标题同一处理，2026-10-03）
         hint = QLabel("按鼠标中键或下面设置的快捷键，即可在鼠标位置弹出菜单；点击条目运行对应流程。")
         hint.setStyleSheet("color:#8a939c;")
         top.addWidget(hint)
@@ -215,6 +238,12 @@ class MiddleMenuTab(QWidget):
         self.preview_btn.clicked.connect(self._preview)
         bar.addWidget(self.preview_btn)
         root.addLayout(bar)
+
+        # 九宫格工具（2026-10-03）：中键菜单最上面那 3×3 格，最多 9 个小工具。
+        # 放在流程列表**上方**，与弹出菜单里「上面宫格、下面流程」的顺序一致。
+        self.tools_editor = ToolGridEditor(self.cfg.middle_menu_tools)
+        self.tools_editor.changed.connect(self._on_tools_changed)
+        root.addWidget(self.tools_editor)
 
         self.list = QListWidget()
         self.list.setObjectName("middleMenuList")
@@ -360,6 +389,11 @@ class MiddleMenuTab(QWidget):
         self._sync_buttons()
         self.changed.emit()
 
+    def _on_tools_changed(self) -> None:
+        """九宫格工具增删：写回配置并落盘（菜单下次弹出即生效，无需重启）。"""
+        self.cfg.middle_menu_tools = self.tools_editor.keys()
+        self.changed.emit()
+
     # ---------- 开关 / 触发方式 ----------
     def _on_enable_toggled(self, checked: bool) -> None:
         self.cfg.middle_menu_enabled = bool(checked)
@@ -400,7 +434,10 @@ class MiddleMenuTab(QWidget):
 
     # ---------- 预览 / 外部联动 ----------
     def _preview(self) -> None:
-        menu = build_menu(self._items, self.cfg.flows, self)
+        """预览菜单外观（提示里已说明：预览中点条目不会运行流程，工具也不会打开）。"""
+        menu = build_menu(self._items, self.cfg.flows, self,
+                          tools=self.cfg.middle_menu_tools,
+                          on_tool=lambda _key: menu.close())
         if menu is None:
             self._status("还没有可用的菜单项（关联流程可能已被删除）")
             return

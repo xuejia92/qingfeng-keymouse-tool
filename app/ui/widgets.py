@@ -1,12 +1,66 @@
 """各标签页共用的参数控件与按钮着色辅助。"""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from functools import lru_cache
+
+from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtGui import QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QDoubleSpinBox, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QPushButton, QSpinBox,
                                QWidget)
 
 from . import theme
+
+_EMOJI_FONT = "Segoe UI Emoji"
+
+
+@lru_cache(maxsize=256)
+def emoji_icon(emoji: str, size: int) -> QIcon:
+    """把 emoji 字符画成指定尺寸的 QIcon（空 emoji 返回空图标）。
+
+    与中键菜单的预设图标同一套思路（见 middle_menu_icons）：配置里只存 emoji
+    **字符**，显示时用系统 emoji 字体现画，换机器/换字体都不会失效。
+    原来的私有实现散在「小工具」页里，中键菜单九宫格也要用，所以提升到这里
+    （2026-10-03），免得再抄一份。
+
+    ⚠️ 必须在有 QApplication 之后调用（QPixmap 不能早于应用对象创建）。
+    """
+    if not emoji:
+        return QIcon()
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        font = QFont(_EMOJI_FONT)
+        font.setPixelSize(int(size * 0.84))
+        painter.setFont(font)
+        painter.drawText(QRect(0, 0, size, size), Qt.AlignCenter, emoji)
+    finally:
+        painter.end()           # 不显式结束的话 pixmap 不完整
+    return QIcon(pixmap)
+
+
+def blank_icon(size: int = 16) -> QIcon:
+    """等尺寸的全透明图标（给「没有图标」的条目占位，保证文字列对齐）。"""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    return QIcon(pixmap)
+
+
+def human_size(num: int) -> str:
+    """字节数 -> 人类可读（1024 进制，保留一位小数）。
+
+    局域网传输、剪贴板两个小工具都要显示体积，实现放这里只留一份
+    （2026-10-03；原来私有在 lan_transfer 里）。
+    """
+    size = float(max(0, num))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return (f"{int(size)} {unit}" if unit == "B"
+                    else f"{size:.1f} {unit}")
+        size /= 1024.0
+    return f"{size:.1f} TB"
+
 
 # ---------------------------------------------------------------------------
 # 表单排版节奏（设置页 / 各编辑弹窗共用，2026-10-01）

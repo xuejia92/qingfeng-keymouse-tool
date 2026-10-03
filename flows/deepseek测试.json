@@ -1,7 +1,7 @@
 {
   "id": "4095138a1de2",
   "name": "deepseek测试",
-  "group": "测试使用",
+  "group": "测试",
   "steps": [
     {
       "type": "deepseek",

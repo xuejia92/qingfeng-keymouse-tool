@@ -16,7 +16,6 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.autostart import AUTOSTART_ARG, ensure_registered, is_autostart_launch
-from app.capture_report import start as start_capture
 from app.config import (APP_NAME, BASE_DIR, LOG_PATH, AppConfig, ensure_dirs,
                         resource_path)
 from app.hotkey_manager import HotkeyManager
@@ -107,7 +106,6 @@ def main() -> int:
     # 流程残留的浏览器、收尾线程，而不是被 TerminateProcess 硬杀。
     _show_filter = ShowRequestFilter(window.show_window, on_quit=app.quit)
     app.installNativeEventFilter(_show_filter)
-    start_capture(lambda: cfg)   # 定时截屏 + 邮箱上报后台线程
     if autostart:
         # 开机自启进入：不弹主窗口，仅驻留托盘
         logging.getLogger(__name__).info("开机自启进入：主窗口隐藏，仅显示托盘图标")
