@@ -167,9 +167,52 @@ class TestFloatingImageWidget(_QtTestCase):
         self.assertEqual(live_count(), 0)
 
     # ---------- 关闭入口 ----------
-    def test_close_button_hidden_until_hover(self):
+    def test_close_button_is_always_visible(self):
+        """★ 回归：关闭按钮**常显**（2026-10-04 用户反馈「关闭按钮看不见」）。
+
+        以前是「默认藏起来、鼠标移入才出现」，用户压根不知道右上角有东西；
+        图片本身还可能是白的，浅色按钮在浅色图上更是等于没有。
+        """
         win = show_image(self.png)
-        self.assertFalse(win.close_btn.isVisible())
+        self.assertTrue(win.close_btn.isVisible(), "一打开就该看得见关闭按钮")
+        self.assertTrue(win.close_btn.isEnabled())
+
+    def test_close_button_contrasts_with_light_image(self):
+        """浅色图上也必须看得见：按钮是**深色**半透明底。"""
+        win = show_image(self.png)
+        qss = win.close_btn.styleSheet()
+        self.assertIn("background: rgba(24,28,33", qss)   # 深色底
+        self.assertNotIn("background: rgba(255,255,255", qss,
+                         "别再用浅色底——浅色图上会看不见")
+
+    def test_close_button_icon_is_drawn_not_a_glyph(self):
+        """★ 回归：「×」必须是**画**出来的图标。
+
+        以前按钮上写的是文字「×」，实测在按钮里只画出 5 个白像素（字体回退到没有
+        该字形的字体时约等于没画），用户看到的就是「一个没有符号的圆点」。
+        这里数一下图标里到底有没有白像素，把这种退化钉死。
+        """
+        win = show_image(self.png)
+        self.assertFalse(win.close_btn.icon().isNull(), "关闭按钮必须有图标")
+        image = win.close_btn.icon().pixmap(16, 16).toImage()
+        whites = 0
+        for x in range(image.width()):
+            for y in range(image.height()):
+                color = image.pixelColor(x, y)
+                if color.alpha() > 0 and color.name() == "#ffffff":
+                    whites += 1
+        self.assertGreater(whites, 10, "自绘的 × 应当画出足够多的白像素")
+        self.assertEqual(win.close_btn.text(), "", "别再靠文字画 ×")
+        # 图标本身也是自绘的：源码里不许出现字体绘制
+        import inspect
+        from app import overlay_actor
+        source = inspect.getsource(overlay_actor.close_icon)
+        self.assertIn("QPainter", source)
+        self.assertNotIn("drawText", source)
+
+    def test_close_button_stays_visible_after_hover(self):
+        """悬停只做加强提示，不再把按钮藏起来。"""
+        win = show_image(self.png)
         win.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self.assertTrue(win.close_btn.isVisible())
 

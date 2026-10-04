@@ -151,6 +151,31 @@ class TestEngineMatching(unittest.TestCase):
         self._down(VK_Q)                            # 松开后再次按下：再次触发
         self.assertEqual(seen, [1, 1])
 
+    def test_auto_repeat_does_not_refire(self):
+        """★ 按住不放（系统自动重复）只触发一次。
+
+        不过滤的话按住热键会每秒触发十几次：中键菜单被"关掉又立刻重开"，
+        看起来就是**怎么都关不掉**（2026-10-04 用户反馈）。
+        """
+        seen = []
+        self.eng.register("ctrl+q", lambda: seen.append(1))
+        self._down(VK_CTRL)
+        for _ in range(20):                         # 按住不放：连续的 KEYDOWN
+            self._down(VK_Q)
+        self.assertEqual(seen, [1], "自动重复不该重复触发")
+
+    def test_auto_repeat_of_a_modified_hotkey_still_fires_after_release(self):
+        """自动重复被压掉后，松开再按仍然要能触发（别把热键弄瘫）。"""
+        seen = []
+        self.eng.register("ctrl+q", lambda: seen.append(1))
+        self._down(VK_CTRL)
+        self._down(VK_Q)
+        self._down(VK_Q)                            # 自动重复
+        seen.clear()
+        self._up(VK_Q)
+        self._down(VK_Q)
+        self.assertEqual(seen, [1], "松开再按要正常触发")
+
 
 class TestEngineLifecycle(unittest.TestCase):
     def test_listener_starts_and_stops(self):

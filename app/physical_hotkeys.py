@@ -179,11 +179,17 @@ class PhysicalHotkeyEngine(QObject):
                 return True
             is_down = msg in (WM_KEYDOWN, WM_SYSKEYDOWN)
             if is_down:
+                # ⚠️ 已经在按下状态又收到 KEYDOWN = 系统的**自动重复**（按住不放）。
+                # 不过滤的话按住热键会每秒触发十几次：中键菜单会被"关掉又立刻重开"，
+                # 看起来就是**怎么都关不掉**（2026-10-04 用户反馈）。
+                # 真正的连按是 down/up/down，中间有 up 把它从 _pressed 里摘掉，不受影响。
+                repeat = name in self._pressed
                 self._pressed.add(name)
             else:
+                repeat = False
                 self._pressed.discard(name)
-            if not is_down or name in _MODIFIERS:
-                return True                     # 松开 / 修饰键本身不触发
+            if not is_down or name in _MODIFIERS or repeat:
+                return True                     # 松开 / 修饰键 / 自动重复都不触发
 
             candidate = self._candidate(name)
             with self._lock:

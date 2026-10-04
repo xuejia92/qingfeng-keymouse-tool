@@ -3,7 +3,11 @@
 作用范围与触发条件
 ------------------
 程序运行期间在**系统范围**内监听鼠标；当用户**松开鼠标中键**时发一次
-middleClicked 信号（携带屏幕物理坐标），主窗口据此在光标处弹出中键菜单。
+middleClicked 信号（携带屏幕**物理**坐标），主窗口据此在光标处弹出中键菜单。
+⚠️ 信号里的坐标是**物理像素**（MSLLHOOKSTRUCT.pt 就是物理的），而 Qt 的
+`geometry()` / `QCursor.pos()` 是**逻辑像素** —— 显示缩放 125% 时两者差 1.24 倍。
+调用方要跟 Qt 的矩形做比较时，必须换算或直接用 `QCursor.pos()`
+（2026-10-04 中键菜单"点外面关不掉"就是踩了这条）。
 
 为什么是「抬起」而不是「按下」
 ------------------------------
@@ -39,10 +43,12 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import sys
 import threading
+import time
 from ctypes import wintypes
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +58,8 @@ HC_ACTION = 0
 PM_NOREMOVE = 0x0000
 WM_QUIT = 0x0012
 WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_RBUTTONDOWN = 0x0204
 WM_MBUTTONDOWN = 0x0207
 WM_MBUTTONUP = 0x0208
 LLMHF_INJECTED = 0x00000001
@@ -59,6 +67,10 @@ LLMHF_LOWER_IL_INJECTED = 0x00000002
 
 _INJECTED_MASK = LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED
 _MIDDLE_MESSAGES = (WM_MBUTTONDOWN, WM_MBUTTONUP)
+# 「菜单开着时」要留意按下的键：上下文中任意键按下都该让菜单知道（点外面就关）
+_BUTTON_DOWNS = (WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN)
+_BUTTON_NAMES = {WM_LBUTTONDOWN: "left", WM_RBUTTONDOWN: "right",
+                 WM_MBUTTONDOWN: "middle"}
 
 
 class MSLLHOOKSTRUCT(ctypes.Structure):
@@ -89,6 +101,30 @@ def should_suppress(msg: int, flags: int) -> bool:
     只拦中键，不碰其它鼠标事件，避免影响用户正常操作。
     """
     return msg in _MIDDLE_MESSAGES and not is_injected(flags)
+
+
+# ---- 钩子体检（低层钩子会被 Windows 静默摘掉，见 _check_hook_alive）----
+HOOK_WATCHDOG_MS = 2000        # 体检间隔
+_HOOK_SILENCE_SEC = 1.0        # 光标动了、但我们这么久没收到任何事件 → 可疑
+_POS_TOLERANCE_PX = 4          # 光标位置容差（避免"恰好在检查之间动了一下"误判）
+_MISMATCH_LIMIT = 2            # 连续可疑这么多次才动手重装
+
+
+def cursor_position() -> tuple[int, int] | None:
+    """当前光标位置（**物理**像素，与钩子数据同一坐标系）；拿不到返回 None。
+
+    ⚠️ 必须先设 argtypes/restype（工程铁律：ctypes 调 Win32 一律显式声明）。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        bind_win32_functions()
+        point = wintypes.POINT()
+        if not ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+            return None
+        return int(point.x), int(point.y)
+    except Exception:
+        return None
 
 
 # GIL 强制切换间隔：默认 5ms 太长，见 lower_gil_switch_interval() 的说明。
@@ -155,6 +191,8 @@ def bind_win32_functions() -> None:
         kernel32.GetModuleHandleW.restype = ctypes.c_void_p      # HMODULE
         kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
         kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        user32.GetCursorPos.restype = wintypes.BOOL
         _BOUND = True
     except Exception:
         log.debug("声明 Win32 函数签名失败（继续按默认签名工作）", exc_info=True)
@@ -169,6 +207,12 @@ class MouseMenuWatcher(QObject):
     """
 
     middleClicked = Signal(int, int)   # 中键抬起：屏幕物理坐标 (x, y)
+    # 任意鼠标键按下（左/右/中）的**物理**坐标与按钮名。
+    # ⚠️ 一开始只在"菜单开着"时才发这个信号（拿 menu_open 当门），后来改成**一律上报**：
+    # 那个门只是个优化，可一旦它判断有误（比如标志没来得及置上），"点外面关菜单"
+    # 整条链路就直接哑掉，而且完全没有痕迹。现在由主窗口自己判断要不要理会
+    # （它本来就会先看菜单在不在），多发一个空转信号的成本可以忽略。
+    menuButtonPressed = Signal(int, int, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -180,6 +224,14 @@ class MouseMenuWatcher(QObject):
         self._hook = None          # HHOOK
         self._proc = None          # ctypes 回调对象，必须保留引用，否则被 GC 回收会崩
         self._suppress = False
+        self._menu_open = False        # 菜单是否正弹着（开着期间吞掉中键，见 set_menu_open）
+        # 钩子体检状态（见 _check_hook_alive）
+        self._last_event_pos: tuple[int, int] | None = None
+        self._last_event_at = 0.0
+        self._pos_mismatch = 0
+        self._watchdog = QTimer(self)
+        self._watchdog.setInterval(HOOK_WATCHDOG_MS)
+        self._watchdog.timeout.connect(self._check_hook_alive)
         self._lock = threading.Lock()
         self._ready = threading.Event()
         self._started_ok = False
@@ -201,6 +253,25 @@ class MouseMenuWatcher(QObject):
     def suppress(self) -> bool:
         with self._lock:
             return self._suppress
+
+    def set_menu_open(self, open_: bool) -> None:
+        """菜单弹出/收起时调用：**菜单开着期间一律吞掉中键**（2026-10-04）。
+
+        为什么需要这个独立开关（不能直接借 `set_suppress`，那会覆盖用户的选择）：
+        菜单开着时，用户"再按一次中键"是唯一可靠的关闭手势——
+        Qt 弹窗靠鼠标捕获接点击，而浏览器在中键按下时会进入「自动滚动」并**抢走捕获**，
+        左键点空白处根本送不到菜单上（这就是「菜单出现在浏览器上面就无法退出」）。
+        而全局钩子**不看捕获**，中键按下/抬起它一定收得到。
+
+        吞掉中键还有第二个作用：不然用户每次尝试关闭，浏览器都会顺手执行
+        「新标签页 / 关闭标签页 / 自动滚动」，既没关掉菜单又多了副作用。
+        """
+        with self._lock:
+            self._menu_open = bool(open_)
+
+    def menu_open(self) -> bool:
+        with self._lock:
+            return self._menu_open
 
     def start(self) -> bool:
         """启用监听（用户开关打开、或启动时调用）。"""
@@ -260,7 +331,54 @@ class MouseMenuWatcher(QObject):
         self._ready.wait(timeout=3.0)
         if not self._started_ok:
             log.warning("中键菜单监听未启动（低层鼠标钩子装载失败）")
+        else:
+            # 体检基线：装好那一刻的光标位置。没有基线的话，"钩子从头就没收到过
+            # 事件"这种情况（比如刚装上就死了）永远判不出来。
+            self._last_event_pos = cursor_position()
+            self._last_event_at = time.monotonic()
+            self._pos_mismatch = 0
+        self._watchdog.start()         # 体检：被系统静默摘掉时自动重装
         return bool(self._started_ok)
+
+    def _check_hook_alive(self) -> None:
+        """钩子体检：低层鼠标钩子可能被 Windows **静默摘掉**。
+
+        低层钩子的回调超过 `LowLevelHooksTimeout`（默认几百毫秒）没返回，系统就直接把
+        钩子卸掉，而且**不通知**。本工程的钩子回调是 Python、要和主线程抢 GIL，
+        超时是现实存在的（`lower_gil_switch_interval` 就是为这个挖出来的）。
+        后果：中键唤不出菜单、"点外面关菜单"失灵，而 `is_running()` 仍然是 True
+        （线程还活着）——用户看到的就是"有时候不生效"。
+
+        判据：**系统光标位置和我们最后收到的事件位置对不上，且已经很久没收到事件**。
+        （只看 `GetLastInputInfo` 不行：键盘输入也会让它变新，纯打字就会误判。）
+        连续可疑 `_MISMATCH_LIMIT` 次才动手，避免"恰好在两次检查之间动了鼠标"。
+        """
+        if not self._started_ok or self._suspended or not self._enabled:
+            return
+        pos = cursor_position()
+        last = self._last_event_pos
+        if pos is None or last is None:
+            return
+        if (abs(pos[0] - last[0]) <= _POS_TOLERANCE_PX
+                and abs(pos[1] - last[1]) <= _POS_TOLERANCE_PX):
+            self._pos_mismatch = 0
+            return
+        if time.monotonic() - self._last_event_at < _HOOK_SILENCE_SEC:
+            return                    # 刚收到过事件，光标这点差异说明不了什么
+        self._pos_mismatch += 1
+        if self._pos_mismatch < _MISMATCH_LIMIT:
+            return
+        self._pos_mismatch = 0
+        log.warning("鼠标钩子疑似被系统静默摘掉（光标动了却收不到事件），重新安装")
+        self._reinstall()
+
+    def _reinstall(self) -> None:
+        """卸掉重装钩子（被系统摘掉后唯一的恢复办法）。"""
+        self._last_event_pos = None
+        self._last_event_at = time.monotonic()
+        self._stop_thread()
+        if self._enabled and not self._suspended:
+            self._ensure_running()
 
     def _stop_thread(self) -> None:
         """停止监听线程并卸载钩子。
@@ -272,6 +390,7 @@ class MouseMenuWatcher(QObject):
         宁可让 `is_running()` 误报「还活着」，也不能让上层以为干净而装第二个钩子。
         """
         tid, self._thread_id = self._thread_id, 0
+        self._watchdog.stop()          # 线程都没了就别再体检
         if tid:
             try:
                 self._user32.PostThreadMessageW(tid, WM_QUIT, 0, 0)
@@ -355,17 +474,47 @@ class MouseMenuWatcher(QObject):
             return 0
 
     def _handle_event(self, n_code, w_param, l_param) -> bool:
-        """处理一次钩子事件；返回是否需要吞掉（仅真实中键、且开启了拦截）。"""
-        if n_code != HC_ACTION or w_param not in _MIDDLE_MESSAGES:
+        """处理一次钩子事件；返回是否需要吞掉（真实中键，且拦截开着/菜单正弹着）。
+
+        ⚠️ 顺序不能换：**先发触发信号、再决定吞不吞**。菜单开着时的中键要既是
+        「一次触发」（用来关菜单）又要「被吞掉」（别让浏览器执行中键的默认行为）。
+
+        菜单开着时还会额外上报**任意鼠标键按下**（`menuButtonPressed`）：
+        菜单弹在别的程序上面时 Qt 弹窗拿不到鼠标捕获，"点外面就关"根本不会触发，
+        只能靠这个全局钩子兜住（它不看捕获、也不看前台，一定收得到）。
+        """
+        if n_code != HC_ACTION:
+            return False
+        if w_param == WM_MOUSEMOVE:
+            # 体检用：只记光标位置（读两个 int 就返回）。这条路径最热，绝不能做别的事。
+            data = ctypes.cast(l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            self._last_event_pos = (int(data.pt.x), int(data.pt.y))
+            self._last_event_at = time.monotonic()
+            return False
+        menu_open = self.menu_open()
+        middle = w_param in _MIDDLE_MESSAGES
+        if not middle and w_param not in _BUTTON_DOWNS:
             return False
         data = ctypes.cast(l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
         flags = int(data.flags)
         if is_injected(flags):
             return False        # 本工具自己注入的合成点击：放行，不弹菜单也不拦
+        x, y = int(data.pt.x), int(data.pt.y)
+        self._last_event_pos = (x, y)
+        self._last_event_at = time.monotonic()
+        if w_param in _BUTTON_DOWNS:
+            # 一律上报（不拿 menu_open 当门，见信号定义处的说明）
+            self.menuButtonPressed.emit(x, y, _BUTTON_NAMES.get(w_param, ""))
+        if not middle:
+            return False
+        if not middle:
+            return False
         if should_trigger(w_param, flags):
-            self.middleClicked.emit(int(data.pt.x), int(data.pt.y))
-        if self.suppress() and should_suppress(w_param, flags):
-            return True
+            self.middleClicked.emit(x, y)
+        if should_suppress(w_param, flags):
+            # 用户勾了「拦截中键」，或者菜单正开着（后者见 set_menu_open）
+            if self.suppress() or menu_open:
+                return True
         return False
 
 

@@ -14,6 +14,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+from PySide6.QtWidgets import QWidget
 
 from app import screenshot_actor
 from app.config import FlowStep, default_step_params
@@ -282,6 +283,115 @@ class TestScreenshotDialog(unittest.TestCase):
         with mock.patch("app.ui.flow_dialog.QMessageBox.warning") as warn:
             dlg.accept()
         warn.assert_not_called()
+
+
+# ---------- 框选 + 抓图（select_region_and_grab）----------
+
+class _FakeMainWindow(QWidget):
+    """只带「截屏时隐藏/恢复」两个钩子的假主窗口。
+
+    `_main_window()` 是靠 `QApplication.topLevelWidgets()` 里找这两个方法认出来的，
+    所以必须是无父对象的真 QWidget（不用 MainWindow，太重）。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.hidden_when_grabbed: list[bool] = []
+
+    def _hide_for_capture(self):
+        self.hide()
+
+    def _restore_after_capture(self):
+        self.show()
+
+
+class TestSelectRegionAndGrab(unittest.TestCase):
+    """★ 2026-10-04：框选与抓图必须在**同一次隐藏窗口**里做完。
+
+    用户反馈「截的图有时候不对」：遮罩给用户看的是打开遮罩那一刻的快照（主窗口已藏），
+    而抓图发生在主窗口被恢复之后——截出来就多了个主窗口，且能否来得及画出来是竞态。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.win = _FakeMainWindow()
+        self.win.show()
+        # 直接打桩 _main_window：别依赖 QApplication.topLevelWidgets() 里"第一个
+        # 长得像主窗口的东西"——上一个用例 deleteLater 掉的窗口在事件循环转完之前
+        # 还赖在顶层窗口列表里，会拿到已析构的 C++ 对象（实测就炸在这儿）。
+        patcher = mock.patch.object(screenshot_actor, "_main_window",
+                                    return_value=self.win)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.win.deleteLater)
+
+    def _run(self, rect=(11, 22, 333, 44), cancelled=False, image=None):
+        from PySide6.QtCore import QTimer
+
+        win = self.win
+        seen = {"region": None, "visible_at_grab": None}
+        image = _img() if image is None else image
+
+        def fake_capture(on_region=None, on_cancelled=None, **kw):
+            # 用 singleShot 排队：select_region_and_grab 是「先 run_screen_capture、
+            # 再 loop.exec()」，同步回调会赶在 exec 之前，事件循环就等不到了。
+            if cancelled:
+                QTimer.singleShot(0, on_cancelled)
+            else:
+                QTimer.singleShot(0, lambda: on_region(rect))
+
+        def fake_grab(mode, region=""):
+            seen["region"] = (mode, region)
+            seen["visible_at_grab"] = win.isVisible()
+            return image
+
+        with mock.patch("app.capture_overlay.run_screen_capture", fake_capture), \
+                mock.patch.object(screenshot_actor, "grab_image", fake_grab), \
+                mock.patch.object(screenshot_actor, "SELECT_SETTLE_SEC", 0):
+            got_rect, got_img = screenshot_actor.select_region_and_grab()
+        return win, seen, got_rect, got_img
+
+    def test_grab_happens_while_window_is_still_hidden(self):
+        win, seen, rect, img = self._run()
+        self.assertEqual(rect, (11, 22, 333, 44))
+        self.assertIsNotNone(img)
+        self.assertIs(seen["visible_at_grab"], False,
+                      "抓图时主窗口必须是隐藏状态——否则会把刚恢复的主窗口截进去")
+        self.assertTrue(win.isVisible(), "抓完图之后主窗口要恢复显示")
+
+    def test_region_string_is_physical_int(self):
+        _win, seen, _rect, _img = self._run(rect=(10.9, 20.1, 100.7, 50.2))
+        self.assertEqual(seen["region"], ("region", "10,20,100,50"))
+
+    def test_cancel_returns_nothing_and_skips_grab(self):
+        win, seen, rect, img = self._run(cancelled=True)
+        self.assertIsNone(rect)
+        self.assertIsNone(img)
+        self.assertIsNone(seen["region"], "取消框选就不该抓图")
+        self.assertTrue(win.isVisible(), "取消也要把主窗口恢复回来")
+
+    def test_window_is_restored_even_if_grab_explodes(self):
+        """抓图抛异常（比如 mss 挂了）也必须恢复主窗口，不然程序就"消失"了。"""
+        from PySide6.QtCore import QTimer
+
+        win = self.win
+
+        def fake_capture(on_region=None, **kw):
+            QTimer.singleShot(0, lambda: on_region((1, 2, 30, 40)))
+
+        def boom(mode, region=""):
+            raise RuntimeError("mss 挂了")
+
+        with mock.patch("app.capture_overlay.run_screen_capture", fake_capture), \
+                mock.patch.object(screenshot_actor, "grab_image", boom), \
+                mock.patch.object(screenshot_actor, "SELECT_SETTLE_SEC", 0):
+            with self.assertRaises(RuntimeError):
+                screenshot_actor.select_region_and_grab()
+        self.assertTrue(win.isVisible(), "异常路径也必须恢复主窗口")
 
 
 if __name__ == "__main__":

@@ -80,19 +80,24 @@ def grab_region(region: str) -> np.ndarray:
     return img
 
 
-def recognize(region: str = "", lang: str = "ch", multi_ocr: bool = True) -> tuple[bool, object, str]:
+def recognize(region: str = "", lang: str = "ch", multi_ocr: bool = True,
+              image=None) -> tuple[bool, object, str]:
     """识别区域文字。
 
     返回 (成功?, 结果, 说明)。失败时结果可能为 None。
     成功结果：
       multi_ocr=True  -> list[str]
       multi_ocr=False -> str
+
+    `image` 给出时**直接用它**、不再抓屏：框选类步骤必须这么做——它要在
+    「主窗口还藏着」的同一段时间里把图抓下来交给这里，否则重新抓屏会把刚恢复的
+    主窗口一起识别进去（2026-10-04，见 screenshot_actor.select_region_and_grab）。
     """
     ok, why = is_available()
     if not ok:
         return False, None, why
     try:
-        img = grab_region(region)
+        img = image if image is not None else grab_region(region)
         ocr = _get_ocr(lang)
         # RapidOCR 返回 (result, elapse)，result 为 [[box, text, score], ...] 或 None
         result, _elapse = ocr(img)

@@ -70,7 +70,7 @@
   "schedule_groups": [],
   "collapsed_schedule_groups": [],
   "middle_menu_enabled": false,
-  "middle_menu_suppress": false,
+  "middle_menu_suppress": true,
   "middle_menu_hotkey": "alt+q",
   "middle_menu_tools": [
     "calculator",
@@ -111,6 +111,6 @@
   "run_overlay_log_max_height": 180,
   "run_overlay_log_auto_hide_sec": 60,
   "run_overlay_log_custom_pos": "",
-  "ui_theme": "sakura",
+  "ui_theme": "lavender",
   "ui_font_scale": 100
 }

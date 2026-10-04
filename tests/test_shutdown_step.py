@@ -49,7 +49,16 @@ def _params(**overrides) -> dict:
 
 
 class _ShutdownTestBase(unittest.TestCase):
-    """统一把倒计时轮询压短 + 隔离 config/flows/log 到临时目录。"""
+    """统一把倒计时轮询压短 + 隔离 config/flows/log 到临时目录。
+
+    并且**统一把 Esc 监听换成替身**：真监听是进程级键盘钩子，只要有真实 Esc 按键
+    落在提醒倒计时那零点几秒里，倒计时就会被判成「用户取消」，于是
+    `test_warn_window_waits_before_firing`（断言命令发出去了）和
+    `test_shows_with_action_label_and_font_size`（断言 ok）会**随机失败**。
+    实测确认过机制：另起一个进程注入 Esc，`_warn_before_power` 当场返回
+    「已取消重启（按下 Esc 键）」（2026-10-04 全量套件里中过一次，单跑怎么都过）。
+    Esc 取消本身由 TestEscCancel 用替身确定性地覆盖，这里换成替身不丢覆盖。
+    """
 
     def setUp(self):
         self._tmp = TempConfigPaths()
@@ -60,6 +69,12 @@ class _ShutdownTestBase(unittest.TestCase):
             patcher = mock.patch.object(tasks_mod, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # _FakeEscListener 定义在文件后面（运行时才解析，没问题）；
+        # _EscTestBase 会再打一层自己的补丁，后起的生效、LIFO 回滚，互不干扰。
+        patcher = mock.patch.object(cancel_key_mod, "EscListener",
+                                    lambda on_esc: _FakeEscListener(on_esc))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class _FakeDatetime:
@@ -568,6 +583,7 @@ class TestWarnOverlay(_ShutdownTestBase):
 
     def setUp(self):
         super().setUp()
+        # Esc 监听已由 _ShutdownTestBase 统一换成替身（见那里的说明）
         import app.power_overlay as power_overlay_mod
         self.overlay = power_overlay_mod
         patcher = mock.patch.object(power_overlay_mod, "show_countdown",

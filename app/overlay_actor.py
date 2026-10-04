@@ -4,7 +4,8 @@
 步骤执行时只在主线程创建并显示悬浮窗，随即返回成功，**不等用户关闭**，
 后续步骤照常往下跑。悬浮窗一直留在桌面上，直到用户手动关掉它。
 
-关闭方式（都可用）：右上角 ✕ 按钮、Esc、以及可选的「单击图片即关闭」。
+关闭方式（都可用）：右上角**常显**的 ✕ 按钮、Esc、以及可选的「单击图片即关闭」。
+✕ 按钮是自绘图标（见 `close_icon`）——不借字体字形，任何环境都画得出来。
 
 显示尺寸：默认按**原图尺寸**（100%）显示；只有比屏幕还大时才会收敛到能完整显示，
 免得窗口溢出屏幕连关闭按钮都够不着。运行时可以手动缩放：
@@ -32,15 +33,45 @@ from __future__ import annotations
 import os
 import weakref
 
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer
-from PySide6.QtGui import QCursor, QPixmap
+from PySide6.QtCore import QPoint, QPointF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QLabel, QPushButton, QWidget)
 
 # 预设角落位置距屏幕可用边缘的留白
 EDGE_MARGIN = 24
 _CLOSE_SIZE = 22
+_CLOSE_ICON = 13          # 关闭按钮里那个「×」画多大
 # 拖拽超过这个距离就认为用户在「移动窗口」而不是「单击」
 _DRAG_THRESHOLD = 4
+
+
+def close_icon(size: int = _CLOSE_ICON, color: str = "#ffffff") -> QIcon:
+    """自绘的「×」图标（**不依赖任何字体字形**）。
+
+    为什么不用文字「×」：实测它在按钮里只画出个位数的白像素——字体回退到一个没有
+    该字形的字体时约等于没画，用户看到的就是「一个没有符号的圆点」，也就是
+    「关闭按钮看不见」（2026-10-04 用户反馈）。自绘两条圆头线，任何字体环境都一致。
+    （与 frameless 的窗口按钮、设置齿轮同一套教训：常驻图形别借字形。）
+    """
+    scale = 4                       # 4x 超采样，小尺寸下线条才干净
+    pixmap = QPixmap(size * scale, size * scale)
+    pixmap.setDevicePixelRatio(scale)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(color))
+        pen.setWidthF(max(1.0, size * 0.17))
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        margin = size * 0.27        # 四周留白，别顶到圆边
+        painter.drawLine(QPointF(margin, margin),
+                         QPointF(size - margin, size - margin))
+        painter.drawLine(QPointF(size - margin, margin),
+                         QPointF(margin, size - margin))
+    finally:
+        painter.end()
+    return QIcon(pixmap)
 
 # ---- 运行时手动缩放 ----
 DEFAULT_SCALE = 100       # 默认 100% = 原图尺寸（不放大也不缩小）
@@ -98,15 +129,21 @@ class FloatingImage(QWidget):
         # 让鼠标事件穿透到窗口本身，拖动/单击关闭/滚轮缩放才不会被图片吃掉
         self.image_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        # ×（U+00D7）而不是 ✕：后者在雅黑下缺字形渲染成小点（见 frameless.py 注释）
-        self.close_btn = QPushButton("×", self)
+        # ⚠️ 这颗按钮**常显**（2026-10-04 用户反馈「关闭按钮看不见」）：
+        # 以前是「默认藏起来、鼠标移入才出现」，用户根本不知道右上角有东西；
+        # 而且那个「×」是**文字**，实测只画出个位数像素（约等于没画）。
+        # 现在：常显 + 深色半透明底 + **自绘的 × 图标**（见 close_icon），
+        # 无论底下是亮图还是暗图都看得见；悬停再换成主题蓝给出可点反馈。
+        self.close_btn = QPushButton(self)
         self.close_btn.setFixedSize(_CLOSE_SIZE, _CLOSE_SIZE)
         self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.setIcon(close_icon())
+        self.close_btn.setIconSize(QSize(_CLOSE_ICON, _CLOSE_ICON))
         self.close_btn.setToolTip("关闭悬浮图片")
         self.close_btn.setStyleSheet(
-            "QPushButton { border: none; border-radius: 11px;"
-            " background: rgba(255,255,255,0.82); color: #24292f; font-size: 13px; }"
-            "QPushButton:hover { background: #1668a8; color: #ffffff; }")
+            "QPushButton { border: 1px solid rgba(255,255,255,0.75);"
+            " border-radius: 11px; background: rgba(24,28,33,0.68); }"
+            "QPushButton:hover { background: #1668a8; border-color: #ffffff; }")
         self.close_btn.clicked.connect(self.close)
 
         # 缩放百分比浮标：缩放时短暂浮现，让用户知道现在是原图尺寸还是被放大了
@@ -121,7 +158,6 @@ class FloatingImage(QWidget):
         self._badge_timer.timeout.connect(self.zoom_badge.hide)
 
         self._apply_zoom(self._scale_pct, show_badge=False)
-        self.close_btn.hide()        # 默认不显示，免得挡住图片内容；鼠标移入再出来
 
     # ---------- 缩放 ----------
     @property
@@ -197,18 +233,12 @@ class FloatingImage(QWidget):
                          anchor=ev.globalPosition().toPoint())
         ev.accept()
 
-    # ---------- 悬停显示关闭按钮 ----------
+    # ---------- 悬停（按钮常显，这里只做加强提示）----------
     def enterEvent(self, ev):    # noqa: N802 (Qt 命名)
-        self.close_btn.show()
+        # 关闭按钮是**常显**的（见 __init__ 的说明）；鼠标移入时把它抬到最上层，
+        # 免得被后画的缩放浮标之类盖住。
         self.close_btn.raise_()
         super().enterEvent(ev)
-
-    def leaveEvent(self, ev):    # noqa: N802 (Qt 命名)
-        # 鼠标移到子控件（关闭按钮）上时，父窗口同样会收到 Leave，
-        # 所以要用「光标是否仍在窗口矩形内」判断，否则按钮会一闪一闪。
-        if not self.rect().contains(self.mapFromGlobal(QCursor.pos())):
-            self.close_btn.hide()
-        super().leaveEvent(ev)
 
     # ---------- 拖动 / 单击关闭 ----------
     def mousePressEvent(self, ev):    # noqa: N802 (Qt 命名)

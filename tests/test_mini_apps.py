@@ -23,7 +23,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QSizePolicy
 
 from app import mini_apps
 from app.mini_apps import MiniApp
@@ -113,17 +113,111 @@ class TestToolsTab(_QtCase):
         self.assertIn(mini_apps.all_apps()[0].desc, card.toolTip())
         self.assertEqual(card.iconSize().width(), tools_tab_mod.CARD_ICON)
 
-    def test_grid_is_three_columns(self):
+    def test_cards_flow_according_to_columns(self):
+        """卡片位置由**当前列数**决定，不再是写死的三列（2026-10-04 改自适应）。"""
+        with mock.patch.object(mini_apps, "_APPS",
+                               [_fake_app(f"k{i}", f"第{i}项") for i in range(6)]):
+            tab = ToolsTab()
+            span = tools_tab_mod.CARD_W + tools_tab_mod.CARD_GAP
+            tab._apply_width(span * 2)
+            self.assertEqual(tab.columns(), 2)
+            positions = [tab.grid.getItemPosition(tab.grid.indexOf(c))[:2]
+                         for c in tab.cards()]
+        self.assertEqual(positions, [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)])
+
+    def test_columns_for_width(self):
+        """列数换算的边界：放不下也至少 1 列，超宽则封顶。"""
+        span = tools_tab_mod.CARD_W + tools_tab_mod.CARD_GAP
+        self.assertEqual(ToolsTab.columns_for_width(0), 1)
+        self.assertEqual(ToolsTab.columns_for_width(10), 1)
+        self.assertEqual(ToolsTab.columns_for_width(span), 1)
+        self.assertEqual(ToolsTab.columns_for_width(span * 2), 2)
+        self.assertEqual(ToolsTab.columns_for_width(span * 3 + 1), 3)
+        self.assertEqual(ToolsTab.columns_for_width(span * 100),
+                         tools_tab_mod.MAX_COLUMNS)
+
+    def test_width_drives_column_count(self):
+        with mock.patch.object(mini_apps, "_APPS",
+                               [_fake_app(f"k{i}", f"第{i}项") for i in range(8)]):
+            tab = ToolsTab()
+            tab._apply_width(200)
+            narrow = tab.columns()
+            tab._apply_width(1200)
+            wide = tab.columns()
+        self.assertEqual(narrow, 1)
+        self.assertGreater(wide, narrow, "窗口变宽应当排下更多列")
+        # 变窄以后卡片要收回来
+        tab._apply_width(200)
+        self.assertEqual(tab.columns(), narrow)
+        self.assertEqual(
+            tab.grid.getItemPosition(tab.grid.indexOf(tab.cards()[1]))[:2], (1, 0))
+
+    def test_same_width_does_not_relayout(self):
+        """列数没变时不碰任何控件：拖动窗口不该反复重排。"""
         with mock.patch.object(mini_apps, "_APPS",
                                [_fake_app(f"k{i}", f"第{i}项") for i in range(4)]):
             tab = ToolsTab()
-            grid = tab.grid
-            positions = [grid.getItemPosition(grid.indexOf(c))
-                         for c in tab.cards()]
-        self.assertEqual(positions[0][:2], (0, 0))
-        self.assertEqual(positions[1][:2], (0, 1))
-        self.assertEqual(positions[2][:2], (0, 2))
-        self.assertEqual(positions[3][:2], (1, 0), "第四张卡片应当换行")
+            tab._apply_width(600)
+            with mock.patch.object(tab, "_layout_cards") as relayout:
+                tab._apply_width(600)
+                tab._apply_width(600 + 1)       # 仍落在同一列数上
+        self.assertFalse(relayout.called, "列数没变就不该重排")
+
+    def test_stretch_column_follows_column_count(self):
+        with mock.patch.object(mini_apps, "_APPS",
+                               [_fake_app(f"k{i}", f"第{i}项") for i in range(4)]):
+            tab = ToolsTab()
+            span = tools_tab_mod.CARD_W + tools_tab_mod.CARD_GAP
+            tab._apply_width(span * 2)
+        self.assertEqual(tab.grid.columnStretch(2), 1)
+        self.assertEqual(tab.grid.columnStretch(3), 0)
+        self.assertEqual(tab.grid.columnStretch(0), 0)
+
+    def test_holder_resize_triggers_column_recompute(self):
+        """触发点绑在**卡片容器**的 resizeEvent 上（页面 resize 时它还没跟上）。
+
+        直接投递一个 QResizeEvent：`resize()` 在离屏（控件从未 show）下不保证
+        立刻派发，投事件才能确定性地验证"容器宽度变化 -> 回调"这条契约。
+        """
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QResizeEvent
+
+        with mock.patch.object(mini_apps, "_APPS",
+                               [_fake_app(f"k{i}", f"第{i}项") for i in range(4)]):
+            tab = ToolsTab()
+        calls = []
+        tab.grid_holder._on_width_changed = calls.append
+        tab.grid_holder.resizeEvent(
+            QResizeEvent(QSize(900, 300), QSize(600, 300)))
+        self.assertEqual(calls, [900], "容器宽度变化要把新宽度交给外面重算列数")
+
+    def test_cards_are_smaller_than_before(self):
+        """用户要求"每个宫格宽高都小一点"：钉住尺寸别再涨回去。"""
+        with mock.patch.object(mini_apps, "_APPS",
+                               [_fake_app("k0", "第0项")]):
+            tab = ToolsTab()
+        card = tab.cards()[0]
+        self.assertEqual((card.width(), card.height()),
+                         (tools_tab_mod.CARD_W, tools_tab_mod.CARD_H))
+        self.assertLess(tools_tab_mod.CARD_W, 168)
+        self.assertLess(tools_tab_mod.CARD_H, 130)
+
+    def test_holder_can_shrink_below_its_grid_minimum(self):
+        """★ 回归：容器横向必须 Ignored，否则「列数被自己的最小宽度锁死」。
+
+        卡片是 `setFixedSize`，于是 QGridLayout 的**最小宽度** = 当前列数 × 卡宽 + 间距；
+        而 setWidgetResizable 的滚动区不会把容器压到它自己的最小宽度以下 ——
+        实测页面宽 560 时容器仍是 568（= 4 列的最小宽度），回调永远算不出更少的列，
+        卡片直接被裁掉。Ignored 之后容器宽度才真正跟随视口。
+        """
+        with mock.patch.object(mini_apps, "_APPS",
+                               [_fake_app(f"k{i}", f"第{i}项") for i in range(6)]):
+            tab = ToolsTab()
+            tab._apply_width(1200)          # 先排成多列，把网格最小宽度撑起来
+            self.assertEqual(tab.grid_holder.sizePolicy().horizontalPolicy(),
+                             QSizePolicy.Ignored)
+            tab._apply_width(200)
+        self.assertEqual(tab.columns(), 1)
 
     def test_click_opens_mini_window(self):
         tab = ToolsTab()

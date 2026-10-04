@@ -4,10 +4,11 @@
 网络层统一 mock（translate_actor._http_get），只验证解析、分片、回退、重试、
 变量写入、展示开关等逻辑。真实联网翻译靠手工冒烟：跑一遍步骤，在遮罩上框住
 英文文字，看变量里是否拿到中文译文。
-OCR 同样 mock，不加载 RapidOCR 模型；屏幕遮罩/框选也 mock（select_region）。
+OCR 同样 mock，不加载 RapidOCR 模型；屏幕遮罩/框选也 mock（select_region_and_grab）。
 
 注意：截图区域**不在编辑期预设**（2026-09-15 起改为运行时由用户框选），
-所以每个用例都必须打桩 screenshot_actor.select_region，否则会真的弹屏幕遮罩。
+所以每个用例都必须打桩 `screenshot_actor.select_region_and_grab`，否则会真的弹屏幕遮罩。
+（2026-10-04 起框选与抓图合并成一次调用：图要在"主窗口仍隐藏"时抓出来再交给 OCR。）
 """
 from __future__ import annotations
 
@@ -18,6 +19,8 @@ import unittest
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import numpy as np
 
 import app.screenshot_actor as shot_actor
 from app import translate_actor
@@ -228,13 +231,21 @@ class TestTranslateWithMockedHttp(unittest.TestCase):
 # ---------- run_shot_translate_step ----------
 
 class TestShotTranslateStep(unittest.TestCase):
-    """区域改运行时框选后，每个用例都要把框选打桩（见模块 docstring）。"""
+    """区域改运行时框选后，每个用例都要把框选打桩（见模块 docstring）。
+
+    ⚠️ 2026-10-04 起框选与抓图是**同一个动作**（`select_region_and_grab`）：
+    图必须在"主窗口仍隐藏"的那一段里抓出来，再交给 OCR。所以这里给 OCR 打桩时
+    断言的是**收到的图片**，而不再是 region 字符串。
+    """
+
+    RECT = (10, 20, 300, 80)
 
     def setUp(self):
+        self.img = np.full((2, 3, 3), 9, dtype=np.uint8)
         p_ui = mock.patch.object(shot_actor, "ui_call",
                                  side_effect=lambda fn: fn())
-        p_region = mock.patch.object(shot_actor, "select_region",
-                                     return_value=(10, 20, 300, 80))
+        p_region = mock.patch.object(shot_actor, "select_region_and_grab",
+                                     return_value=(self.RECT, self.img))
         self.ui_call = p_ui.start()
         self.select_region = p_region.start()
         self.addCleanup(p_ui.stop)
@@ -340,7 +351,7 @@ class TestShotTranslateStep(unittest.TestCase):
         self.assertIn("翻译结果为空", why)
 
     def test_languages_timeout_proxy_and_region_passed_through(self):
-        """语言/超时/代理照旧透传；区域来自**运行时框选**（不再是 params 里的值）。"""
+        """语言/超时/代理照旧透传；识别的图来自**运行时框选**（不再是 params 里的区域）。"""
         seen = {}
 
         def fake_translate(text, source=None, target=None, timeout=None, proxy=None):
@@ -352,7 +363,7 @@ class TestShotTranslateStep(unittest.TestCase):
             run_shot_translate_step({"variable": "t",
                                      "source_lang": "en", "target_lang": "ja",
                                      "timeout_sec": 7.5, "proxy": "127.0.0.1:7890"}, {})
-        self.assertEqual(ocr_mock.call_args.kwargs["region"], "10,20,300,80")
+        self.assertIs(ocr_mock.call_args.kwargs["image"], self.img)
         self.assertEqual(seen["source"], "en")
         self.assertEqual(seen["target"], "ja")
         self.assertEqual(seen["timeout"], 7.5)
@@ -363,20 +374,33 @@ class TestShotTranslateStep(unittest.TestCase):
         """遮罩是 QWidget：必须经 ui_call 调度到主线程，不能在后台线程直接建。"""
         with self._patch_ocr(["Hello"]), self._patch_translate():
             run_shot_translate_step({"variable": "t"}, {})
-        self.ui_call.assert_called_once_with(shot_actor.select_region)
+        self.ui_call.assert_called_once_with(shot_actor.select_region_and_grab)
         self.select_region.assert_called_once_with()
 
+    def test_ocr_reuses_the_captured_image(self):
+        """★ 回归：OCR 必须吃框选那一步抓回来的图，**不能自己再抓一次屏**。
+
+        再抓一次就会把「框选结束、主窗口已经恢复显示」之后的画面识别进去——
+        用户框的是 A，识别的是"A + 刚弹回来的主窗口"（2026-10-04 反馈的
+        「截的图有时候不对」就是这条链路）。
+        """
+        with self._patch_ocr(["Hello"]) as ocr_mock, self._patch_translate():
+            run_shot_translate_step({"variable": "t"}, {})
+        self.assertIs(ocr_mock.call_args.kwargs["image"], self.img)
+        self.assertNotIn("region", ocr_mock.call_args.kwargs
+                         if isinstance(ocr_mock.call_args.kwargs, dict) else {})
+
     def test_legacy_region_param_is_ignored(self):
-        """旧流程里残留的 region 必须被忽略，实际用的是用户这次框选的区域。"""
+        """旧流程里残留的 region 必须被忽略，实际用的是用户这次框选抓到的图。"""
         with self._patch_ocr(["Hello"]) as ocr_mock, self._patch_translate():
             ok, _ = run_shot_translate_step(
                 {"variable": "t", "region": "0,0,9999,9999"}, {})
         self.assertTrue(ok)
-        self.assertEqual(ocr_mock.call_args.kwargs["region"], "10,20,300,80")
+        self.assertIs(ocr_mock.call_args.kwargs["image"], self.img)
 
     def test_cancel_selection_fails_without_ocr(self):
         """Esc 取消框选即判失败，且不去做 OCR / 翻译（不静默跳过继续跑）。"""
-        self.select_region.return_value = None
+        self.select_region.return_value = (None, None)
         with self._patch_ocr(["Hello"]) as ocr_mock, self._patch_translate() as tr:
             ok, why = run_shot_translate_step({"variable": "t"}, {})
         self.assertFalse(ok)
@@ -384,8 +408,17 @@ class TestShotTranslateStep(unittest.TestCase):
         ocr_mock.assert_not_called()
         tr.assert_not_called()
 
+    def test_missing_image_is_reported(self):
+        """框选带回区域但没带回图（不该发生）：明确报错，别拿空图去 OCR。"""
+        self.select_region.return_value = (self.RECT, None)
+        with self._patch_ocr(["Hello"]) as ocr_mock:
+            ok, why = run_shot_translate_step({"variable": "t"}, {})
+        self.assertFalse(ok)
+        self.assertIn("没取到", why)
+        ocr_mock.assert_not_called()
+
     def test_tiny_selection_fails(self):
-        self.select_region.return_value = (10, 20, 0, 50)
+        self.select_region.return_value = ((10, 20, 0, 50), self.img)
         with self._patch_ocr(["Hello"]) as ocr_mock:
             ok, why = run_shot_translate_step({"variable": "t"}, {})
         self.assertFalse(ok)
@@ -398,7 +431,7 @@ class TestShotTranslateStep(unittest.TestCase):
 
         def fake_select():
             stop.set()
-            return (1, 2, 30, 40)
+            return (1, 2, 30, 40), self.img
 
         self.select_region.side_effect = fake_select
         with self._patch_ocr(["Hello"]) as ocr_mock:

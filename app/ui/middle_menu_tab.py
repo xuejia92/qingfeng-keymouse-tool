@@ -167,7 +167,8 @@ class MiddleMenuTab(QWidget):
         top = QHBoxLayout()
         # 页内不再重复标题：本页已被「⚡ 快捷操作」页托管，左侧导航里就写着「📋 中键菜单」
         # （与「小工具」页去掉页内标题同一处理，2026-10-03）
-        hint = QLabel("按鼠标中键或下面设置的快捷键，即可在鼠标位置弹出菜单；点击条目运行对应流程。")
+        hint = QLabel("按鼠标中键或下面设置的快捷键，即可在鼠标位置弹出菜单；"
+                      "点击条目运行对应流程。关闭方式：再按一次中键 / Esc / 点菜单外面。")
         hint.setStyleSheet("color:#8a939c;")
         top.addWidget(hint)
         top.addStretch(1)

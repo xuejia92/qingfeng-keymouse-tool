@@ -777,9 +777,15 @@ def run_shot_translate_step(p: dict, variables: dict,
     if not var:
         return False, "未指定译文变量"
 
-    # 运行时框选要翻译的区域（遮罩是 QWidget，必须经 ui_call 调度到主线程）
-    from . import screenshot_actor
-    rect = screenshot_actor.ui_call(screenshot_actor.select_region)
+    # 运行时框选要翻译的区域 + **趁主窗口还藏着**把这块抓下来
+    # （遮罩是 QWidget，必须经 ui_call 调度到主线程；抓图同理必须在同一次隐藏里完成，
+    #  否则会把恢复出来的主窗口一起 OCR，见 select_region_and_grab 的说明）
+    from . import ocr as ocr_actor, screenshot_actor
+    try:
+        rect, img = screenshot_actor.ui_call(
+            screenshot_actor.select_region_and_grab)
+    except Exception as e:
+        return False, f"框选失败：{type(e).__name__}: {e}"
     if stop is not None and stop.is_set():
         return False, "已手动停止"
     if not rect:
@@ -790,11 +796,11 @@ def run_shot_translate_step(p: dict, variables: dict,
         return False, f"框选区域无效：{rect!r}"
     if w < 1 or h < 1:
         return False, "框选区域过小"
-    region = f"{x},{y},{w},{h}"
+    if img is None:
+        return False, "翻译失败：没取到框选的画面"
 
-    # 1) 截图 + 文字识别（区域来自上面的框选）
-    from . import ocr as ocr_actor
-    ok, lines, why = ocr_actor.recognize(region=region, multi_ocr=True)
+    # 1) 文字识别（直接吃上面那张图，不再重新抓屏——重新抓屏就会抓到现在的主窗口）
+    ok, lines, why = ocr_actor.recognize(image=img, multi_ocr=True)
     if not ok:
         return False, why
     lines = [str(x).strip() for x in (lines or []) if str(x).strip()]
@@ -1039,8 +1045,13 @@ def run_manual_shot_step(p: dict, variables: dict,
     if stop is not None and stop.is_set():
         return False, "已手动停止"
 
-    # 1) 运行时框选区域
-    rect = screenshot_actor.ui_call(screenshot_actor.select_region)
+    # 1) 运行时框选 + **趁主窗口还藏着**抓图（两件事必须在同一次隐藏里做完，
+    #    否则会把恢复出来的主窗口截进去，见 select_region_and_grab 的说明）
+    try:
+        rect, img = screenshot_actor.ui_call(
+            screenshot_actor.select_region_and_grab)
+    except Exception as e:
+        return False, f"截图失败：{type(e).__name__}: {e}"
     if stop is not None and stop.is_set():
         return False, "已手动停止"
     if not rect:
@@ -1048,15 +1059,10 @@ def run_manual_shot_step(p: dict, variables: dict,
     x, y, w, h = rect
     if int(w) < 1 or int(h) < 1:
         return False, "框选区域过小"
-    region = f"{int(x)},{int(y)},{int(w)},{int(h)}"
+    if img is None:
+        return False, "截图失败：没取到画面"
 
-    # 2) 抓取框选区域
-    try:
-        img = screenshot_actor.grab_image("region", region)
-    except Exception as e:
-        return False, f"截图失败：{type(e).__name__}: {e}"
-
-    # 3) 自选保存位置（主窗口刚恢复显示，稍等一下再弹，避免对话框压在窗口重绘上）
+    # 2) 自选保存位置（主窗口刚恢复显示，稍等一下再弹，避免对话框压在窗口重绘上）
     time.sleep(MANUAL_SHOT_SETTLE_SEC)
     prefix = (p.get("default_name") or "").strip() or "手动截图"
     default_name = f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.png"

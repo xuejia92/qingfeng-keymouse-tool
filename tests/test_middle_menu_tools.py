@@ -33,6 +33,44 @@ from tests._env import TempConfigPaths  # noqa: E402
 KNOWN = "calculator"            # 内置小程序，注册表里一定有
 OTHER = "startup_items"
 
+_ESC_PATCHER = None
+
+
+class _FakeEscListener:
+    """替身全局 Esc 监听：show_middle_menu 会给菜单挂真的进程级键盘钩子，
+    测试里没必要（详见 test_middle_menu_trigger.setUpModule 的说明）。"""
+
+    def __init__(self, on_esc):
+        self.on_esc = on_esc
+
+    def start(self):
+        return True
+
+    def stop(self):
+        pass
+
+    def press(self):
+        self.on_esc()
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
+        return False
+
+
+def setUpModule():      # noqa: N802（unittest 约定）
+    global _ESC_PATCHER
+    _ESC_PATCHER = mock.patch.object(mw_mod.cancel_key, "EscListener",
+                                     _FakeEscListener)
+    _ESC_PATCHER.start()
+
+
+def tearDownModule():   # noqa: N802（unittest 约定）
+    if _ESC_PATCHER is not None:
+        _ESC_PATCHER.stop()
+
 
 class _QtCase(unittest.TestCase):
 
@@ -281,6 +319,29 @@ class _Status:
         self.messages.append(text)
 
 
+class _FakeWatcher:
+    """替身中键监听器：show_middle_menu 会用它开/关「菜单期间吞中键」。"""
+
+    def __init__(self):
+        self.suppress_value = None
+        self.menu_open_value = None
+
+    def set_suppress(self, value):
+        self.suppress_value = bool(value)
+
+    def set_menu_open(self, value):
+        self.menu_open_value = bool(value)
+
+    def is_running(self):
+        return True
+
+    def start(self):
+        return True
+
+    def stop(self):
+        pass
+
+
 class _Shell:
     """不跑 __init__ 的 MainWindow 壳，只装被测方法要用的属性。"""
 
@@ -297,6 +358,9 @@ class _Shell:
         self.win._middle_menu = None
         self.win._pending_middle_pos = None
         self.win._pending_tool = ""
+        self.win._menu_swallow_trigger_until = 0.0
+        self.watcher = _FakeWatcher()
+        self.win.mouse_watcher = self.watcher
         self.status = _Status()
         self.win.statusBar = lambda: self.status
         self.opened: list[str] = []
@@ -354,6 +418,8 @@ class TestMainWindowToolWiring(_QtCase):
             shell.win.show_middle_menu()
         self.assertTrue(build.called)
         self.assertEqual(build.call_args.kwargs.get("tools"), [KNOWN])
+        self.assertIs(shell.watcher.menu_open_value, False,
+                      "菜单收起后要把「吞中键」关掉")
 
     def test_nothing_configured_shows_nothing(self):
         shell = _Shell(tools=[], items=[])

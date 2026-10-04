@@ -89,14 +89,19 @@ class TestProcessIsSelf(unittest.TestCase):
 
 
 class TestTryAcquire(unittest.TestCase):
-    """try_acquire 需要 QCoreApplication 才能用 QLockFile。"""
+    """try_acquire 需要 QCoreApplication 才能用 QLockFile。
+
+    用 QApplication（GUI）而不是 QCoreApplication：后者会让
+    `QApplication.instance()` 以为"应用已存在"，之后同进程里任何 GUI 调用
+    （activeModalWidget / QCursor.pos / QPixmap…）都会**访问违规崩进程**。
+    """
 
     @classmethod
     def setUpClass(cls):
         global _APP
-        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtWidgets import QApplication
 
-        _APP = QCoreApplication.instance() or QCoreApplication([])
+        _APP = QApplication.instance() or QApplication([])
 
     def test_fresh_path_acquires(self):
         import tempfile
@@ -172,14 +177,14 @@ class TestRemoveLockFile(unittest.TestCase):
 
 
 class TestShowRequest(unittest.TestCase):
-    """二次启动置前：广播消息与过滤器（Windows 消息机制，需 QCoreApplication）。"""
+    """二次启动置前：广播消息与过滤器（Windows 消息机制，需 Qt 应用实例）。"""
 
     @classmethod
     def setUpClass(cls):
         global _APP
-        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtWidgets import QApplication
 
-        _APP = QCoreApplication.instance() or QCoreApplication([])
+        _APP = QApplication.instance() or QApplication([])
 
     @unittest.skipUnless(sys.platform == "win32", "Windows 消息机制")
     def test_message_id_stable_and_positive(self):

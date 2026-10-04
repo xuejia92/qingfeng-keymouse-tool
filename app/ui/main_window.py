@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMessageBox,
                                QToolButton, QToolTip, QWidget)
 
 from ..config import APP_NAME, AppConfig, ClickerConfig, PresserConfig
-from .. import hotkey_policy
+from .. import cancel_key, hotkey_policy
 from ..hotkey_manager import HotkeyManager
 from ..keymap import hotkey_display
 from ..mouse_menu import MouseMenuWatcher
@@ -42,6 +43,12 @@ _BASE_SCREEN = (2560, 1440)
 _BASE_WINDOW = (1500, 1030)
 # 窗口尺寸下限（防止屏幕太小时缩到没法用）
 _MIN_WINDOW = (980, 660)
+# 中键在"菜单外面按下"关掉菜单后，这段时间内的中键**抬起**不再触发重开。
+# 一次中键 = 按下 + 抬起两个事件，按下已经把它当"开关"用掉了（见
+# _on_menu_button_pressed 的中键分支）；不吞掉抬起就会"关掉又立刻重开"。
+# 用**时间戳**而不是布尔标志：万一抬起事件丢了，也只会吞掉这一瞬的中键，
+# 不会把之后真正想唤菜单的那次点击也吃掉。
+MENU_SWALLOW_TRIGGER_SEC = 0.8
 
 
 def auto_window_size(screen_w: int, screen_h: int) -> tuple[int, int]:
@@ -183,6 +190,8 @@ def sync_settings_corner(button: QToolButton, tabs: QTabWidget,
 
 class MainWindow(FramelessMainWindow):
     hideToTrayNotice = Signal()
+    # 从输入钩子线程请求关闭中键菜单（跑在那边的 Esc 监听不能直接碰 QWidget）
+    _menuDismissRequested = Signal()
 
     def __init__(self, cfg: AppConfig, manager: HotkeyManager):
         super().__init__()
@@ -401,15 +410,24 @@ class MainWindow(FramelessMainWindow):
         self._middle_menu = None            # 当前弹着的菜单（再次触发时要关掉它）
         self._pending_middle_pos = None     # 挂起的新位置：关掉旧菜单后据此重开
         self._pending_tool = ""             # 菜单里点了哪个九宫格工具（exec 返回后据此打开）
+        # 中键"按下"已用它关过菜单时，抬起不再重开（见 MENU_SWALLOW_TRIGGER_SEC）
+        self._menu_swallow_trigger_until = 0.0
+        # 菜单开着期间临时装上的鼠标钩子（用户只开热键、没勾中键触发时才有值）
+        self._menu_hook_temporary = False
         # 触发方式快照：只在「中键开关 / 快捷键」真的变了才重注册全部全局热键。
         # 增删改菜单项也会发 changed，但那些操作不影响任何热键，不该被打断。
         self._menu_trigger = (bool(cfg.middle_menu_enabled), cfg.middle_menu_hotkey)
+        # 钩子线程的关闭请求（Esc）排队回主线程执行
+        self._menuDismissRequested.connect(self._dismiss_middle_menu)
 
         self._register_hotkeys()
 
         # ---- 全局中键监听：中键抬起时在光标处弹出中键菜单 ----
         self.mouse_watcher = MouseMenuWatcher(self)
         self.mouse_watcher.middleClicked.connect(self._on_middle_click)
+        # 菜单开着时任意鼠标键按下：全局钩子兜住"点外面就关"
+        # （菜单弹在别的程序上时 Qt 弹窗拿不到捕获，见 _on_menu_button_pressed）
+        self.mouse_watcher.menuButtonPressed.connect(self._on_menu_button_pressed)
         self.mouse_watcher.set_suppress(cfg.middle_menu_suppress)
         if cfg.middle_menu_enabled:
             self.mouse_watcher.start()
@@ -646,9 +664,92 @@ class MainWindow(FramelessMainWindow):
             self._refresh_status_hint()
         self._save_timer.start()
 
+    def _request_menu_dismiss(self) -> None:
+        """钩子线程请求关闭中键菜单（Esc）→ 排队到主线程真正去关。
+
+        钩子回调跑在输入线程里，绝不能直接碰 QWidget；`_menuDismissRequested`
+        是跨线程信号，自动队列到主线程。
+        """
+        self._menuDismissRequested.emit()
+
+    def _dismiss_middle_menu(self, reason: str = "") -> None:
+        """关掉正在弹着的中键菜单，并且**不重开**（位置置空，外层循环随即退出）。"""
+        if reason:
+            from ..logbus import log as _log
+            _log(f"中键菜单：关闭（{reason}）")
+        self._pending_middle_pos = None
+        if self._middle_menu is not None:
+            self._middle_menu.close()
+
+    def _menu_debug_report(self, text: str) -> None:
+        """把中键菜单的判定过程写进运行日志（只在菜单开着时调用，不会刷屏）。
+
+        为什么留着这段诊断：用户反馈过"某条路径下点外面不关"，而两条触发路径的代码
+        完全同一个函数，只能靠现场数据定位断在哪一环（钩子没上报？判成了菜单内？
+        关了没生效？）。日志里把**两套坐标**和**判定结果**都写出来。
+        """
+        try:
+            from ..logbus import log as _log
+            _log(text)
+        except Exception:
+            pass
+
+    def _on_menu_button_pressed(self, x: int, y: int, button: str = "") -> None:
+        """任意鼠标键按下（全局钩子上报）：菜单开着且点在**外面**就关掉菜单。
+
+        为什么不让 Qt 自己处理：菜单弹在别的程序上面时，Windows 的前台锁定让我们
+        的弹窗拿不到鼠标捕获/焦点，Qt 那套"点外面就关"根本不会触发——用户看到的
+        就是「点其他位置菜单也不消失」。全局钩子不看捕获、也不看前台，一定收得到，
+        所以这里兜一层。
+
+        ⚠️ 判内外**必须用 `QCursor.pos()`（Qt 逻辑坐标）**，不能拿钩子上报的 x/y：
+        鼠标钩子给的是**物理像素**，而 `menu.geometry()` 是**逻辑像素** —— 本机显示
+        缩放 125%（dpr=1.24）时两者差 1.24 倍，菜单命中区被放大近四分之一，
+        紧挨着菜单外面的点击会被当成"点在里面"而关不掉（2026-10-04 用户反馈
+        「鼠标点外面还是不行」；实测逻辑 (1096,827) 对应物理 (1359,1025)）。
+
+        ⚠️ **中键按下单独走一条**：中键是"开关"语义，按下这次就算关，并且要通知
+        `_on_middle_click` **别再重开**。否则一次中键点在菜单外面会「按下关掉 → 抬起
+        又开一个」，看起来就是"点外面关不掉"（用户反馈的"有时候"正是它，2026-10-04）。
+        """
+        menu = self._middle_menu
+        if menu is None:
+            return                  # 菜单没开：这个信号一律忽略（钩子是无条件上报的）
+        if button == "middle":
+            # 这次中键已经被"关菜单"用掉了；抬起时的触发信号不能再重开
+            self._menu_swallow_trigger_until = time.monotonic() + \
+                MENU_SWALLOW_TRIGGER_SEC
+            self._dismiss_middle_menu(f"{button or '鼠标'}键按下（中键开关语义）")
+            return
+        try:
+            geo = menu.geometry()
+            cursor = QCursor.pos()
+            inside = geo.contains(cursor)
+        except Exception:
+            geo, cursor, inside = None, None, False
+        cursor_text = f"{cursor.x()},{cursor.y()}" if cursor is not None else "?"
+        geo_text = geo.getRect() if geo is not None else "?"
+        self._menu_debug_report(
+            f"中键菜单：{button or '鼠标'}键按下，光标(逻辑) {cursor_text} | "
+            f"菜单(逻辑) {geo_text} | 钩子(物理) {x},{y} → "
+            + ("菜单内，交给 Qt" if inside else "菜单外，关闭"))
+        if not inside:
+            self._dismiss_middle_menu(f"{button or '鼠标'}键点在菜单外")
+
     def _on_middle_click(self, x: int, y: int) -> None:
-        """全局中键抬起：在光标处弹出中键菜单（鼠标中键这一路触发）。"""
+        """全局中键抬起：在光标处弹出中键菜单（鼠标中键这一路触发）。
+
+        菜单已经弹着时这一下就是"关"（见 show_middle_menu 的说明）——菜单弹在
+        浏览器上时，只有全局钩子看得见的中键还能用来关闭。
+
+        ⚠️ 但**按下那一下可能已经把关菜单做掉了**（点在菜单外面时会走
+        `_on_menu_button_pressed` 的中键分支，并置上 swallow 时间戳）：这时抬起
+        绝不能再去开一个新菜单，否则就是"关掉又立刻重开"= 看起来关不掉。
+        """
         if not self.cfg.middle_menu_enabled:
+            return
+        if time.monotonic() < self._menu_swallow_trigger_until:
+            self._menu_swallow_trigger_until = 0.0
             return
         self.show_middle_menu()
 
@@ -674,21 +775,27 @@ class MainWindow(FramelessMainWindow):
             return
         open_mini_app(app, anchor=self)
 
-    def show_middle_menu(self) -> None:
+    def show_middle_menu(self, source: str = "中键") -> None:
         """在光标处弹出中键菜单，选中条目则运行对应流程。
 
         两种触发方式共用（鼠标中键抬起 / 用户设置的全局快捷键），运行在 Qt
         主线程。若已有关闭中的模态对话框则不打扰。
 
-        菜单开着时**再次触发不会被忽略**：以前那样直接 return，菜单位置会
-        一直卡在第一次的地方，用户得先手动关掉、再触发一次才能换位置。现在改为——
-        记下这次的光标位置、关掉旧菜单（`exec` 随之返回），再在外层循环里按新
-        位置重开；选中条目即结束循环，期间挂起的按键不再理会。
+        **菜单已经弹着时再触发一次 = 关掉它**（不再像以前那样"关掉旧的、在新光标处
+        重开"）。为什么改（2026-10-04 用户两次反馈「关不掉菜单」）：
+        - 中键/热键是**唯一还能被全局钩子看见的关闭手势**：菜单弹在浏览器等程序
+          上面时，Windows 的前台锁定让我们的弹窗拿不到鼠标捕获与键盘焦点，
+          Qt 那套"Esc / 点外面就关"根本不会触发（Esc 甚至永久阻塞 exec）；
+        - 而原来的"又关又开"让这个手势等于失效，用户按多少次都关不掉，还会每次
+          让浏览器顺手执行中键的默认行为。
+        想换位置：关掉后在别处再触发一次即可（两下，但永远关得掉）。
+
+        另外还给两条 Qt 原生的关闭路径上了全局钩子兜底（Esc 监听 + 鼠标键上报），
+        它们不依赖弹窗有没有拿到焦点，见 `_request_menu_dismiss` 与
+        `_on_menu_button_pressed`。
         """
         if self._middle_menu is not None:
-            # 已弹着菜单：记下新位置并关掉旧的；关掉会让 exec 返回，循环随即重开
-            self._pending_middle_pos = QCursor.pos()
-            self._middle_menu.close()
+            self._dismiss_middle_menu()      # 再触发一次就是"关"，且不重开
             return
         if self._middle_menu_open:      # 循环正在重开的空档（此间不跑事件循环）
             return
@@ -698,7 +805,19 @@ class MainWindow(FramelessMainWindow):
         if not self.cfg.middle_menu_items and not self.cfg.middle_menu_tools:
             return
         self._middle_menu_open = True
+        self.mouse_watcher.set_menu_open(True)   # 开着期间吞中键，见 docstring
         self._pending_middle_pos = QCursor.pos()
+        # 「点外面关菜单」靠的是鼠标钩子。若用户只开了热键（没勾「鼠标中键触发」），
+        # 钩子本来就没装 —— 那样热键打开的菜单就**永远关不掉**（点外面、点条目都
+        # 只能靠 Qt，而弹窗在别的程序上面时 Qt 收不到）。所以菜单开着期间**临时装上**，
+        # 收起后还原成原来的状态（2026-10-04 用户实测：没勾选就无法用鼠标关闭）。
+        self._menu_hook_temporary = not self.mouse_watcher.is_running()
+        if self._menu_hook_temporary:
+            self.mouse_watcher.start()
+        self._menu_debug_report(
+            f"中键菜单：已由「{source}」弹出（光标 {self._pending_middle_pos.x()},"
+            f"{self._pending_middle_pos.y()}），鼠标钩子"
+            f"{'临时启动' if self._menu_hook_temporary else '本来就在跑'}")
         try:
             while self._pending_middle_pos is not None:
                 pos = self._pending_middle_pos
@@ -714,13 +833,21 @@ class MainWindow(FramelessMainWindow):
                     break
                 self._middle_menu = menu
                 try:
-                    chosen = menu.exec(pos)
+                    # Esc 用**全局**监听兜住：菜单弹在别的程序上面时（用户最后那次输入
+                    # 落在它那儿，Windows 前台锁定让我们拿不到键盘焦点），Qt 自己的
+                    # Esc 处理收不到键，菜单就关不掉了。钩子不看焦点，一定收得到。
+                    with cancel_key.EscListener(self._request_menu_dismiss):
+                        chosen = menu.exec(pos)
                     # 必须在 deleteLater 之前把 data 取出来——菜单一删 QAction 也没了
                     flow_id = str(chosen.data() or "") if chosen is not None else ""
                     tool_key = self._pending_tool
                     self._pending_tool = ""
                 finally:
                     self._middle_menu = None
+                    if self._menu_hook_temporary:
+                        # 临时装上的钩子收走，恢复成"用户只开热键"的原始状态
+                        self._menu_hook_temporary = False
+                        self.mouse_watcher.stop()
                     menu.deleteLater()   # 菜单挂在 self 名下，不删会每触发一次积一个
                 if tool_key:             # 点了九宫格工具 → 打开它，本轮结束
                     self._open_middle_menu_tool(tool_key)
@@ -734,6 +861,8 @@ class MainWindow(FramelessMainWindow):
             self._pending_middle_pos = None
             self._pending_tool = ""
             self._middle_menu_open = False
+            self._menu_hook_temporary = False
+            self.mouse_watcher.set_menu_open(False)   # 收起即恢复中键的正常行为
 
     def _run_flow_from_middle_menu(self, flow_id: str) -> None:
         """运行中键菜单选中的流程：已在运行/排队则跳过，不打断用户手动运行。
@@ -845,7 +974,10 @@ class MainWindow(FramelessMainWindow):
         # （替身/裁剪过的窗口也能注册）
         for name, hk in (getattr(self.cfg, "group_hotkeys", {}) or {}).items():
             bind(hk, (lambda g: lambda: self.flow_tab.toggle_group_async(g))(name))
-        bind(self.cfg.middle_menu_hotkey, self.show_middle_menu)
+        # 热键这条单独标出来源：诊断日志要能区分"中键唤起"还是"热键唤起"
+        # （用户反馈过"热键打开的菜单点外面不关"，而两条路是同一个函数）
+        bind(self.cfg.middle_menu_hotkey,
+             lambda: self.show_middle_menu(source="热键"))
         bind(self.cfg.clicker.hotkey, self.toggle_clicker)
         bind(self.cfg.presser.hotkey, self.toggle_presser)
         for t in self.cfg.find_tasks:

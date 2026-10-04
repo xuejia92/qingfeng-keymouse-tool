@@ -34,23 +34,6 @@
       "continue_on_fail": false,
       "pair_id": "",
       "commented": false
-    },
-    {
-      "type": "qq_mail",
-      "name": "邮件发送",
-      "params": {
-        "mail_host": "smtp.qq.com",
-        "mail_port": 465,
-        "mail_user": "",
-        "mail_auth_code": "",
-        "mail_to": "",
-        "subject": "",
-        "content": "",
-        "attachments": []
-      },
-      "continue_on_fail": false,
-      "pair_id": "",
-      "commented": false
     }
   ],
   "variables": [],

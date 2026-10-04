@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""「🧰 小工具」页：以九宫格展示可独立运行的小程序。
+"""「🧰 小工具」页：以宫格展示可独立运行的小程序。
 
 布局
 ----
-整页就是一块可滚动的九宫格（**没有页内标题和说明文字**：标签页名已经说明了
-这是什么页，再加一行文字纯属占地方）。里面是三列网格，每张卡片是一个
+整页就是一块可滚动的宫格（**没有页内标题和说明文字**：标签页名已经说明了
+这是什么页，再加一行文字纯属占地方）。里面是网格卡片，每张卡片是一个
 `QToolButton`（图标在上、名称在下），悬停提示写的是小程序的用途说明。
+
+**列数按可用宽度自动算**（2026-10-04 用户要求）：窗口宽就多排几列、窄就少排几列，
+不再写死三列。触发点是卡片容器的 `resizeEvent`（不是页面的 resizeEvent，
+原因见 `GridHolder`）。列数没变时不碰任何控件，所以常规拖动窗口不会反复重排。
 卡片数量由 `app.mini_apps` 注册表决定，**加小程序不用改本文件**
 （见 `app/mini_apps/__init__.py` 顶部的两步说明）。
 
@@ -18,23 +22,43 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (QFrame, QGridLayout, QLabel, QScrollArea,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QSizePolicy, QToolButton, QVBoxLayout, QWidget)
 
 from ..mini_apps import MiniApp, all_apps
 from . import theme
 from .mini_window import open_mini_app
 from .widgets import emoji_icon
 
-GRID_COLUMNS = 3            # 「九宫格」= 三列
-CARD_W, CARD_H = 168, 130   # 单张卡片尺寸
-CARD_ICON = 46              # 卡片里图标画多大
-CARD_GAP = 10               # 卡片间距
+GRID_COLUMNS = 3            # 列数初值（真正排版时按可用宽度算，见 columns_for_width）
+MAX_COLUMNS = 12            # 列数上限：再宽也不排成一条长龙
+CARD_W, CARD_H = 136, 104   # 单张卡片尺寸（2026-10-04 用户要求"每个宫格宽高都小一点"）
+CARD_ICON = 36              # 卡片里图标画多大
+CARD_GAP = 8                # 卡片间距
 PAGE_MARGIN = 16            # 页面留白
 
 
 def _emoji_icon(emoji: str, size: int):
     """兼容旧调用点：emoji -> QIcon 的实现已提升到 widgets.emoji_icon。"""
     return emoji_icon(emoji, size)
+
+
+class GridHolder(QWidget):
+    """承载卡片的容器：宽度一变就把新宽度回调出去。
+
+    为什么要这一层：滚动区是 `setWidgetResizable(True)`，容器的宽度由**视口**决定，
+    页面（ToolsTab）resize 时它未必已经跟着变，在页面的 resizeEvent 里量宽度会慢一拍。
+    装在容器自己的 resizeEvent 上才是"宽度真的变了"这个时机。
+    """
+
+    def __init__(self, on_width_changed, parent=None):
+        super().__init__(parent)
+        self._on_width_changed = on_width_changed
+
+    def resizeEvent(self, event):       # noqa: N802（Qt 命名）
+        super().resizeEvent(event)
+        # 用事件里的新尺寸而不是 self.width()：两者在真实 resize 时相同，
+        # 但显式取事件参数后，测试投一个 QResizeEvent 就能确定性地验证这条契约。
+        self._on_width_changed(event.size().width())
 
 
 def _grid_qss() -> str:
@@ -54,9 +78,9 @@ def _grid_qss() -> str:
         background: {t('card_bg')};
         color: {t('text')};
         border: 1px solid {t('border')};
-        border-radius: 10px;
-        padding: 10px 4px 8px 4px;
-        font-size: 10pt;
+        border-radius: 8px;
+        padding: 8px 4px 6px 4px;
+        font-size: 9pt;
     }}
     QWidget#toolsGrid QToolButton:hover {{
         border: 1px solid {t('primary')};
@@ -76,25 +100,32 @@ class ToolsTab(QWidget):
         super().__init__(parent)
         self.setObjectName("toolsPage")
         self._cards: list[QToolButton] = []
+        self._columns = GRID_COLUMNS       # 当前列数（按宽度算出来，见 _apply_width）
         self._stretch_row: int | None = None
         self._build_ui()
 
     # ---------- 界面 ----------
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        # 页面直接就是九宫格：不放页内标题/说明（标签页名已经说明了这是什么页）
+        # 页面直接就是宫格：不放页内标题/说明（标签页名已经说明了这是什么页）
         root.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
         root.setSpacing(10)
 
-        self.grid_holder = QWidget()
+        self.grid_holder = GridHolder(self._apply_width)
         self.grid_holder.setObjectName("toolsGrid")
         self.grid_holder.setStyleSheet(_grid_qss())
+        # ⚠️ 横向必须是 Ignored：卡片是 setFixedSize 的，于是 QGridLayout 的
+        # **最小宽度**= 当前列数 × 卡片宽 + 间距。而 setWidgetResizable 的滚动区
+        # 不会把容器压到它自己的最小宽度以下 —— 结果是「列数锁死」：窗口拖窄了，
+        # 容器宽度不跟着变小（实测宽 560 的页面里容器仍是 568），回调永远算不出更少的
+        # 列，卡片直接被裁掉。设成 Ignored 后容器宽度完全跟随视口，列数才能减少。
+        self.grid_holder.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.grid = QGridLayout(self.grid_holder)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(CARD_GAP)
         # 末尾留一条弹性列吸收多余宽度：否则只有一两个小程序时，QGridLayout 会把
         # 空白平摊到「有内容的列」上，卡片会被推到页面中间（2026-10-03 离屏核验发现）。
-        self.grid.setColumnStretch(GRID_COLUMNS, 1)
+        self.grid.setColumnStretch(self._columns, 1)
         self._empty_label = QLabel("还没有登记任何小程序")
         self._empty_label.setStyleSheet(
             f"color:{theme.token('text_muted')};font-size:10pt;padding:24px;")
@@ -114,6 +145,50 @@ class ToolsTab(QWidget):
 
         self.reload()
 
+    # ---------- 自适应列数 ----------
+    @staticmethod
+    def columns_for_width(width: int) -> int:
+        """按可用宽度算列数（至少 1 列、至多 MAX_COLUMNS）。
+
+        纯函数，便于直接测边界：宽度不够放一张卡片时也得给 1 列，
+        否则卡片会被压扁或跑到可视区外。
+        """
+        usable = max(0, int(width))
+        columns = (usable + CARD_GAP) // (CARD_W + CARD_GAP)
+        return int(max(1, min(MAX_COLUMNS, columns)))
+
+    def columns(self) -> int:
+        """当前列数（测试与排版都以它为准）。"""
+        return self._columns
+
+    def _apply_width(self, width: int) -> None:
+        """容器宽度变化：列数真的变了才重排（列数没变时一个控件都不动）。"""
+        columns = self.columns_for_width(width)
+        if columns == self._columns:
+            return
+        self._columns = columns
+        self._layout_cards()
+
+    def _layout_cards(self) -> None:
+        """按当前列数把卡片重摆一遍（先 removeWidget 再 addWidget，控件不销毁）。"""
+        columns = self._columns
+        for index, card in enumerate(self._cards):
+            self.grid.removeWidget(card)
+            self.grid.addWidget(card, index // columns, index % columns)
+        self._reset_stretch()
+
+    def _reset_stretch(self) -> None:
+        """重设弹性行列：卡片整齐贴左上角，多余宽度/高度都留在右下方。"""
+        for col in range(0, MAX_COLUMNS + 1):
+            self.grid.setColumnStretch(col, 0)
+        self.grid.setColumnStretch(self._columns, 1)
+        if self._stretch_row is not None:
+            self.grid.setRowStretch(self._stretch_row, 0)
+        rows = max(1, (max(1, len(self._cards)) + self._columns - 1)
+                   // self._columns)
+        self._stretch_row = rows
+        self.grid.setRowStretch(rows, 1)
+
     def reload(self) -> None:
         """按注册表重建全部卡片（新增小程序后调一次即可看到）。"""
         for card in self._cards:
@@ -123,18 +198,16 @@ class ToolsTab(QWidget):
         self._cards = []
         if self._stretch_row is not None:       # 上一轮的弹性行先撤掉，免得串位
             self.grid.setRowStretch(self._stretch_row, 0)
+            self._stretch_row = None
 
         apps = all_apps()
         self._empty_label.setVisible(not apps)
-        for idx, app in enumerate(apps):
-            card = self._make_card(app)
-            self._cards.append(card)
-            self.grid.addWidget(card, idx // GRID_COLUMNS, idx % GRID_COLUMNS)
+        for app in apps:
+            self._cards.append(self._make_card(app))
 
-        # 行方向的弹性行（同列方向）：卡片整齐贴左上角，多余高度留在最下方
-        rows = max(1, (len(apps) + GRID_COLUMNS - 1) // GRID_COLUMNS)
-        self._stretch_row = rows
-        self.grid.setRowStretch(rows, 1)
+        # 卡片位置统一由 _layout_cards 按**当前可用宽度**决定，别再写死 3 列
+        self._columns = self.columns_for_width(self.grid_holder.width())
+        self._layout_cards()
 
     def cards(self) -> list[QToolButton]:
         """当前全部卡片（顺序 = 注册顺序），测试用。"""

@@ -8,6 +8,11 @@
 这里提供 ui_call(fn)：后台线程把函数交给主线程事件循环执行并阻塞等待结果，
 主线程里用嵌套 QEventLoop 处理遮罩交互（与 QDialog.exec 同理），不会死锁。
 
+⚠️ **框选和抓图必须待在"主窗口仍然隐藏"的同一段里**：遮罩给用户看的是打开遮罩
+那一刻的快照（那时主窗口已藏起来），一旦先把窗口恢复出来再抓图，就会把主窗口
+截进去、而且是竞态。所以对外只提供 `select_region_and_grab()` 这一个入口
+（2026-10-04 用户反馈「截的图有时候不对」后改成这样，见该函数说明）。
+
 目录规则：默认保存时写入 <程序目录>/templates/jietu/（不存在自动创建），
 与 templates/（找图模板）同根，都随程序目录走（打包版 = exe 同级）。
 """
@@ -24,6 +29,12 @@ from .config import TEMPLATE_DIR, parse_region_str
 
 # 截图步骤「默认保存」的保存目录：<程序目录>/templates/jietu/
 JIETU_DIR = os.path.join(TEMPLATE_DIR, "jietu")
+
+# 框选确认后、真正抓图前的短暂等待（秒）。
+# 遮罩虽然 close() 了，但要给 Qt 一点时间把它从屏幕上真的撤掉、把主窗口的
+# 隐藏状态刷下去，否则会把遮罩/窗口残影截进图里。独立成模块常量而不是内联字面量，
+# 方便测试直接置 0（测试里绝不能去 patch 全局 time.sleep，见 tests/_env 的约定）。
+SELECT_SETTLE_SEC = 0.12
 
 
 # ---------------------------------------------------------------------------
@@ -173,17 +184,28 @@ def _main_window():
     return None
 
 
-def select_region() -> tuple[int, int, int, int] | None:
-    """主线程执行：隐藏主窗口 -> 屏幕遮罩框选 -> 恢复，返回 (x,y,w,h) 或 None。
+def select_region_and_grab() -> tuple[tuple[int, int, int, int] | None,
+                                      np.ndarray | None]:
+    """主线程执行：隐藏主窗口 -> 屏幕遮罩框选 -> **趁窗口还藏着**抓图 -> 恢复窗口。
 
-    用嵌套 QEventLoop 处理遮罩交互（与 QDialog.exec 同理），不会阻塞事件循环。
+    返回 `((x, y, w, h) | None, 图像 | None)`；取消框选时两者都是 None。
+
+    为什么「框选」和「抓图」必须是**同一次隐藏窗口**里的连续动作
+    （2026-10-04 用户反馈「截的图有时候不对」）：
+    遮罩显示的是**打开遮罩那一刻的屏幕快照**，而那时主窗口已经被藏起来了；
+    可 `select_region` 返回之前就会 `show() + raise_() + activateWindow()` 把主窗口
+    恢复。调用方拿着 rect 再去 `grab_image`，截到的就是**刚弹回来的主窗口**——
+    和用户框选时看到的画面根本不是一个东西。更糟的是「窗口有没有来得及画出来」
+    是竞态，所以表现成**有时候对、有时候不对**（选中的区域越靠近主窗口越容易中）。
+
+    抓图放在 `finally` 里 `_restore_after_capture()` **之前**，从根上消掉这个竞态。
     """
-    from PySide6.QtCore import QEventLoop
-    from .capture_overlay import run_screen_capture
-
     win = _main_window()
     if win is not None:
         win._hide_for_capture()
+    from PySide6.QtCore import QEventLoop
+    from .capture_overlay import run_screen_capture
+
     loop = QEventLoop()
     result = {"rect": None}
 
@@ -194,13 +216,34 @@ def select_region() -> tuple[int, int, int, int] | None:
     def on_cancelled():
         loop.quit()
 
+    image = None
     try:
         run_screen_capture(on_region=on_region, on_cancelled=on_cancelled)
         loop.exec()
+        rect = result["rect"]
+        if rect:
+            _settle_after_overlay()
+            x, y, w, h = (int(v) for v in rect)
+            image = grab_image("region", f"{x},{y},{w},{h}")
     finally:
         if win is not None:
             win._restore_after_capture()
-    return result["rect"]
+    return result["rect"], image
+
+
+def _settle_after_overlay() -> None:
+    """遮罩关闭后、抓图前的小停顿：让遮罩真的从屏幕上撤掉。
+
+    遮罩走的是 `close()`（同步 hide），正常情况下一关就没影了；这里再做一次
+    `processEvents()` + 极短等待纯粹是兜底——万一遇上「隐藏事件还在队列里、
+    屏幕还没重绘」的时机，截出来就会多一层遮罩底色（用户看到的就是"截图发暗/不对"）。
+    """
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is not None:
+        app.processEvents()
+    if SELECT_SETTLE_SEC > 0:
+        time.sleep(SELECT_SETTLE_SEC)
 
 
 def ask_save_path(default_name: str) -> str | None:
