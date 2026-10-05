@@ -1,7 +1,7 @@
 {
   "id": "9a99ea1be96d",
   "name": "图片文字识别",
-  "group": "测试使用",
+  "group": "测试",
   "steps": [
     {
       "type": "ocr",
@@ -60,5 +60,5 @@
   "loops": 1,
   "created_seq": 8,
   "async_run": false,
-  "order": 13
+  "order": 1
 }

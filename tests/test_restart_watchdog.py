@@ -254,7 +254,8 @@ class TestDistSync(unittest.TestCase):
     def test_returns_summary_from_build(self):
         st = dict(self._EMPTY, added=2, updated=1)
         with mock.patch("build.DIST_DIR", tempfile.gettempdir()), \
-                mock.patch("build.sync_data_dirs", return_value=st):
+                mock.patch("build.sync_data_dirs", return_value=st), \
+                mock.patch("build.sync_task_board", return_value="same"):
             self.assertEqual(wd.sync_dist_data(), st)
 
     def test_prints_one_line_only_when_changed(self):
@@ -262,6 +263,7 @@ class TestDistSync(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch("build.DIST_DIR", tempfile.gettempdir()), \
                 mock.patch("build.sync_data_dirs", return_value=st), \
+                mock.patch("build.sync_task_board", return_value="same"), \
                 contextlib.redirect_stdout(buf):
             wd.sync_dist_data()
         out = buf.getvalue()
@@ -272,9 +274,40 @@ class TestDistSync(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch("build.DIST_DIR", tempfile.gettempdir()), \
                 mock.patch("build.sync_data_dirs", return_value=dict(self._EMPTY)), \
+                mock.patch("build.sync_task_board", return_value="same"), \
                 contextlib.redirect_stdout(buf):
             wd.sync_dist_data()
         self.assertEqual(buf.getvalue(), "")
+
+    def test_task_board_sync_is_reported_by_direction(self):
+        """task_board.json 双向同步：有方向就提示一行，没变化不刷屏。"""
+        for status, expect in (("ws-to-dist", "工作区 → dist"),
+                               ("dist-to-ws", "dist → 工作区"),
+                               ("same", ""),
+                               ("no-dist", "")):
+            buf = io.StringIO()
+            with mock.patch("build.DIST_DIR", tempfile.gettempdir()), \
+                    mock.patch("build.sync_data_dirs",
+                               return_value=dict(self._EMPTY)), \
+                    mock.patch("build.sync_task_board", return_value=status), \
+                    contextlib.redirect_stdout(buf):
+                wd.sync_dist_data()
+            out = buf.getvalue()
+            if expect:
+                self.assertIn("task_board.json", out, status)
+                self.assertIn(expect, out, status)
+            else:
+                self.assertNotIn("task_board.json", out, status)
+
+    def test_task_board_sync_failure_is_swallowed(self):
+        """task_board.json 同步失败只提示，不能拦住启动。"""
+        buf = io.StringIO()
+        with mock.patch("build.DIST_DIR", tempfile.gettempdir()), \
+                mock.patch("build.sync_data_dirs", return_value=dict(self._EMPTY)), \
+                mock.patch("build.sync_task_board", side_effect=OSError("busy")), \
+                contextlib.redirect_stdout(buf):
+            self.assertIsNotNone(wd.sync_dist_data())
+        self.assertIn("task_board.json", buf.getvalue())
 
     def test_failure_is_swallowed(self):
         """同步失败只提示，不能拦住主程序启动。"""

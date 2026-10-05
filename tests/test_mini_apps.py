@@ -25,7 +25,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QLabel, QSizePolicy
 
-from app import mini_apps
+from app import mini_apps, tool_entries
 from app.mini_apps import MiniApp
 from app.ui import mini_window, tools_tab as tools_tab_mod
 from app.ui import theme
@@ -123,7 +123,8 @@ class TestToolsTab(_QtCase):
             self.assertEqual(tab.columns(), 2)
             positions = [tab.grid.getItemPosition(tab.grid.indexOf(c))[:2]
                          for c in tab.cards()]
-        self.assertEqual(positions, [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)])
+        # 第 0 行是「内置小工具」分区标题，卡片从第 1 行开始
+        self.assertEqual(positions, [(1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1)])
 
     def test_columns_for_width(self):
         """列数换算的边界：放不下也至少 1 列，超宽则封顶。"""
@@ -150,7 +151,7 @@ class TestToolsTab(_QtCase):
         tab._apply_width(200)
         self.assertEqual(tab.columns(), narrow)
         self.assertEqual(
-            tab.grid.getItemPosition(tab.grid.indexOf(tab.cards()[1]))[:2], (1, 0))
+            tab.grid.getItemPosition(tab.grid.indexOf(tab.cards()[1]))[:2], (2, 0))
 
     def test_same_width_does_not_relayout(self):
         """列数没变时不碰任何控件：拖动窗口不该反复重排。"""
@@ -414,6 +415,183 @@ class TestCalculator(_QtCase):
 
 
 # ---------------------------------------------------------------------------
+# 自定义程序（2026-10-04 用户要求：把电脑里的程序加进小工具页）
+# ---------------------------------------------------------------------------
+class TestCustomTools(_QtCase):
+    """自定义程序卡片：添加 / 打开 / 重命名 / 删除 / 持久化。"""
+
+    @staticmethod
+    def _cell_of(tab, widget) -> tuple[int, int]:
+        """控件在宫格里的 (行, 列)。"""
+        return tab.grid.getItemPosition(tab.grid.indexOf(widget))[:2]
+
+    def _tab(self, tools=None):
+        """造一个带配置替身的小工具页（save 是 Mock，方便断言持久化）。"""
+        from types import SimpleNamespace
+        cfg = SimpleNamespace(
+            custom_tools=[dict(t) for t in (tools or [])],
+            save=mock.Mock())
+        return ToolsTab(cfg), cfg
+
+    def test_custom_cards_come_after_builtin(self):
+        tab, _cfg = self._tab([{"name": "记事本", "path": "C:/x/notepad.exe"}])
+        names = [c.text() for c in tab.cards()]
+        self.assertEqual(names[-1], "记事本", "自定义卡片排在内置小程序后面")
+        self.assertEqual(len(tab.cards()),
+                         len(mini_apps.all_apps()) + 1)
+
+    # ---------- 内置 / 自定义分开显示（2026-10-05 用户要求）----------
+
+    def test_builtin_and_custom_are_two_sections(self):
+        """★ 内置小工具与手动添加的程序分开显示：各有标题、自定义区另起一行。"""
+        tab, _cfg = self._tab([{"name": "记事本", "path": "C:/x/notepad.exe"}])
+        tab._apply_width(600)
+        self.assertEqual([title for title, _cards in tab.sections()],
+                         [tools_tab_mod.SECTION_BUILTIN,
+                          tools_tab_mod.SECTION_CUSTOM])
+        builtin_rows = [self._cell_of(tab, c)[0] for c in tab._builtin_cards]
+        self.assertGreater(self._cell_of(tab, tab._custom_title)[0],
+                           max(builtin_rows), "自定义区要另起一行")
+        self.assertTrue(tab._builtin_title.isVisibleTo(tab))
+        self.assertTrue(tab._custom_title.isVisibleTo(tab))
+        # 标题占整行，才叫"分区"
+        span = tab.grid.getItemPosition(
+            tab.grid.indexOf(tab._builtin_title))[3]
+        self.assertGreater(span, 1)
+
+    def test_custom_section_always_offers_the_add_card(self):
+        """还没添加过程序：「我添加的程序」分区连同「添加程序」卡片都要在。
+
+        那一区不能因为"还没有自定义程序"就整块藏起来 —— 「添加程序」卡片就住在里面，
+        藏了就没有入口了（第一版就踩了这个坑：添加卡片根本没被摆进宫格）。
+        """
+        tab, _cfg = self._tab([])
+        self.assertEqual([title for title, _cards in tab.sections()],
+                         [tools_tab_mod.SECTION_BUILTIN,
+                          tools_tab_mod.SECTION_CUSTOM])
+        self.assertTrue(tab._custom_title.isVisibleTo(tab))
+        self.assertTrue(tab._add_card.isVisibleTo(tab))
+        self.assertTrue(tab._builtin_title.isVisibleTo(tab))
+
+    def test_add_card_opens_the_custom_section(self):
+        """没有自定义程序时，「添加程序」卡片是**自定义区**的第一个格子（标题下一行）。"""
+        tab, _cfg = self._tab([])
+        tab._apply_width(600)
+        title_row = self._cell_of(tab, tab._custom_title)[0]
+        self.assertEqual(self._cell_of(tab, tab._add_card), (title_row + 1, 0))
+
+    def test_add_card_follows_custom_cards(self):
+        """有自定义程序时，添加卡片紧跟在它们后面（同一区内）。"""
+        tab, _cfg = self._tab([{"name": "甲", "path": "C:/x/a.exe"},
+                               {"name": "乙", "path": "C:/x/b.exe"}])
+        tab._apply_width(600)
+        self.assertEqual(self._cell_of(tab, tab._add_card)[1],
+                         len(tab._custom_cards) % tab.columns())
+
+    def test_add_program_persists_and_shows_card(self):
+        tab, cfg = self._tab([])
+        with mock.patch.object(tools_tab_mod.QFileDialog, "getOpenFileName",
+                               return_value=(r"C:/Program Files/X/Everything.exe",
+                                             "")):
+            tab.add_program()
+        self.assertEqual([t["name"] for t in cfg.custom_tools], ["Everything"])
+        self.assertEqual(cfg.custom_tools[0]["path"],
+                         r"C:/Program Files/X/Everything.exe")
+        cfg.save.assert_called_once()
+        self.assertEqual(cfg.save.call_args.kwargs.get("save_flows"), False,
+                         "这操作与 flows/ 目录无关，不该重写流程文件")
+        self.assertEqual([c.text() for c in tab.cards()][-1], "Everything")
+
+    def test_add_program_cancelled_makes_no_change(self):
+        tab, cfg = self._tab([])
+        with mock.patch.object(tools_tab_mod.QFileDialog, "getOpenFileName",
+                               return_value=("", "")):
+            tab.add_program()
+        self.assertEqual(cfg.custom_tools, [])
+        self.assertFalse(cfg.save.called)
+
+    def test_launch_uses_system_open(self):
+        tab, _cfg = self._tab([{"name": "记事本", "path": "C:/x/notepad.exe"}])
+        with mock.patch.object(tool_entries.os.path, "exists", return_value=True), \
+                mock.patch.object(tool_entries.QDesktopServices, "openUrl") as open_url, \
+                mock.patch.object(tool_entries.QMessageBox, "warning") as warn:
+            open_url.return_value = True
+            tab.launch_custom(0)
+        self.assertTrue(open_url.called, "应当用系统默认方式打开")
+        self.assertFalse(warn.called)
+
+    def test_launch_missing_path_warns_instead_of_opening(self):
+        tab, _cfg = self._tab([{"name": "旧程序", "path": "C:/gone/app.exe"}])
+        with mock.patch.object(tool_entries.os.path, "exists", return_value=False), \
+                mock.patch.object(tool_entries.QDesktopServices, "openUrl") as open_url, \
+                mock.patch.object(tool_entries.QMessageBox, "warning") as warn:
+            tab.launch_custom(0)
+        self.assertFalse(open_url.called, "路径都没了就不该去打开")
+        self.assertTrue(warn.called)
+
+    def test_remove_asks_then_persists(self):
+        tab, cfg = self._tab([{"name": "记事本", "path": "C:/x/notepad.exe"}])
+        with mock.patch.object(tools_tab_mod.QMessageBox, "question",
+                               return_value=tools_tab_mod.QMessageBox.Yes):
+            tab.remove_custom(0)
+        self.assertEqual(cfg.custom_tools, [])
+        self.assertEqual(tab.cards(), tab.cards())
+        self.assertEqual([c.text() for c in tab.cards()],
+                         [a.name for a in mini_apps.all_apps()])
+
+    def test_remove_cancelled_keeps_the_card(self):
+        tab, cfg = self._tab([{"name": "记事本", "path": "C:/x/notepad.exe"}])
+        with mock.patch.object(tools_tab_mod.QMessageBox, "question",
+                               return_value=tools_tab_mod.QMessageBox.No):
+            tab.remove_custom(0)
+        self.assertEqual(len(cfg.custom_tools), 1)
+
+    def test_rename_persists(self):
+        tab, cfg = self._tab([{"name": "Everything", "path": "C:/x/e.exe"}])
+        with mock.patch.object(tools_tab_mod.QInputDialog, "getText",
+                               return_value=("效率搜索  ", True)):
+            tab.rename_custom(0)
+        self.assertEqual(cfg.custom_tools[0]["name"], "效率搜索")
+        self.assertEqual(tab.cards()[-1].text(), "效率搜索")
+
+    def test_reload_reflects_config_changes(self):
+        tab, cfg = self._tab([])
+        before = len(tab.cards())
+        cfg.custom_tools = [{"name": "记事本", "path": "C:/x/notepad.exe"}]
+        tab.reload()
+        self.assertEqual(len(tab.cards()), before + 1)
+
+    # ---------- 变更通知（九宫格要实时跟上）----------
+
+    def test_add_and_remove_emit_tools_changed(self):
+        """★ 加/删/改名都要发 toolsChanged：中键菜单九宫格的候选才能实时跟上。"""
+        tab, _cfg = self._tab([])
+        seen = []
+        tab.toolsChanged.connect(lambda: seen.append(1))
+        with mock.patch.object(tools_tab_mod.QFileDialog, "getOpenFileName",
+                               return_value=(r"C:/x/notepad.exe", "")):
+            tab.add_program()
+        self.assertEqual(seen, [1], "添加后要通知")
+        with mock.patch.object(tools_tab_mod.QInputDialog, "getText",
+                               return_value=("新名字", True)):
+            tab.rename_custom(0)
+        self.assertEqual(seen, [1, 1], "改名后要通知")
+        with mock.patch.object(tools_tab_mod.QMessageBox, "question",
+                               return_value=tools_tab_mod.QMessageBox.Yes):
+            tab.remove_custom(0)
+        self.assertEqual(seen, [1, 1, 1], "删除后要通知")
+
+    def test_cancelled_actions_do_not_notify(self):
+        tab, _cfg = self._tab([])
+        seen = []
+        tab.toolsChanged.connect(lambda: seen.append(1))
+        with mock.patch.object(tools_tab_mod.QFileDialog, "getOpenFileName",
+                               return_value=("", "")):
+            tab.add_program()
+        self.assertEqual(seen, [], "取消添加不该发通知")
+
+
+# ---------------------------------------------------------------------------
 # 接线契约（源码级：构造整个 MainWindow 太重，钉住写法即可）
 # ---------------------------------------------------------------------------
 class TestMainWindowWiring(unittest.TestCase):
@@ -424,11 +602,18 @@ class TestMainWindowWiring(unittest.TestCase):
         tools = src.index('tabs.addTab(self.tools_tab, "🧰 小工具")')
         settings = src.index('tabs.addTab(self.settings_tab, "")')
         self.assertLess(tools, settings, "「小工具」标签必须在「设置」左边")
-        self.assertIn("self.tools_tab = ToolsTab()", src)
+        # 页面要拿到配置才能展示/持久化用户自定义的程序
+        self.assertIn("self.tools_tab = ToolsTab(cfg)", src)
 
     def test_shutdown_closes_mini_windows(self):
         src = inspect.getsource(MainWindow.shutdown)
         self.assertIn("close_mini_windows", src)
+
+    def test_tools_changed_is_wired_to_middle_menu(self):
+        """小工具页的变更要接给中键菜单页，否则九宫格候选要重启才更新。"""
+        src = inspect.getsource(MainWindow.__init__)
+        self.assertIn("self.tools_tab.toolsChanged.connect("
+                      "self.middle_menu_tab.on_tools_changed)", src)
 
 
 if __name__ == "__main__":

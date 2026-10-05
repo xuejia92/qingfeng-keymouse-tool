@@ -16,12 +16,12 @@ from app.ui.main_window import MainWindow, auto_window_size
 
 class TestAutoWindowSize(unittest.TestCase):
     def test_2k_base(self):
-        """2560x1440（基准）→ 1500x1030。"""
-        self.assertEqual(auto_window_size(2560, 1440), (1500, 1030))
+        """2560x1440（基准）→ 1620x1030（2026-10-05 用户要求宽度再大一点）。"""
+        self.assertEqual(auto_window_size(2560, 1440), (1620, 1030))
 
     def test_4k_capped(self):
         """4K 大屏不放大，保持设计尺寸。"""
-        self.assertEqual(auto_window_size(3840, 2160), (1500, 1030))
+        self.assertEqual(auto_window_size(3840, 2160), (1620, 1030))
 
     def test_1080p_scaled(self):
         """1080p 等比缩小且不超屏。"""
@@ -30,15 +30,15 @@ class TestAutoWindowSize(unittest.TestCase):
         self.assertLessEqual(h, 1080)
         self.assertGreaterEqual(w, 980)      # 不小于最小宽度
         self.assertGreaterEqual(h, 660)      # 不小于最小高度
-        # 2026-10-03 加大基准后：1920x1080 → 1125x772（原为 1050x720）
-        self.assertEqual((w, h), (1125, 772))
+        # 2026-10-05 只加宽后：1920x1080 → 1215x772（2026-10-03 时是 1125x772）
+        self.assertEqual((w, h), (1215, 772))
 
     def test_default_size_is_larger_than_before(self):
-        """回归：默认尺寸要比 2026-10-03 之前大（原基准 1400x960）。"""
+        """回归：宽度要比 2026-10-05 之前宽（原基准 1500x1030）。"""
         for sw, sh in ((1920, 1080), (2560, 1440), (3840, 2160)):
             w, h = auto_window_size(sw, sh)
-            self.assertGreaterEqual(w, 1125, f"{sw}x{sh} 宽度没变大")
-            self.assertGreaterEqual(h, 772, f"{sw}x{sh} 高度没变大")
+            self.assertGreater(w, 1125, f"{sw}x{sh} 宽度没变大")
+            self.assertGreaterEqual(h, 772, f"{sw}x{sh} 高度没变小")
 
     def test_small_screen_floor(self):
         """小屏不缩到最小尺寸以下。"""
@@ -55,8 +55,8 @@ class TestAutoWindowSize(unittest.TestCase):
 
     def test_invalid_input_falls_back(self):
         """异常输入（0 或负）回退到设计尺寸。"""
-        self.assertEqual(auto_window_size(0, 0), (1500, 1030))
-        self.assertEqual(auto_window_size(-1, 500), (1500, 1030))
+        self.assertEqual(auto_window_size(0, 0), (1620, 1030))
+        self.assertEqual(auto_window_size(-1, 500), (1620, 1030))
 
 
 class TestMainWindowScreenSize(unittest.TestCase):

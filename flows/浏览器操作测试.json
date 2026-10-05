@@ -1,7 +1,7 @@
 {
   "id": "3c8b2c3929e6",
   "name": "浏览器操作测试",
-  "group": "测试使用",
+  "group": "测试",
   "steps": [
     {
       "type": "dp_browser",
@@ -85,5 +85,5 @@
   "loops": 1,
   "created_seq": 10,
   "async_run": false,
-  "order": 6
+  "order": 5
 }

@@ -82,3 +82,4 @@ from . import calculator         # noqa: E402,F401  （必须在 register 定义
 from . import clipboard_history  # noqa: E402,F401
 from . import lan_transfer       # noqa: E402,F401
 from . import startup_items      # noqa: E402,F401
+from . import task_board         # noqa: E402,F401

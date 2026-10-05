@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QFormLayout, QFrame, QHBoxLayout, QInputDialog,
 
 from ..config import AppConfig, Flow, ScheduleTask
 from . import theme
+from .group_tree import GroupDropTree, reorder_for_group
 from ..logbus import log
 from ..scheduler import (ScheduleRunner, describe_schedule, format_dt,
                          next_run_time, next_run_times)
@@ -115,7 +116,8 @@ class ScheduleTab(QWidget):
         set_variant(self.add_group_btn, "primary")
         self.add_group_btn.clicked.connect(self._add_group)
         llay.addWidget(self.add_group_btn)
-        self.list = QTreeWidget()
+        # 按分组拖放（拖进分组 / 组内调序）见 group_tree 模块
+        self.list = GroupDropTree("task")
         self.list.setObjectName("scheduleList")
         self.list.setHeaderHidden(True)
         self.list.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
@@ -123,6 +125,7 @@ class ScheduleTab(QWidget):
         self.list.setIndentation(14)
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._context_menu)
+        self.list.entry_dropped.connect(self.move_task_to_group)
         self.list.itemSelectionChanged.connect(self.refresh_detail)
         llay.addWidget(self.list, 1)
         left.setMinimumWidth(220)
@@ -530,6 +533,40 @@ class ScheduleTab(QWidget):
         self.cfg.save(save_flows=False)
         self.refresh_list()
         self.changed.emit()
+
+    def move_task_to_group(self, task_id: str, group: str,
+                           before_task_id: str = "") -> bool:
+        """把定时任务移到某个分组（拖放落地时调用）；`group` 空 = 移出到「未分组」。
+
+        - 组内顺序 = `self._tasks` 的顺序，所以"移过去"= 摘出来插到目标位置：
+          给了 `before_task_id` 就插到那条任务前面，否则排在该组末尾；
+        - 拖进**收起**的分组会顺手展开，否则任务搬进去像"消失了"；
+        - 结果顺序与现状完全一致（白拖一下）→ 什么都做、也不重建列表（会打断选中）；
+        - 保存用 `save_flows=False`：这是定时任务的配置，与 flows/ 目录无关。
+        """
+        task = next((t for t in self._tasks if t.id == task_id), None)
+        if task is None:
+            return False
+        group = str(group or "")
+        if group and group not in self.cfg.schedule_groups:
+            return False
+        before = None
+        if before_task_id:
+            before = next((t for t in self._tasks if t.id == before_task_id), None)
+        new_order = reorder_for_group(self._tasks, task, group, before)
+        if new_order is None:
+            return False
+        task.group = group
+        self._tasks[:] = new_order
+        if group and group in self.cfg.collapsed_schedule_groups:
+            self.cfg.collapsed_schedule_groups = [
+                g for g in self.cfg.collapsed_schedule_groups if g != group]
+        self.cfg.save(save_flows=False)
+        self.refresh_list()
+        self.changed.emit()
+        self._select_task_item(task.id)
+        self._status_msg(f"已把「{task.name}」移到「{group or '未分组'}」")
+        return True
 
     def _del_group(self, g: str):
         if QMessageBox.question(self, "删除分组",

@@ -5,6 +5,7 @@ import json
 import os
 import unittest
 from datetime import datetime
+from unittest import mock
 
 from app import config as config_mod
 from app.config import AppConfig, Flow, FlowStep, ScheduleTask, schedule_from_dict
@@ -619,6 +620,134 @@ class TestScheduleTabLogic(unittest.TestCase):
             with mock.patch("app.ui.flow_tab.QMessageBox") as mb:
                 ft._on_state(f.id, "stopped", "找图超时", False)
                 mb.information.assert_called_once()
+
+
+class TestScheduleDragIntoGroup(unittest.TestCase):
+    """★ 把定时任务拖进分组（2026-10-05 用户要求）。
+
+    拖放本身由共用件 `app.ui.group_tree` 实现（其语义在 test_group_tree 里测），
+    这里测**这一页的接线与落地效果**：树用的是 task 角色、信号接上了、
+    落地写回配置且**不碰 flows/**、拖进收起的分组会展开。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _make_tab(self, cfg):
+        from app.ui.schedule_tab import ScheduleTab
+
+        class _FT:
+            def start_flow_if_idle(self, fid, silent=False):
+                return True
+
+            def is_queued(self, fid):
+                return False
+
+        return ScheduleTab(cfg, _FT())
+
+    def _setup(self):
+        cfg = AppConfig()
+        cfg.flows = [Flow(name="F", steps=[FlowStep(type="wait")])]
+        fid = cfg.flows[0].id
+        cfg.schedule_tasks = [
+            ScheduleTask(name="甲任务", mode="day", at_time="09:00",
+                         flow_id=fid, flow_name="F", group="办公"),
+            ScheduleTask(name="乙任务", mode="day", at_time="10:00",
+                         flow_id=fid, flow_name="F", group="办公"),
+            ScheduleTask(name="丙任务", mode="day", at_time="11:00",
+                         flow_id=fid, flow_name="F", group=""),
+        ]
+        cfg.schedule_groups = ["办公", "游戏"]
+        cfg.collapsed_schedule_groups = []
+        return cfg
+
+    def _task(self, cfg, name):
+        return next(t for t in cfg.schedule_tasks if t.name == name)
+
+    def test_tree_is_the_shared_drop_tree(self):
+        """这一页的左栏必须就是共用件（否则又会出现一份各写各的拖放实现）。"""
+        from app.ui.group_tree import GroupDropTree
+        with TempConfigPaths():
+            tab = self._make_tab(self._setup())
+        self.assertIsInstance(tab.list, GroupDropTree)
+        self.assertEqual(tab.list.entry_kind, "task")
+        self.assertTrue(tab.list.dragEnabled())
+        self.assertTrue(tab.list.acceptDrops())
+
+    def test_move_task_into_group_persists_without_touching_flows(self):
+        """落地：写回配置用 save_flows=False（与 flows/ 目录无关）。"""
+        with TempConfigPaths():
+            cfg = self._setup()
+            tab = self._make_tab(cfg)
+            with mock.patch.object(AppConfig, "save") as save:
+                self.assertTrue(tab.move_task_to_group(
+                    self._task(cfg, "丙任务").id, "办公"))
+            self.assertEqual(self._task(cfg, "丙任务").group, "办公")
+            save.assert_called_once()
+            self.assertEqual(save.call_args.kwargs.get("save_flows"), False)
+            self.assertEqual([t.name for t in cfg.schedule_tasks],
+                             ["甲任务", "乙任务", "丙任务"])
+
+    def test_move_task_out_to_ungrouped(self):
+        with TempConfigPaths():
+            cfg = self._setup()
+            tab = self._make_tab(cfg)
+            with mock.patch.object(AppConfig, "save"):
+                self.assertTrue(tab.move_task_to_group(
+                    self._task(cfg, "甲任务").id, ""))
+            self.assertEqual(self._task(cfg, "甲任务").group, "")
+            # 摘出来插到「未分组」这一组的**末尾**（该组最后一个成员是丙任务之后）
+            self.assertEqual([t.name for t in cfg.schedule_tasks],
+                             ["乙任务", "丙任务", "甲任务"])
+
+    def test_drop_before_a_task_reorders(self):
+        with TempConfigPaths():
+            cfg = self._setup()
+            tab = self._make_tab(cfg)
+            with mock.patch.object(AppConfig, "save"):
+                self.assertTrue(tab.move_task_to_group(
+                    self._task(cfg, "乙任务").id, "办公",
+                    self._task(cfg, "甲任务").id))
+            self.assertEqual([t.name for t in cfg.schedule_tasks][:2],
+                             ["乙任务", "甲任务"])
+
+    def test_collapsed_target_group_is_expanded(self):
+        with TempConfigPaths():
+            cfg = self._setup()
+            cfg.collapsed_schedule_groups = ["办公"]
+            tab = self._make_tab(cfg)
+            with mock.patch.object(AppConfig, "save"):
+                tab.move_task_to_group(self._task(cfg, "丙任务").id, "办公")
+            self.assertNotIn("办公", cfg.collapsed_schedule_groups)
+            self.assertTrue(tab._group_item("办公").isExpanded())
+
+    def test_unknown_group_is_rejected(self):
+        with TempConfigPaths():
+            cfg = self._setup()
+            tab = self._make_tab(cfg)
+            with mock.patch.object(AppConfig, "save") as save:
+                self.assertFalse(tab.move_task_to_group(
+                    self._task(cfg, "丙任务").id, "没有这个组"))
+            self.assertFalse(save.called)
+            self.assertEqual(self._task(cfg, "丙任务").group, "")
+
+    def test_noop_drop_does_not_save_or_rebuild(self):
+        """顺序没变（拖回原处）→ 不落盘、不重建列表。"""
+        with TempConfigPaths():
+            cfg = self._setup()
+            tab = self._make_tab(cfg)
+            with mock.patch.object(AppConfig, "save") as save:
+                self.assertFalse(tab.move_task_to_group(
+                    self._task(cfg, "乙任务").id, "办公"))
+            self.assertFalse(save.called)
+
+    def test_unknown_task_is_rejected(self):
+        with TempConfigPaths():
+            cfg = self._setup()
+            tab = self._make_tab(cfg)
+            self.assertFalse(tab.move_task_to_group("没有这个任务", "办公"))
 
 
 if __name__ == "__main__":

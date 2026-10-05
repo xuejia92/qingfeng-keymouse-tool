@@ -1,7 +1,7 @@
 {
   "id": "c29874293284",
   "name": "执行脚本",
-  "group": "测试使用",
+  "group": "111",
   "steps": [
     {
       "type": "var",
@@ -52,5 +52,5 @@
   "loops": 1,
   "created_seq": 9,
   "async_run": false,
-  "order": 7
+  "order": 17
 }

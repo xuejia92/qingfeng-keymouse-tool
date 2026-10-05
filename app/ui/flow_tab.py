@@ -35,6 +35,7 @@ from ..config import (ASYNC_MARK, ASYNC_TIP, AppConfig, BASE_DIR, FLOW_STEP_TYPE
                       step_missing_required)
 from ..flows import FlowRunner
 from . import theme
+from .group_tree import GroupDropTree, reorder_for_group
 from ..keymap import hotkey_display
 from ..logbus import log
 from .flow_dialog import (FlowMetaDialog, GroupRunDialog, ModuleButton, StepList,
@@ -187,6 +188,7 @@ class FlowTab(QWidget):
         self._capture_step_dlg = None
         self._ratio_applied = False
         self._searching = False        # 模块面板搜索中：此时收起/展开分组不落盘
+        self._flow_search_kw = ""      # 左栏流程搜索关键词（小写）；空 = 未过滤
         self._step_list_sig = _STEP_LIST_UNSET   # 右侧步骤列表上次渲染的内容签名
         self._step_list_flow_id = None           # 当前列表渲染的是哪个流程
         # 每个流程各自记住「上次选中的步骤行」（切走再切回来要还原，2026-10-02）
@@ -334,6 +336,22 @@ class FlowTab(QWidget):
             QWidget#flowTab QGroupBox#modulePanel QPushButton#moduleSearchClear:hover {
                 border-color: #1668a8; background: #f3f8fd;
             }
+            /* 左栏流程搜索输入框与清空按钮（左栏底部，与右栏模块搜索同款）。
+               左栏不在 QGroupBox 里，所以选择器直接挂 flowTab + id；清空按钮没有
+               更具体的规则会压过它（flowList 里那条只管树内按钮，够不到这里）。 */
+            QWidget#flowTab QLineEdit#flowSearch {
+                border: 1px solid #d8dee4; border-radius: 6px;
+                padding: 5px 8px; font-size: 10pt; background: white; color: #24292f;
+            }
+            QWidget#flowTab QLineEdit#flowSearch:focus { border-color: #1668a8; }
+            QWidget#flowTab QPushButton#flowSearchClear {
+                text-align: center; padding: 4px 10px;
+                font-size: 10pt; border: 1px solid #d8dee4;
+                border-radius: 6px; background: white; color: #1668a8;
+            }
+            QWidget#flowTab QPushButton#flowSearchClear:hover {
+                border-color: #1668a8; background: #f3f8fd;
+            }
         """)
 
         root = QVBoxLayout(self)
@@ -356,15 +374,44 @@ class FlowTab(QWidget):
         set_variant(self.new_group_btn, "primary")
         lbar1.addWidget(self.new_group_btn, 1)
         llay.addLayout(lbar1)
-        self.list = QTreeWidget()
+        # 按分组拖放（拖进分组/组内调序）见 group_tree 模块
+        self.list = GroupDropTree("flow")
         self.list.setObjectName("flowList")
         self.list.setHeaderHidden(True)
         self.list.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
         self.list.setRootIsDecorated(False)      # 分组头自带按钮，不需要系统展开箭头
         self.list.setIndentation(22)              # 流程条目明显缩进，压在分组色带之下
+        self.list.entry_dropped.connect(self.move_flow_to_group)   # 拖进分组（见 group_tree）
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._flow_context_menu)
         llay.addWidget(self.list, 1)
+
+        # 无结果提示：搜索不到流程时显示，平时隐藏
+        self._flow_no_result_label = QLabel("未找到匹配流程")
+        self._flow_no_result_label.setObjectName("flowNoResult")
+        self._flow_no_result_label.setAlignment(Qt.AlignCenter)
+        self._flow_no_result_label.setStyleSheet("color: #8899aa; padding: 4px 2px;")
+        self._flow_no_result_label.setVisible(False)
+        llay.addWidget(self._flow_no_result_label)
+
+        # 底部搜索框 + 清空按钮（与右栏模块搜索同款）：实时按关键词过滤流程并展开命中分组
+        flow_search_row = QHBoxLayout()
+        flow_search_row.setContentsMargins(0, 6, 0, 0)
+        flow_search_row.setSpacing(6)
+        self.flow_search_edit = QLineEdit()
+        self.flow_search_edit.setObjectName("flowSearch")
+        self.flow_search_edit.setPlaceholderText("搜索流程…")
+        self.flow_search_edit.setClearButtonEnabled(False)
+        self.flow_search_edit.textChanged.connect(self._on_flow_search_changed)
+        flow_search_row.addWidget(self.flow_search_edit, 1)
+        self.flow_search_clear_btn = QPushButton("清空")
+        self.flow_search_clear_btn.setObjectName("flowSearchClear")
+        self.flow_search_clear_btn.setCursor(Qt.PointingHandCursor)
+        self.flow_search_clear_btn.setToolTip("清空搜索并恢复显示所有流程")
+        self.flow_search_clear_btn.clicked.connect(self._clear_flow_search)
+        flow_search_row.addWidget(self.flow_search_clear_btn)
+        llay.addLayout(flow_search_row)
+
         left.setMinimumWidth(200)
         splitter.addWidget(left)
 
@@ -601,6 +648,8 @@ class FlowTab(QWidget):
                 gitem.addChild(citem)
             gitem.setExpanded(expanded)
         self.list.blockSignals(False)
+        if self._flow_search_kw:      # 重建后保持过滤态（空关键词时构建期已是全显）
+            self._apply_flow_search()
         self._restore_selection()
         self.refresh_steps_view()
 
@@ -641,14 +690,91 @@ class FlowTab(QWidget):
         return None
 
     def _first_visible_flow(self) -> Flow | None:
-        """左栏从上往下第一个流程（空分组自动跳过）。"""
+        """左栏从上往下第一个**可见**流程（空分组、被搜索过滤掉的行自动跳过）。"""
         for i in range(self.list.topLevelItemCount()):
             gitem = self.list.topLevelItem(i)
+            if gitem.isHidden():
+                continue
             for j in range(gitem.childCount()):
-                data = gitem.child(j).data(0, Qt.UserRole)
+                citem = gitem.child(j)
+                if citem.isHidden():
+                    continue
+                data = citem.data(0, Qt.UserRole)
                 if data and data[0] == "flow":
                     return self._flow_by_id(data[1])
         return None
+
+    # ---------- 左栏流程搜索 ----------
+    def _flow_matches(self, flow: Flow, kw: str) -> bool:
+        """流程是否命中关键词：匹配流程名（不区分大小写）。"""
+        return kw in (flow.name or "").lower()
+
+    def _set_group_header_text(self, gitem: QTreeWidgetItem, g: str, expanded: bool):
+        """把分组头的展开符同步成当前状态（搜索自动展开时也要更新，否则箭头会骗人）。"""
+        header = self.list.itemWidget(gitem, 0)
+        if header is not None:
+            btn = header.findChild(QPushButton, "groupTitle")
+            if btn is not None:
+                btn.setText(self._group_title_text(g, expanded))
+
+    def _apply_flow_search(self):
+        """按关键词过滤左栏流程：仅显示命中流程，自动展开命中分组，隐藏空分组。
+
+        分组名本身命中时，该组下所有流程都算命中（搜分组名 = 看整组内容）。
+        搜索是**临时过滤态**：不写入 cfg.collapsed_flow_groups，清空后按配置恢复。
+        """
+        kw = self._flow_search_kw
+        if not kw:
+            self._restore_flow_list()
+            return
+        matched_any = False
+        for i in range(self.list.topLevelItemCount()):
+            gitem = self.list.topLevelItem(i)
+            gdata = gitem.data(0, Qt.UserRole)
+            g = gdata[1] if gdata else ""
+            group_hit = kw in ((g or "未分组").lower())
+            hits = 0
+            for j in range(gitem.childCount()):
+                citem = gitem.child(j)
+                cdata = citem.data(0, Qt.UserRole)
+                flow = self._flow_by_id(cdata[1]) if cdata else None
+                hit = group_hit or (flow is not None and self._flow_matches(flow, kw))
+                citem.setHidden(not hit)
+                hits += 1 if hit else 0
+            show = hits > 0
+            gitem.setHidden(not show)
+            if show:
+                gitem.setExpanded(True)          # 命中就展开，结果直接可见
+                self._set_group_header_text(gitem, g, True)
+                matched_any = True
+        self._flow_no_result_label.setVisible(not matched_any)
+
+    def _restore_flow_list(self):
+        """退出搜索：显示全部流程与分组，并按配置恢复各分组的展开/收起状态。"""
+        collapsed = set(self.cfg.collapsed_flow_groups)
+        for i in range(self.list.topLevelItemCount()):
+            gitem = self.list.topLevelItem(i)
+            gdata = gitem.data(0, Qt.UserRole)
+            g = gdata[1] if gdata else ""
+            for j in range(gitem.childCount()):
+                gitem.child(j).setHidden(False)
+            gitem.setHidden(False)
+            expanded = g not in collapsed
+            gitem.setExpanded(expanded)
+            self._set_group_header_text(gitem, g, expanded)
+        self._flow_no_result_label.setVisible(False)
+
+    def _on_flow_search_changed(self, text: str):
+        """搜索框内容变化：实时过滤；空则恢复全部显示。"""
+        self._flow_search_kw = (text or "").strip().lower()
+        self._apply_flow_search()
+
+    def _clear_flow_search(self):
+        """清空搜索框并恢复所有流程与分组。"""
+        if self.flow_search_edit.text():
+            self.flow_search_edit.clear()   # 触发 textChanged("") -> _restore_flow_list
+        else:
+            self._restore_flow_list()
 
     # ---------- 分组热键（运行本组全部流程） ----------
     def group_hotkey(self, g: str) -> str:
@@ -744,6 +870,8 @@ class FlowTab(QWidget):
 
     def _toggle_group(self, g: str):
         """点击分组头：切换展开/收起，并把状态持久化到 config。"""
+        if self._flow_search_kw:   # 搜索中展开由过滤逻辑接管，不落盘
+            return
         item = self._group_item(g)
         if item is None:
             return
@@ -1972,6 +2100,39 @@ class FlowTab(QWidget):
         self._select_flow_item(flow.id)
         self.changed.emit()
         self._status_msg(f"已置顶「{flow.name}」", 4000)
+
+    def move_flow_to_group(self, flow_id: str, group: str,
+                           before_flow_id: str = "") -> bool:
+        """把流程移到某个分组（拖放落地时调用）；`group` 为空 = 移出分组到「未分组」。
+
+        - 组内顺序 = `self._flows` 的顺序，所以"移过去"= 把流程插到目标位置：
+          给了 `before_flow_id` 就插到那条流程**前面**，否则排在该组**末尾**；
+        - **不改 `created_seq`**：那是"创建序号"（供「按创建顺序排序」用），
+          与"现在摆在哪"是两件事，改了会把排序功能弄坏；
+        - 目标分组不存在（拖到野地方）或本来就在那一组 → 返回 False，什么都不做。
+        """
+        flow = self._flow_by_id(flow_id)
+        if flow is None:
+            return False
+        group = str(group or "")
+        if group and group not in self.cfg.flow_groups:
+            return False
+        before = self._flow_by_id(before_flow_id) if before_flow_id else None
+        new_order = reorder_for_group(self._flows, flow, group, before)
+        if new_order is None:
+            return False                        # 白拖一下：不重建列表（会打断选中）
+        flow.group = group
+        self._flows[:] = new_order
+        if group and group in self.cfg.collapsed_flow_groups:
+            # 展开目标分组，让用户立刻看到流程去哪了（否则搬进收起的分组像"消失了"）
+            self.cfg.collapsed_flow_groups = [
+                g for g in self.cfg.collapsed_flow_groups if g != group]
+        self.cfg.save()
+        self.refresh_list()
+        self.changed.emit()
+        self._select_flow_item(flow.id)
+        self._status_msg(f"已把「{flow.name}」移到「{group or '未分组'}」", 4000)
+        return True
 
     def _sort_flows_in_group(self, group: str):
         """把某分组内的流程按创建顺序（created_seq）升序重排，其余分组不受影响。"""

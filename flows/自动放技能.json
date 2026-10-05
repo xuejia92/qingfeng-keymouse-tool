@@ -1,7 +1,7 @@
 {
   "id": "2d90f94e0288",
   "name": "自动放技能",
-  "group": "流放之路2",
+  "group": "111",
   "steps": [
     {
       "type": "while",
@@ -139,5 +139,5 @@
   "loops": 1,
   "created_seq": 15,
   "async_run": true,
-  "order": 2
+  "order": 18
 }

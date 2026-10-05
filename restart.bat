@@ -9,6 +9,9 @@ rem   - starts main.py through restart_watchdog.py
 rem   - before every start (and every Ctrl+R restart) the watchdog syncs the
 rem     newest templates\ and flows\ into dist\ (same logic as build.py), so
 rem     the packaged copy in dist never keeps stale data
+rem   - task_board.json (the task board mini app) is synced BOTH ways between
+rem     the workspace and dist\: whichever side was changed last wins, so the
+rem     source build and the packaged exe share one board
 rem   - press Ctrl+R inside THIS console window to restart the app
 rem   - when the app quits by itself, this script exits
 rem   - any error keeps this window open (pause) so you can read it

@@ -23,14 +23,14 @@
   },
   "find_tasks": [],
   "flow_groups": [
-    "测试"
+    "测试",
+    "111"
   ],
   "flow_group_seqs": {
-    "测试": 1
+    "测试": 1,
+    "111": 2
   },
-  "collapsed_flow_groups": [
-    "测试"
-  ],
+  "collapsed_flow_groups": [],
   "clear_log_on_run": true,
   "log_print_only": true,
   "collapsed_module_groups": [
@@ -50,33 +50,37 @@
     {
       "id": "cb4d4468d8d4",
       "name": "新建定时任务",
-      "group": "",
-      "flow_id": "ecefa3b1ff25",
-      "flow_name": "定时任务测试",
+      "group": "111",
+      "flow_id": "f3b3da16ecc3",
+      "flow_name": "打印九九乘法表",
       "enabled": false,
       "mode": "second",
       "interval": 2,
       "at_time": "09:00",
       "weekdays": [],
       "monthdays": [],
-      "once_at": "2026-10-03 23:01",
+      "once_at": "2026-10-05 22:24",
       "cron": "",
-      "last_run": "2026-10-03 22:04:22",
-      "next_run": "",
+      "last_run": "2026-10-05 22:23:32",
+      "next_run": "2026-10-05 22:23:34",
       "missed_fires": 0,
-      "last_alert_date": "2026-10-03"
+      "last_alert_date": "2026-10-05"
     }
   ],
-  "schedule_groups": [],
+  "schedule_groups": [
+    "111"
+  ],
   "collapsed_schedule_groups": [],
-  "middle_menu_enabled": false,
+  "middle_menu_enabled": true,
   "middle_menu_suppress": true,
   "middle_menu_hotkey": "alt+q",
   "middle_menu_tools": [
-    "calculator",
+    "clipboard_history",
+    "custom:61665f515c56",
+    "custom:8c3fd7c502dc",
     "lan_transfer",
-    "startup_items",
-    "clipboard_history"
+    "custom:81491146bf2b",
+    "task_board"
   ],
   "middle_menu_items": [
     {
@@ -85,7 +89,29 @@
       "icon": "play",
       "flow_id": "79e891f0a720",
       "flow_name": "截图并悬浮",
-      "separator_before": true
+      "separator_before": false
+    },
+    {
+      "id": "bec24db53edc",
+      "label": "",
+      "icon": "sheet",
+      "flow_id": "f3b3da16ecc3",
+      "flow_name": "打印九九乘法表",
+      "separator_before": false
+    }
+  ],
+  "custom_tools": [
+    {
+      "name": "Everything",
+      "path": "D:/Program Files/Everything/Everything.exe"
+    },
+    {
+      "name": "chrome.exe - 快捷方式",
+      "path": "C:/Users/清风/Desktop/chrome.exe - 快捷方式.lnk"
+    },
+    {
+      "name": "program - 快捷方式",
+      "path": "C:/Users/清风/Desktop/program - 快捷方式.lnk"
     }
   ],
   "run_overlay_enabled": true,
@@ -111,6 +137,6 @@
   "run_overlay_log_max_height": 180,
   "run_overlay_log_auto_hide_sec": 60,
   "run_overlay_log_custom_pos": "",
-  "ui_theme": "lavender",
+  "ui_theme": "warm_paper",
   "ui_font_scale": 100
 }

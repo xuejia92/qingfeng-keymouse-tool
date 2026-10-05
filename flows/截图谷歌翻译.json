@@ -1,7 +1,7 @@
 {
   "id": "bb3313283d5a",
   "name": "截图谷歌翻译",
-  "group": "测试",
+  "group": "111",
   "steps": [
     {
       "type": "shot_translate",
@@ -72,5 +72,5 @@
   "loops": 1,
   "created_seq": 14,
   "async_run": false,
-  "order": 1
+  "order": 13
 }

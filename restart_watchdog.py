@@ -18,7 +18,13 @@
 -------------
 每次启动 / 重启前，会把工作区最新的 `templates` / `flows` 同步到 `dist` 里的同名目录
 （复用 build.py 的同一套实现，与打包脚本行为一致），免得 dist 里那份打包版还在用旧模板、
-旧流程。**同步失败只提示、不影响启动**。没有 dist 目录（没打过包）时静默跳过。
+旧流程；`config.json` 同步最新内容但保留 dist 自己的发布 version。
+
+`task_board.json`（任务看板小程序的数据）走**双向**同步：源码模式写工作区那份、
+打包后的 exe 写 dist 那份，两个入口都会改，所以按修改时间取新的覆盖旧的
+（见 `build.sync_task_board`），这样在哪个入口用都是同一份任务。
+
+**同步失败只提示、不影响启动**。没有 dist 目录（没打过包）时静默跳过。
 
 退出码（restart.bat 依赖，不可随意改）
 - 0  收到重启请求 → bat 重新启动
@@ -483,6 +489,17 @@ def sync_dist_data() -> dict | None:
             say("  [同步] config.json 最新内容 → dist（version 各自保留）")
     except Exception as e:
         say(f"  [!] 同步 config.json 到 dist 失败（不影响启动）：{e}")
+    # task_board.json：**双向**同步（谁新以谁为准）。
+    # 源码模式写工作区那份、打包后的 exe 写 dist 那份，两个入口都会改，所以不能单向覆盖。
+    try:
+        status = build.sync_task_board(quiet=True)
+    except Exception as e:
+        say(f"  [!] 同步 {build.TASK_BOARD_FILE} 失败（不影响启动）：{e}")
+    else:
+        arrow = {"ws-to-dist": "工作区 → dist",
+                 "dist-to-ws": "dist → 工作区"}.get(status)
+        if arrow:
+            say(f"  [同步] {build.TASK_BOARD_FILE}：{arrow}")
     return st
 
 
@@ -507,7 +524,8 @@ def self_check() -> int:
         ok = False
     if ok:
         say("  [√] 环境检查通过，可以启动 main.py")
-    say("  dist 数据 : 启动前会自动把 templates / flows 同步到 dist（没有 dist 则跳过）")
+    say("  dist 数据 : 启动前会把 templates / flows 同步到 dist，"
+        "task_board.json 双向同步（没有 dist 则跳过）")
     return 0 if ok else EXIT_ENV_ERROR
 
 

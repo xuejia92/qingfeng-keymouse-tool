@@ -27,7 +27,8 @@ from ..keymap import hotkey_display
 from .hotkey_edit import HotkeyEdit
 from .middle_menu_dialog import MiddleMenuDialog
 from .middle_menu_icons import ICON_SIZE, blank_icon, icon_for
-from .middle_menu_tools import ToolGridEditor, ToolGridWidget, resolve_tools
+from ..tool_entries import resolve_entries
+from .middle_menu_tools import ToolGridEditor, ToolGridWidget
 from .widgets import set_variant
 
 _ROLE_ID = Qt.UserRole
@@ -74,7 +75,8 @@ QMenu::separator {{
 """
 
 
-def build_menu(items, flows, parent=None, tools=None, on_tool=None) -> "QMenu | None":
+def build_menu(items, flows, parent=None, tools=None, on_tool=None,
+               custom_tools=None) -> "QMenu | None":
     """按菜单项列表构造运行时弹出的 QMenu；无可展示条目时返回 None。
 
     菜单分两段（2026-10-03 重新设计）：
@@ -89,8 +91,8 @@ def build_menu(items, flows, parent=None, tools=None, on_tool=None) -> "QMenu | 
     """
     by_id = {f.id: f for f in flows or []}
     entries = [(it, by_id[it.flow_id]) for it in (items or []) if it.flow_id in by_id]
-    grid_keys = [key for key, _app in resolve_tools(tools or [])]
-    if not entries and not grid_keys:
+    grid_entries = resolve_entries(tools or [], custom_tools)
+    if not entries and not grid_entries:
         return None
     # 图标是「可选」的：先把 key 解析成真实图标（认不出的 key 会解析成空图标），
     # 只要有**一条真能画出图标**，就给没图标的条目补一个透明占位图标，否则 Qt 只让
@@ -104,9 +106,11 @@ def build_menu(items, flows, parent=None, tools=None, on_tool=None) -> "QMenu | 
     menu.setStyleSheet(menu_qss())
     menu.setToolTipsVisible(True)      # 悬停显示所关联流程名（自定义名称时尤其有用）
 
-    # ---- 上段：九宫格工具 ----
-    if grid_keys:
-        grid = ToolGridWidget(grid_keys, on_tool or (lambda _key: None))
+    # ---- 上段：九宫格工具（内置小程序 + 用户自定义程序）----
+    if grid_entries:
+        grid = ToolGridWidget([entry.key for entry in grid_entries],
+                              on_tool or (lambda _key: None),
+                              custom_tools=custom_tools)
         holder = QWidgetAction(menu)
         holder.setDefaultWidget(grid)
         menu.addAction(holder)
@@ -242,7 +246,11 @@ class MiddleMenuTab(QWidget):
 
         # 九宫格工具（2026-10-03）：中键菜单最上面那 3×3 格，最多 9 个小工具。
         # 放在流程列表**上方**，与弹出菜单里「上面宫格、下面流程」的顺序一致。
-        self.tools_editor = ToolGridEditor(self.cfg.middle_menu_tools)
+        # ⚠️ 自定义程序用 **provider 实时取值**（lambda 读 cfg）：小工具页在运行期
+        # 随时会加程序，构造时抄一份列表的话，九宫格的候选里就永远看不到新加的
+        self.tools_editor = ToolGridEditor(
+            self.cfg.middle_menu_tools,
+            custom_tools_provider=lambda: self.cfg.custom_tools)
         self.tools_editor.changed.connect(self._on_tools_changed)
         root.addWidget(self.tools_editor)
 
@@ -318,7 +326,11 @@ class MiddleMenuTab(QWidget):
         self.del_btn.setEnabled(has)
         self.up_btn.setEnabled(has and row > 0)
         self.down_btn.setEnabled(has and row < self.list.count() - 1)
-        self.preview_btn.setEnabled(bool(build_menu(self._items, self.cfg.flows)))
+        # 用与 _preview 同一套参数判断"有没有东西可预览"：只有工具（含自定义程序）
+        # 也算 —— 否则配了工具却没配流程时，预览按钮会是灰的
+        self.preview_btn.setEnabled(bool(build_menu(
+            self._items, self.cfg.flows, tools=self.cfg.middle_menu_tools,
+            custom_tools=self.cfg.custom_tools)))
 
     def _selected(self) -> "MiddleMenuItem | None":
         entry = self.list.currentItem()
@@ -438,7 +450,8 @@ class MiddleMenuTab(QWidget):
         """预览菜单外观（提示里已说明：预览中点条目不会运行流程，工具也不会打开）。"""
         menu = build_menu(self._items, self.cfg.flows, self,
                           tools=self.cfg.middle_menu_tools,
-                          on_tool=lambda _key: menu.close())
+                          on_tool=lambda _key: menu.close(),
+                          custom_tools=self.cfg.custom_tools)
         if menu is None:
             self._status("还没有可用的菜单项（关联流程可能已被删除）")
             return
@@ -446,6 +459,16 @@ class MiddleMenuTab(QWidget):
 
     def on_flows_changed(self) -> None:
         """流程增删改后刷新：菜单项名称与断链提示都要跟着更新。"""
+        self.refresh_list()
+
+    def on_tools_changed(self) -> None:
+        """「🧰 小工具」页加/删/改了程序：九宫格的候选与已填格子都要跟上。
+
+        为什么不能只在打开管理页时刷新：用户在小工具页加完程序，通常**不会**
+        重新进一次管理页 —— 反馈里的「动态新添加的电脑程序，中键菜单里无法实时
+        获取到」就是这条链路断了。
+        """
+        self.tools_editor.on_tools_changed()
         self.refresh_list()
 
     def _status(self, text: str) -> None:

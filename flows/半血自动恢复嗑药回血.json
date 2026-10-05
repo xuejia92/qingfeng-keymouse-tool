@@ -1,7 +1,7 @@
 {
   "id": "6689af0ecf64",
   "name": "半血自动恢复嗑药回血",
-  "group": "流放之路2",
+  "group": "测试",
   "steps": [
     {
       "type": "while",
@@ -113,5 +113,5 @@
   "loops": 1,
   "created_seq": 16,
   "async_run": true,
-  "order": 14
+  "order": 0
 }

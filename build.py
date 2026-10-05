@@ -6,7 +6,8 @@
     python build.py --dir        onedir 目录模式，启动更快，适合改完代码快速验证
     python build.py --console    保留控制台窗口（排查启动崩溃用）
     python build.py --clean      清空 PyInstaller 缓存后全量重打
-    python build.py --sync-only  只把最新的 templates\\ / flows\\ 同步到 dist，不打包
+    python build.py --sync-only  只把最新的 templates\\ / flows\\ 同步到 dist，
+                                 并双向同步 task_board.json，不打包
 
 实测（20 核 / PyInstaller 6.15.0 / Python 3.12.10）：
 - 打包约 54 秒，产物约 105 MB 单文件（含 OCR 模型）。
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -51,6 +53,11 @@ EXE_NAME = f"{APP_NAME}.exe"
 # 打包后要同步到 dist 的数据目录：exe 读的是同级目录里的这些文件夹，
 # 只留在工作区的改动同步过去才算"打包即最新"（见 sync_data_dirs）。
 SYNC_DIRS = ("templates", "flows")
+
+# 任务看板小程序的数据文件。它和 templates/flows 不一样：**两个入口都会写**——
+# 源码模式（restart.bat）写工作区那份，打包后的 exe 写 dist 那份，所以这里做
+# **双向**同步（谁新以谁为准），而不是单向覆盖。见 sync_task_board。
+TASK_BOARD_FILE = "task_board.json"
 
 # 按 sys.platform 拼模块名做动态导入的平台后端，静态分析扫不到
 HIDDEN_MODULES = [
@@ -388,6 +395,133 @@ def sync_data_dirs(names=SYNC_DIRS, quiet: bool = False) -> dict:
     return summary
 
 
+def _read_task_board(path: str) -> dict | None:
+    """读一个 task_board.json；读不动 / 不是看板形状时返回 None。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("columns"), list):
+        return None
+    return data
+
+
+def task_board_count(data: dict | None) -> int | None:
+    """看板里的任务总数；不是合法看板时返回 None。"""
+    if not isinstance(data, dict) or not isinstance(data.get("columns"), list):
+        return None
+    total = 0
+    for col in data["columns"]:
+        if isinstance(col, dict) and isinstance(col.get("tasks"), list):
+            total += len(col["tasks"])
+    return total
+
+
+def _same_bytes(a: str, b: str) -> bool:
+    """两个文件内容是否完全一致（读不动一律按「不一致」处理）。"""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
+def _backup_task_board(dist_dir: str, path: str) -> str:
+    """把**即将被覆盖**的那份 task_board.json 备份到 dist\\_sync_backup\\<时间戳>\\。
+
+    返回相对 BASE_DIR 的备份路径；失败返回空串（备份失败不拦住同步，只在提示里体现）。
+    """
+    try:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        out_dir = os.path.join(dist_dir, "_sync_backup", stamp)
+        os.makedirs(out_dir, exist_ok=True)
+        out = os.path.join(out_dir, TASK_BOARD_FILE)
+        shutil.copy2(path, out)
+        return os.path.relpath(out, BASE_DIR)
+    except OSError:
+        return ""
+
+
+def sync_task_board(quiet: bool = False) -> str:
+    """把 task_board.json 在「工作区」与「dist」之间**双向**同步（谁新以谁为准）。
+
+    为什么双向：同一份任务看板会被两个入口写 —— 源码模式（restart.bat）写工作区
+    那份，打包后的 exe 写 dist 那份。只做单向的话，两边会各自攒出一份互不相见的
+    任务；按修改时间取新的覆盖旧的，才能"从哪个入口用都是同一份"。
+
+    安全兜底（都不会静默丢数据）：
+    - 源文件不是合法看板（手改坏 / 写了一半）→ 跳过，不拿它覆盖对面好的那份；
+    - **被覆盖**的那份任务数比覆盖它的多（时间戳不可信 / 用户回滚过文件）→
+      先备份到 dist\\_sync_backup\\<时间戳>\\ 再覆盖。
+
+    内容一致、只有一边有、没有 dist 目录都直接跳过（不会凭空建出 dist）。
+    返回结果码（便于测试与调用方决定要不要提示）：
+    "no-dist" / "none" / "same" / "ws-to-dist" / "dist-to-ws" / "invalid-src" / "failed"。
+    """
+    if not os.path.isdir(DIST_DIR):
+        return "no-dist"
+    ws = os.path.join(BASE_DIR, TASK_BOARD_FILE)
+    dst = os.path.join(DIST_DIR, TASK_BOARD_FILE)
+    ws_ok, dst_ok = os.path.isfile(ws), os.path.isfile(dst)
+
+    if not ws_ok and not dst_ok:
+        return "none"
+    if ws_ok and not dst_ok:
+        src, target = ws, dst
+        code, note = "ws-to-dist", "工作区 → dist（dist 里还没有）"
+    elif dst_ok and not ws_ok:
+        src, target = dst, ws
+        code, note = "dist-to-ws", "dist → 工作区（工作区里还没有）"
+    else:
+        if _same_bytes(ws, dst):
+            return "same"
+        try:
+            # 按秒取整比较，躲开文件系统精度抖动（与 _sync_one_dir 同一口径）
+            ws_newer = int(os.path.getmtime(ws)) >= int(os.path.getmtime(dst))
+        except OSError:
+            return "failed"
+        src, target = (ws, dst) if ws_newer else (dst, ws)
+        code = "ws-to-dist" if ws_newer else "dist-to-ws"
+        note = ("工作区 → dist（工作区更新）" if ws_newer
+                else "dist → 工作区（dist 更新）")
+
+    src_count = task_board_count(_read_task_board(src))
+    if src_count is None:
+        if not quiet:
+            print(f"  [!] {TASK_BOARD_FILE} 源文件不是合法看板，已跳过同步"
+                  "（不拿它覆盖对面那份）")
+        return "invalid-src"
+
+    backup = ""
+    loser_count = task_board_count(_read_task_board(target))
+    if loser_count is not None and loser_count > src_count:
+        backup = _backup_task_board(DIST_DIR, target)
+
+    try:
+        # 先写同目录 .tmp 再 replace：中途崩了也不会留下半个文件
+        tmp = target + ".tmp"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, target)
+    except OSError as e:
+        try:
+            os.remove(target + ".tmp")
+        except OSError:
+            pass
+        if not quiet:
+            print(f"  [!] 同步 {TASK_BOARD_FILE} 失败（不影响使用）：{e}")
+        return "failed"
+
+    if not quiet:
+        line = f"  [同步] {TASK_BOARD_FILE}：{note}"
+        if backup:
+            line += f" · 被覆盖的那份任务更多，已备份到 {backup}"
+        print(line)
+    return code
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="PyInstaller 打包")
     ap.add_argument("--dir", action="store_true",
@@ -397,7 +531,8 @@ def main() -> int:
     ap.add_argument("--clean", action="store_true",
                     help="清空 PyInstaller 缓存后全量重打")
     ap.add_argument("--sync-only", action="store_true",
-                    help="只把最新的 templates / flows 同步到 dist，不重新打包")
+                    help="只把最新的 templates / flows 同步到 dist，"
+                         "并双向同步 task_board.json，不重新打包")
     args = ap.parse_args()
 
     ensure_interpreter()          # 必须在 os.chdir 之前：sys.argv[0] 可能是相对路径
@@ -406,6 +541,7 @@ def main() -> int:
     if args.sync_only:
         os.makedirs(DIST_DIR, exist_ok=True)
         sync_data_dirs()
+        sync_task_board()
         return 0
 
     if _is_running(EXE_NAME):
@@ -444,14 +580,18 @@ def main() -> int:
         return 1
 
     # 打包成功后：把工作区最新的 templates / flows 同步到 dist，
-    # 免得 exe 旁边还是旧模板/旧流程（改了没生效最容易踩的坑）
+    # 免得 exe 旁边还是旧模板/旧流程（改了没生效最容易踩的坑）；
+    # task_board.json 双向同步（打包版的看板改动也能带回来）
     sync_data_dirs()
+    sync_task_board()
 
     size_mb = os.path.getsize(exe) / 1048576
     print(f"\n[完成] 耗时 {_fmt(elapsed)}")
     print(f"       {os.path.relpath(exe, BASE_DIR)}（{size_mb:.1f} MB）")
-    print("       说明：config.json / templates\\ / flows\\ / app.log 在 exe 同级目录；"
-          "本次已把工作区最新的 templates 与 flows 同步过去。")
+    print("       说明：config.json / templates\\ / flows\\ / task_board.json / app.log "
+          "在 exe 同级目录；")
+    print("             本次已把工作区最新的 templates 与 flows 同步过去，"
+          "task_board.json 双向同步。")
     return 0
 
 

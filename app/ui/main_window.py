@@ -34,13 +34,14 @@ from .settings_tab import SettingsTab
 from .tools_tab import ToolsTab
 from .update_dialog import AutoDownloader, VersionFetcher
 
-# 基准设计分辨率与对应窗口尺寸：2560x1440 屏 → 1500x1030
+# 基准设计分辨率与对应窗口尺寸：2560x1440 屏 → 1620x1030
 # （2026-09-04 由 1300x900 加大到 1400x960；2026-10-03 用户要求「默认打开尺寸稍微大一点」
-#  再加到 1500x1030。改基准而不是改缩放比例，可以让**所有分辨率**都同比例变大：
-#  1920x1080 由 1050x720 → 1125x772，2K/4K 由 1400x960 → 1500x1030；
-#  而小屏（≤1366 宽）本来就走 _MIN_WINDOW 下限，不受影响。）
+#  加到 1500x1030；2026-10-05 用户要求「客户端宽度稍微大一点」→ 宽度单加 1500→1620。
+#  改基准而不是改缩放比例，可以让**所有分辨率**都同比例变大：1920x1080 由
+#  1125x772 → 1215x772；而小屏（≤1366 宽）本来就走 _MIN_WINDOW 下限，不受影响。
+#  只加宽不加高：小工具页的宫格列数按宽度算，宽一点能多排一列。）
 _BASE_SCREEN = (2560, 1440)
-_BASE_WINDOW = (1500, 1030)
+_BASE_WINDOW = (1620, 1030)
 # 窗口尺寸下限（防止屏幕太小时缩到没法用）
 _MIN_WINDOW = (980, 660)
 # 中键在"菜单外面按下"关掉菜单后，这段时间内的中键**抬起**不再触发重开。
@@ -227,7 +228,7 @@ class MainWindow(FramelessMainWindow):
         self.flow_tab = FlowTab(cfg)
         self.schedule_tab = ScheduleTab(cfg, self.flow_tab)
         self.middle_menu_tab = MiddleMenuTab(cfg)
-        self.tools_tab = ToolsTab()
+        self.tools_tab = ToolsTab(cfg)
         self.settings_tab = SettingsTab(cfg)
         # 中键菜单 / 鼠标连点 / 键盘连按 / 找图点击 合成「⚡ 快捷操作」一页
         # （左侧导航 + 右侧内容）；四个控件对象与信号接线原样复用，只是不再各自占一个标签。
@@ -375,6 +376,9 @@ class MainWindow(FramelessMainWindow):
         # 流程增删改后，同步刷新定时任务页与中键菜单页的流程名兜底显示
         self.flow_tab.changed.connect(self.schedule_tab.on_flows_changed)
         self.flow_tab.changed.connect(self.middle_menu_tab.on_flows_changed)
+        # 「🧰 小工具」页加/删/改了自定义程序 → 中键菜单九宫格的候选要立刻跟上
+        # （否则用户加完程序，得重启才能放进九宫格）
+        self.tools_tab.toolsChanged.connect(self.middle_menu_tab.on_tools_changed)
         # 中键菜单配置（菜单项 / 开关）变化：重配置监听并持久化
         self.middle_menu_tab.changed.connect(self._on_middle_menu_changed)
         # 「每次运行清空日志」勾选状态持久化到配置
@@ -766,14 +770,18 @@ class MainWindow(FramelessMainWindow):
             self._middle_menu.close()
 
     def _open_middle_menu_tool(self, key: str) -> None:
-        """打开菜单里选中的小工具：与在「🧰 小工具」页点卡片走**同一条路径**。"""
-        from ..mini_apps import find_app
-        from .mini_window import open_mini_app
-        app = find_app(key)
-        if app is None:
-            self.statusBar().showMessage("中键菜单：该小工具已不存在，请重新配置", 4000)
+        """打开菜单里选中的工具：与在「🧰 小工具」页点卡片走**同一条路径**。
+
+        条目可能是内置小程序（开独立窗口），也可能是用户自定义添加的电脑里的程序
+        （交给系统打开），统一由 `tool_entries.open_entry` 分发。
+        """
+        from ..tool_entries import find_entry, open_entry
+        entry = find_entry(key, self.cfg.custom_tools)
+        if entry is None:
+            self.statusBar().showMessage(
+                "中键菜单：该工具已不存在（可能已被移除），请重新配置", 4000)
             return
-        open_mini_app(app, anchor=self)
+        open_entry(entry, anchor=self)
 
     def show_middle_menu(self, source: str = "中键") -> None:
         """在光标处弹出中键菜单，选中条目则运行对应流程。
@@ -825,7 +833,8 @@ class MainWindow(FramelessMainWindow):
                 self._pending_middle_pos = None
                 menu = build_menu(self.cfg.middle_menu_items, self.cfg.flows, self,
                                   tools=self.cfg.middle_menu_tools,
-                                  on_tool=self._on_middle_menu_tool)
+                                  on_tool=self._on_middle_menu_tool,
+                                  custom_tools=self.cfg.custom_tools)
                 if menu is None:
                     self.statusBar().showMessage(
                         "中键菜单：没有可运行的菜单项"

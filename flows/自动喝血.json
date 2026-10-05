@@ -1,7 +1,7 @@
 {
   "id": "2066c5f71f7c",
   "name": "自动喝血",
-  "group": "地狱三种",
+  "group": "111",
   "steps": [
     {
       "type": "while",
@@ -113,5 +113,5 @@
   "loops": 1,
   "created_seq": 20,
   "async_run": true,
-  "order": 17
+  "order": 19
 }

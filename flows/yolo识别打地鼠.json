@@ -1,7 +1,7 @@
 {
   "id": "7031a831e7b9",
   "name": "yolo识别打地鼠",
-  "group": "测试使用",
+  "group": "测试",
   "steps": [
     {
       "type": "var",
@@ -93,5 +93,5 @@
   "loops": 1,
   "created_seq": 4,
   "async_run": false,
-  "order": 12
+  "order": 4
 }

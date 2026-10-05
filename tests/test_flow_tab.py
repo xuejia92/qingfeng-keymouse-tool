@@ -930,6 +930,144 @@ class TestModulePanelSearch(_TempPathsMixin, unittest.TestCase):
         self.assertFalse(self.tab._group_wrappers["input"].isHidden())    # 仍展开
 
 
+class TestFlowListSearch(_TempPathsMixin, unittest.TestCase):
+    """左栏底部流程搜索框：实时过滤、展开命中分组、隐藏空分组、清空恢复、无结果提示。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp_enter()
+        self.cfg = AppConfig()
+        self.cfg.flow_groups = ["工作", "娱乐"]
+        self.cfg.collapsed_flow_groups = []      # 全展开，便于观察过滤效果
+        self.cfg.flows = [
+            Flow(name="登录网页", group="工作"),
+            Flow(name="发送邮件", group="工作"),
+            Flow(name="播放音乐", group="娱乐"),
+            Flow(name="零散脚本", group=""),
+        ]
+        self.tab = FlowTab(self.cfg)
+
+    def tearDown(self):
+        self._temp_exit()
+
+    # ---- 观察辅助 ----
+    def _item(self, name):
+        for f in self.cfg.flows:
+            if f.name == name:
+                return self.tab._flow_item(f.id)
+        raise AssertionError(f"没有名为 {name} 的流程")
+
+    def _visible_names(self):
+        names = []
+        for i in range(self.tab.list.topLevelItemCount()):
+            g = self.tab.list.topLevelItem(i)
+            if g.isHidden():
+                continue
+            for j in range(g.childCount()):
+                c = g.child(j)
+                if c.isHidden():
+                    continue
+                data = c.data(0, Qt.UserRole)
+                names.append(self.tab._flow_by_id(data[1]).name)
+        return names
+
+    def _visible_groups(self):
+        out = []
+        for i in range(self.tab.list.topLevelItemCount()):
+            g = self.tab.list.topLevelItem(i)
+            if not g.isHidden():
+                out.append(g.data(0, Qt.UserRole)[1])
+        return out
+
+    # ---- 控件存在性 ----
+    def test_has_search_box_and_clear_button(self):
+        """左栏底部有搜索框与清空按钮，占位文案与右栏模块搜索同款。"""
+        self.assertEqual(self.tab.flow_search_edit.objectName(), "flowSearch")
+        self.assertEqual(self.tab.flow_search_edit.placeholderText(), "搜索流程…")
+        self.assertEqual(self.tab.flow_search_clear_btn.text(), "清空")
+        self.assertFalse(self.tab.flow_search_edit.isClearButtonEnabled())
+
+    # ---- 过滤 ----
+    def test_search_shows_only_matching_flows(self):
+        """搜「邮件」只留下「发送邮件」，其余流程全部隐藏。"""
+        self.tab._on_flow_search_changed("邮件")
+        self.assertEqual(self._visible_names(), ["发送邮件"])
+
+    def test_search_expands_matching_group_hides_empty(self):
+        """命中流程所在分组展开；无命中分组整体隐藏。"""
+        self.tab._on_flow_search_changed("网页")
+        self.assertEqual(self._visible_groups(), ["工作"])
+        self.assertTrue(self.tab._group_item("工作").isExpanded())
+        self.assertTrue(self.tab._group_item("娱乐").isHidden())
+        self.assertTrue(self.tab._group_item("").isHidden())
+        self.assertTrue(self.tab._flow_no_result_label.isHidden())
+
+    def test_search_matches_group_name(self):
+        """搜分组名：该组下所有流程都算命中。"""
+        self.tab._on_flow_search_changed("娱乐")
+        self.assertEqual(self._visible_names(), ["播放音乐"])
+        self.assertEqual(self._visible_groups(), ["娱乐"])
+
+    def test_search_is_case_insensitive(self):
+        """英文流程名不区分大小写。"""
+        self.cfg.flows.append(Flow(name="OpenBrowser", group="工作"))
+        self.tab.refresh_list()
+        self.tab._on_flow_search_changed("openbrowser")
+        self.assertEqual(self._visible_names(), ["OpenBrowser"])
+
+    def test_search_no_result_shows_hint(self):
+        """无匹配时所有分组隐藏，显示「未找到匹配流程」提示。"""
+        self.tab._on_flow_search_changed("不存在xyz")
+        self.assertEqual(self._visible_groups(), [])
+        self.assertFalse(self.tab._flow_no_result_label.isHidden())
+
+    # ---- 清空恢复 ----
+    def test_clear_restores_all(self):
+        """点清空：输入框清空、所有流程与分组恢复显示、无结果提示隐藏。"""
+        self.tab.flow_search_edit.setText("邮件")
+        self.tab._clear_flow_search()
+        self.assertEqual(self.tab.flow_search_edit.text(), "")
+        self.assertEqual(self._visible_names(),
+                         ["登录网页", "发送邮件", "播放音乐", "零散脚本"])
+        self.assertEqual(self._visible_groups(), ["工作", "娱乐", ""])
+        self.assertTrue(self.tab._flow_no_result_label.isHidden())
+
+    def test_empty_keyword_restores(self):
+        """输入清空（退格到空）同样恢复全部显示。"""
+        self.tab.flow_search_edit.setText("邮件")
+        self.tab.flow_search_edit.setText("")
+        self.assertEqual(len(self._visible_names()), 4)
+
+    def test_search_survives_list_rebuild(self):
+        """搜索是过滤态：期间因增删改触发的左栏重建仍保持过滤。"""
+        self.tab._on_flow_search_changed("网页")
+        self.tab.refresh_list()
+        self.assertEqual(self._visible_names(), ["登录网页"])
+
+    def test_search_is_transient_and_preserves_collapse(self):
+        """搜索是临时过滤态：不改变 cfg 的折叠记忆，清空后恢复原折叠状态。"""
+        self.cfg.collapsed_flow_groups = ["工作"]
+        self.tab = FlowTab(self.cfg)                 # 从 cfg 重建，工作 收起
+        self.assertFalse(self.tab._group_item("工作").isExpanded())
+        self.tab._on_flow_search_changed("邮件")
+        self.assertEqual(self.cfg.collapsed_flow_groups, ["工作"])
+        self.assertTrue(self.tab._group_item("工作").isExpanded())   # 搜索时临时展开
+        self.tab._on_flow_search_changed("")         # 清空 -> 恢复
+        self.assertEqual(self.cfg.collapsed_flow_groups, ["工作"])
+        self.assertFalse(self.tab._group_item("工作").isExpanded())  # 仍收起
+
+    def test_toggle_group_ignored_while_searching(self):
+        """搜索中点击分组头不落盘（展开由过滤逻辑接管）。"""
+        self.tab._on_flow_search_changed("网页")
+        self.tab._toggle_group("工作")
+        self.assertEqual(self.cfg.collapsed_flow_groups, [])
+        self.assertTrue(self.tab._group_item("工作").isExpanded())
+
+
 class _ConditionFlowMixin(_TempPathsMixin):
     """构造含完整条件块的流程：if / press / elseif / click / else / wait / endif。"""
 
@@ -2707,6 +2845,147 @@ class TestUndoSteps(_LoopFlowMixin, unittest.TestCase):
         labels = [c.args[0] for c in qmenu.return_value.addAction.call_args_list
                   if c.args]
         self.assertTrue(any("撤销" in lb for lb in labels), labels)
+
+
+class TestFlowDragIntoGroup(_TempPathsMixin, unittest.TestCase):
+    """★ 把流程拖进分组（2026-10-05 用户要求）。
+
+    真实几何下测（`visualItemRect` / `itemAt` 在离屏也能算出来，前提是先 resize+show），
+    所以能覆盖"落在分组头上 / 落在某条流程上"这两种落点翻译。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp_enter()
+        self.cfg = AppConfig()
+        self.cfg.flows = self._make_flows()
+        self.cfg.flow_groups = ["办公", "游戏"]
+        self.cfg.collapsed_flow_groups = []
+        self.tab = FlowTab(self.cfg)
+        self.tree = self.tab.list
+        self.tree.resize(320, 640)
+        self.tree.show()
+        self._app.processEvents()
+
+    def tearDown(self):
+        self.tree.hide()
+        self._temp_exit()
+
+    def _make_flows(self):
+        return [Flow(name="流程A", group="办公"),
+                Flow(name="流程B", group="办公"),
+                Flow(name="流程C", group="游戏"),
+                Flow(name="流程D", group="")]
+
+    def _flow(self, name: str) -> Flow:
+        return next(f for f in self.cfg.flows if f.name == name)
+
+    def _names_under(self, group: str) -> list[str]:
+        item = self.tab._group_item(group)
+        return [_flow_name(item.child(i)) for i in range(item.childCount())]
+
+    def _drop_onto(self, drag_name: str, target_item, pos=None) -> tuple:
+        """模拟把某流程拖到某条目上：返回 drop_target 的翻译结果（并真的落地）。"""
+        self.tree._dragging_id = self._flow(drag_name).id
+        rect = self.tree.visualItemRect(target_item)
+        target = self.tree.drop_target(pos or rect.center())
+        if target is not None:
+            self.tree.entry_dropped.emit(*target)
+        self.tree._dragging_id = None
+        return target
+
+    # ---------- 落地翻译 ----------
+
+    def test_drop_target_on_group_header(self):
+        """落在分组头上 → (流程, 该分组, 无落点流程)。"""
+        target = self.tree.drop_target(
+            self.tree.visualItemRect(self.tab._group_item("办公")).center())
+        self.tree._dragging_id = self._flow("流程D").id
+        target = self.tree.drop_target(
+            self.tree.visualItemRect(self.tab._group_item("办公")).center())
+        self.assertEqual(target, (self._flow("流程D").id, "办公", ""))
+
+    def test_drop_target_on_flow_row_inserts_before_it(self):
+        """落在某条流程上 → 目标是那条流程所在分组，并插到它前面。"""
+        self.tree._dragging_id = self._flow("流程D").id
+        item = self.tab._flow_item(self._flow("流程B").id)
+        target = self.tree.drop_target(self.tree.visualItemRect(item).center())
+        self.assertEqual(target, (self._flow("流程D").id, "办公",
+                                  self._flow("流程B").id))
+
+    def test_drop_target_is_none_when_not_dragging_a_flow(self):
+        self.tree._dragging_id = None
+        self.assertIsNone(self.tree.drop_target(
+            self.tree.visualItemRect(self.tab._group_item("办公")).center()))
+
+    def test_group_headers_are_not_draggable(self):
+        """分组头不该被拖走（拖它等于把整组搬家，没这个语义）。
+
+        断言的是**没有把拖动交给 Qt 的默认实现**（`QTreeWidget.startDrag`），
+        所以补丁要打在基类上——打在 `GroupDropTree` 上等于把被测方法本身换掉。
+        """
+        item = self.tab._group_item("办公")
+        self.tree.setCurrentItem(item)
+        with mock.patch.object(flow_tab_mod.QTreeWidget, "startDrag") as super_drag:
+            self.tree.startDrag(Qt.MoveAction)
+        self.assertFalse(super_drag.called, "分组头不该发起拖动")
+
+    # ---------- 落地效果 ----------
+
+    def test_drop_into_group_moves_and_persists(self):
+        before = self._names_under("办公")
+        with mock.patch.object(AppConfig, "save") as save:
+            self._drop_onto("流程D", self.tab._group_item("办公"))
+        self.assertEqual(self._flow("流程D").group, "办公")
+        self.assertEqual(self._names_under("办公"), before + ["流程D"],
+                         "落到分组头上 = 排在该组末尾")
+        self.assertEqual(self._names_under(""), [])
+        save.assert_called_once()
+
+    def test_drop_before_a_flow_reorders_inside_the_group(self):
+        """★ 组内也能靠拖调整顺序（落在某条流程上 = 插到它前面）。"""
+        self._drop_onto("流程B", self.tab._flow_item(self._flow("流程A").id))
+        self.assertEqual(self._names_under("办公"), ["流程B", "流程A"])
+
+    def test_drop_onto_ungrouped_moves_flow_out(self):
+        """拖到「未分组」= 把流程移出分组。"""
+        self._drop_onto("流程A", self.tab._group_item(""))
+        self.assertEqual(self._flow("流程A").group, "")
+        self.assertEqual(self._names_under(""), ["流程D", "流程A"])
+        self.assertEqual(self._names_under("办公"), ["流程B"])
+
+    def test_drop_into_collapsed_group_expands_it(self):
+        """拖进收起的分组要顺手展开，否则看起来像"流程消失了"。"""
+        self.cfg.collapsed_flow_groups = ["办公"]
+        self.tab.refresh_list()
+        self._drop_onto("流程D", self.tab._group_item("办公"))
+        self.assertNotIn("办公", self.cfg.collapsed_flow_groups)
+        self.assertTrue(self.tab._group_item("办公").isExpanded())
+
+    def test_drop_on_unknown_group_is_ignored(self):
+        """目标分组不存在（比如配置被改坏）→ 不落任何改动。"""
+        self.assertFalse(self.tab.move_flow_to_group(self._flow("流程D").id, "没有这个组"))
+        self.assertEqual(self._flow("流程D").group, "")
+
+    def test_noop_drop_does_not_rebuild(self):
+        """把流程拖回原处（结果顺序没变）→ 不重建、不落盘。
+
+        流程B 本来就在「办公」末尾，落到该分组头上算出来还是原位。
+        """
+        with mock.patch.object(AppConfig, "save") as save:
+            self.assertFalse(self.tab.move_flow_to_group(
+                self._flow("流程B").id, "办公"))
+        self.assertFalse(save.called, "顺序没变就别重建列表（会打断选中）")
+
+    def test_moving_flow_keeps_created_seq(self):
+        """搬组不能动 created_seq —— 那是"按创建顺序排序"的依据。"""
+        seq = self._flow("流程D").created_seq
+        self._drop_onto("流程D", self.tab._group_item("游戏"))
+        self.assertEqual(self._flow("流程D").created_seq, seq)
 
 
 if __name__ == "__main__":

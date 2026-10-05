@@ -1649,6 +1649,33 @@ def clean_tool_keys(raw) -> list[str]:
     return keys
 
 
+CUSTOM_TOOLS_MAX = 24          # 自定义小工具上限（宫格页排得下，太多反而难找）
+
+
+def clean_custom_tools(raw) -> list[dict]:
+    """清洗「小工具」页的自定义程序条目：只认 name/path，空值丢弃、按 path 去重。
+
+    手改 config.json 或旧版残留的奇怪结构都不能让加载失败（2026-10-04 用户要求
+    支持自定义添加电脑里的程序）。
+    """
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[dict] = []
+    seen_paths: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:40]
+        path = str(item.get("path") or "").strip()
+        if not name or not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        out.append({"name": name, "path": path})
+        if len(out) >= CUSTOM_TOOLS_MAX:
+            break
+    return out
+
+
 @dataclass
 class MiddleMenuItem:
     """中键菜单项：鼠标中键弹出的快捷菜单里的一个条目。
@@ -1997,6 +2024,11 @@ class AppConfig:
     middle_menu_tools: list[str] = field(default_factory=list)  # 九宫格工具 key（顺序即宫格顺序，最多 9 个）
     middle_menu_items: list[MiddleMenuItem] = field(default_factory=list)  # 流程菜单项（顺序即菜单顺序）
 
+    # 「🧰 小工具」页的自定义程序（2026-10-04 用户要求）：用户自己加的电脑里的
+    # 程序/快捷方式，与内置小程序一起展示。条目 = {"name": 显示名, "path": 完整路径}，
+    # 结构校验交给 clean_custom_tools（手改 config.json 也不会让加载失败）。
+    custom_tools: list[dict] = field(default_factory=list)
+
     # 左上角「运行中流程」悬浮窗外观（2026-09-27，见 app/running_overlay.py）
     # 字号/字体/颜色分「标题」（分组「名」·…/「流程」行）与「流程名称」（每条流程）两组
     # 各自设置；背景颜色与位置仍是整体（2026-09-27 用户要求分开设置）。
@@ -2249,6 +2281,8 @@ class AppConfig:
         raw_items = data.get("middle_menu_items")
         cfg.middle_menu_items = ([middle_menu_item_from_dict(it) for it in raw_items]
                                  if isinstance(raw_items, list) else [])
+        # 「🧰 小工具」页的自定义程序（旧配置无此键 -> 空列表）
+        cfg.custom_tools = clean_custom_tools(data.get("custom_tools"))
 
         # 左上角「运行中流程」悬浮窗外观（旧配置无这些键 -> 默认值，走上面的自动补写）
         # 旧版共用字号/字体/颜色三个键（run_overlay_font_size/font_family/text_color）：
